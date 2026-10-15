@@ -1,0 +1,565 @@
+"""Bounded adaptive planning loop for T2 requests."""
+from __future__ import annotations
+
+import logging
+import os
+import time
+from typing import AsyncIterator
+
+from runtime import effect_evidence
+
+from .executor import DagExecutor
+from .dispatch import error_attrs
+from .models import (Plan, PlanContext, ReplanDecision, StepResult, StepStatus,
+                     step_call_context)
+from .planning import PlanBuilder, assign_runtime_ids
+from .step_input import bind_step_inputs
+from .task_identity import bind_task_identity
+from . import result_bundle
+from .progress import make_progress, phase_label, step_summary
+from .superseded import drop_superseded_steps
+from .stream_state import (
+    StreamTracker, allow_unary_fallback, emitted_anything, outcome_uncertain,
+)
+from runtime.execution_claim import CLAIM_STRIPPED_SPEECH, ExecutionClaimGate
+from runtime.outcome import all_refused_unsupported, outcome_of_results
+from observability import events as obs_events
+from observability.metrics import metrics
+
+logger = logging.getLogger("planner.loop")
+
+THINKING_FILLER = "我正在根据当前结果继续处理。"
+
+# ── T2 分档预算（M2 P2，母提案 §4.B 档位表 / 子 RFC §4.1）────────────────
+# 原本是单值 env（2 次 / 5s）两档共用：对「查天气→再按结果补建提醒」这种条件依赖链太紧，
+# 对误入 T2 的简单句又白等。改为按 plan.complexity 选档——**放宽的前置条件（Ledger 可
+# 中断长任务 + Verifier 对账假完成）已在 M2 P0/P1 就位**，故此处才敢动预算。
+#
+# Background 档（6+ 次 / 30-300s）**刻意不在这里**：长任务归 Task Ledger 语义（受理即返回、
+# 心跳/取消/预算另有一套），不占请求线程的循环预算。
+#
+# 灰度姿态（子 RFC §4.2）：先落 Complex 3 次/12s 这一档，journeys regression 15/15 且
+# P95 增量 ≤10% 才继续放到 3-4 次/15s。任一红灯回退上一档 = 改一行 env。
+_TIERS = {
+    "simple": (2, 8000),        # Interactive：simple 误入 T2 的兜底（escalate/replan）
+    "adaptive": (3, 12000),     # Complex：多意图、条件依赖链
+}
+_DEFAULT_TIER = "simple"
+
+
+def tier_budget(complexity: str) -> tuple[int, int]:
+    """按复杂度取 (max_iters, budget_ms)，env 可逐档覆盖（评测钉档用）。
+
+    覆盖优先级：全局 env（`PLANNER_LOOP_MAX_ITERS`/`_BUDGET_MS`，两档同时生效——
+    保留它是为了老配置与一键回退不失效）> 分档 env（`..._COMPLEX`）> 内置档位。
+    """
+    iters, budget = _TIERS.get(complexity or "", _TIERS[_DEFAULT_TIER])
+    if complexity == "adaptive":
+        iters = _env_int("PLANNER_LOOP_MAX_ITERS_COMPLEX", iters)
+        budget = _env_int("PLANNER_LOOP_BUDGET_MS_COMPLEX", budget)
+    return (_env_int("PLANNER_LOOP_MAX_ITERS", iters),
+            _env_int("PLANNER_LOOP_BUDGET_MS", budget))
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, "")
+    if raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def summarize(result: StepResult, *, intent: str = "",
+              slots: dict | None = None) -> dict:
+    """Keep only bounded, decision-relevant observation fields.
+
+    `slots`（W04）：这一步**执行时**的槽位（slot_refs 已解析）。再规划的判重键是
+    `(intent, slots)`——不带它，「已查深圳天气」会让「广州天气」也被当成重复。
+    只收标量值（槽位本来就是 `dict[str, str]`），不截断：截了就和执行侧的指纹对不上。
+    """
+    # CA2-10：回执与证据是观测面，不是规划输入——模型看到的观测与引入它们之前逐字一致。
+    data = {k: v for k, v in dict(result.data or {}).items()
+            if k not in (effect_evidence.RECEIPT, effect_evidence.EVIDENCE)}
+    if len(data) > 12:
+        data = dict(list(data.items())[:12])
+    observation = {
+        "step_id": result.step_id,
+        "status": result.status.value,
+        "data": data,
+        "speech": (result.speech or "")[:160],
+        "error": (result.error or "")[:120],
+    }
+    if intent:
+        observation["intent"] = intent
+    if slots is not None:
+        observation["slots"] = {
+            str(k): v for k, v in dict(slots).items()
+            if isinstance(v, (str, int, float, bool))}
+    if data.get("retry_same_intent") is True:
+        observation["retry_same_intent"] = True
+    # 批 7 ①：Agent 的声明式拒绝要有自己的格——`_refused` 埋在 data 里第 13 位就被上面截掉了，
+    # 而 replan 的「同域不再换能力再试」判据读的正是它。
+    if (result.data or {}).get("_refused"):
+        observation["refused"] = (result.data or {})["_refused"]
+    # CA2-17 S2 I3：第三方结果标 untrusted，字符串值截断——它们进的是再规划提示，不是槽引用
+    # （引用按执行器手里的原始结果解析，与这份观测无关）。
+    if getattr(result, "source_trust", "") == THIRD_PARTY:
+        observation["untrusted"] = True
+        observation["data"] = _cap_strings(observation["data"])
+        observation["speech"] = observation["speech"][:_UNTRUSTED_TEXT_MAX]
+    return observation
+
+
+THIRD_PARTY = "third_party"
+#: 第三方观测里单个字符串的上限、递归深度上限。
+_UNTRUSTED_TEXT_MAX = 120
+_UNTRUSTED_DEPTH = 4
+
+
+def _cap_strings(value, depth: int = 0):
+    if isinstance(value, str):
+        return value[:_UNTRUSTED_TEXT_MAX]
+    if depth >= _UNTRUSTED_DEPTH:
+        return value if isinstance(value, (int, float, bool)) or value is None else "…"
+    if isinstance(value, dict):
+        return {str(k)[:_UNTRUSTED_TEXT_MAX]: _cap_strings(v, depth + 1) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_cap_strings(v, depth + 1) for v in value]
+    return value
+
+
+class LoopController:
+    def __init__(self, planner, executor, aggregator, suspend_fn,
+                 max_iters: int | None = None, budget_ms: int | None = None,
+                 observation_limit: int = 6, clock=None, stream_fn=None):
+        self.planner = planner
+        self.executor = executor
+        self.aggregator = aggregator
+        self.suspend = suspend_fn
+        # 显式传参（测试/特殊接线）恒定优先；缺省则每轮按 plan.complexity 选档（M2 P2）。
+        # 保留 self.max_iters/budget_ms 属性作为「当轮生效值」——既有测试与日志都读它。
+        self._pinned_iters = max_iters
+        self._pinned_budget = budget_ms
+        self.max_iters, self.budget_ms = self._budget_for(_DEFAULT_TIER)
+        self.observation_limit = observation_limit
+        self.clock = clock or time.monotonic
+        self._stream = stream_fn
+
+    def _budget_for(self, complexity: str) -> tuple[int, int]:
+        iters, budget = tier_budget(complexity)
+        return (self._pinned_iters if self._pinned_iters is not None else iters,
+                self._pinned_budget if self._pinned_budget is not None else budget)
+
+    async def run(self, goal: str, initial_plan: Plan | None, agents: list,
+                  ctx: PlanContext, user_text: str,
+                  seed_results: list[StepResult] | None = None,
+                  working_set=None,
+                  show_process: bool = False, thinking: bool = False,
+                  settle=None,
+                  superseded: dict[str, str] | None = None,
+                  ) -> AsyncIterator[dict]:
+        """`settle(steps, results)`：**完成轮**（不含挂起）合成 final 之前的收口回调（批 8 ①）。
+
+        engine 的 E 路径在聚合前做三件事——清续接挂起、写焦点、补挂起软提醒——而 T2 的两条
+        出口在本函数之后直接 `return`，一件都没做：候选批、活动路线（continuity T63/T69：两次
+        `navigate` 之后「取消导航」答「当前没有正在进行的导航」）、任务帧全部丢失，确认续接进
+        T2 的挂起躺到 TTL。回调拿到的是**本轮真正执行过的全部步**（初计划 + 每个再规划批）
+        与全部结果；挂起路径不调它——挂起轮的焦点由 `suspend_fn`（engine `_suspend`）自己登记。
+
+        `superseded`（`{旧值: 用户的新值}`，判据在 `orchestrator.cloud.superseded`）：这一次是补槽续接、用户的答案替换了
+        挂起步里原来的值。再规划出的步槽值里仍含旧值的确定性丢掉（连同依赖它们的下游），全丢光就收场——
+        修前（`4438ea6b` 真栈 RS39）续接导航之后又按旧 goal 去搜「云岚国际中心」、再挂一条追问。"""
+        results = list(seed_results or [])
+        executed_steps: list = []  # 本轮跑过的全部步（初计划 + 每个再规划批），供 settle 抽焦点
+        n_seed = len(results)      # 种子（确认续接带入，上轮已播报）不进挂起前缀
+        spoken: set[int] = set()   # 已流式播报过的结果（id()）——挂起前缀不再复读
+        initial_steps = {
+            step.id: step for step in (getattr(initial_plan, "steps", []) or [])
+        }
+        observations = [
+            summarize(r,
+                      intent=(initial_steps[r.step_id].intent
+                              if r.step_id in initial_steps else ""),
+                      slots=(initial_steps[r.step_id].slots
+                             if r.step_id in initial_steps else None))
+            for r in results
+        ][-self.observation_limit:]
+        # M2 P2 分档：本轮预算按计划复杂度取（adaptive=Complex 档、其余=Interactive 档）
+        complexity = getattr(initial_plan, "complexity", "") or _DEFAULT_TIER
+        self.max_iters, self.budget_ms = self._budget_for(complexity)
+        deadline = self.clock() + self.budget_ms / 1000.0
+        current = initial_plan
+        # 安全依据与本轮 user_text 分轨：补槽/确认续接时 user_text 是“深圳/拿铁/确认”，
+        # 只有初始计划/engine 注入的任务起点原话有权决定 replan 能否产生副作用。
+        safety_origin_text = str(
+            getattr(initial_plan, "safety_origin_text", "")
+            or getattr(ctx, "safety_origin_text", "")
+            or ""
+        )
+        replans = 0
+        exhausted = False
+        batch_local_ids: dict[str, str] = {}   # 本批 {运行时 ID: 模型的局部 ID}（R3-06，只供 t2.iter 观测）
+
+        def _prior(sr):
+            """本轮新完成且未播报的结果，供挂起 final 前缀简报（旅程 A1-4：
+            adaptive 先查天气再补建 reminder，追问时刻前用户必须先听到天气结论）。"""
+            return [r for r in results[n_seed:]
+                    if id(r) not in spoken and r is not sr]
+
+        # 即时反馈：复杂任务由过程区承载（不再用 filler speech，避免气泡刷屏 + 被 TTS 念出）；
+        # 非过程区路径（如 reactive 非复杂）保留原 filler 话术。
+        if not show_process:
+            yield {"kind": "speech", "delta": THINKING_FILLER}
+
+        while True:
+            if current is None:
+                if replans >= self.max_iters or self.clock() >= deadline:
+                    exhausted = self.clock() >= deadline
+                    break
+                # 评审三轮 R3-06：本轮已知的全部步骤 ID（结果 / 种子 / 初计划 / 跑过的批）——再规划批的运行时 ID 不许与它们撞
+                taken = ({r.step_id for r in results} | {s.id for s in executed_steps}
+                         | set(initial_steps))
+                batch_tag = f"t{replans + 1}"
+                try:
+                    decision = await self.planner.replan(
+                        goal,
+                        observations[-self.observation_limit:],
+                        agents,
+                        ctx,
+                        granted_permissions=ctx.granted_permissions,
+                        working_set=working_set,
+                        # T2 知识继承：再规划带上初规划实际注入的 skill 名单（plan.skills）
+                        skill_names=list(getattr(initial_plan, "skills", []) or []),
+                        # 同款范例继承（M5 P1）
+                        exemplar_names=list(getattr(initial_plan, "exemplars", []) or []),
+                        # 初规划自报的 adaptive 是「第二阶段等看结果再补」的**声明**；
+                        # **只在第一次 replan 上**认这个声明——那时第二阶段还一步都没出，
+                        # 收场才叫自相矛盾。后续 replan 返回 done 是 adaptive 的**正常收尾**，
+                        # 在那儿也纠偏等于给每个 adaptive 请求白加一次 LLM 往返。
+                        # 续接的是**再规划出来的一批**（`replan_batch`）时同理：它本身就是第二阶段。
+                        adaptive=(getattr(initial_plan, "complexity", "") == "adaptive"
+                                  and replans == 0
+                                  and not getattr(initial_plan, "replan_batch", False)),
+                        taken_ids=taken, batch_tag=batch_tag,
+                    )
+                except Exception:
+                    # 静默 break 是有意的（再规划失败就收场，不把异常抛给用户），但
+                    # **它把接口层面的错误也咽了**：2026-08-10 给 replan 加 `adaptive`
+                    # 形参时，三个测试替身的签名没跟上 → TypeError → 这里 break，
+                    # 表现成「循环少走了一轮」而不是「调用签名不对」，三条断言红在
+                    # 八竿子打不着的 `KeyError: 'prior'` 上。留个 exception 日志：
+                    # 收场可以静默，**原因不该静默**。
+                    logger.exception("Replan call failed; ending the loop")
+                    break
+                replans += 1
+                if getattr(decision, "blocked", None):
+                    # 评审二轮 R5：依赖被拒诉求再试的下游步没执行——留一条可查的观测，不静默。
+                    try:
+                        await obs_events.get_emitter("cloud").emit_span(
+                            ctx.trace_id, "t2.blocked",
+                            attrs={"intents": ",".join(decision.blocked),
+                                   "replans": replans})
+                    except Exception:
+                        pass
+                if decision.done or not decision.steps:
+                    break
+                fresh_steps = list(decision.steps)
+                if superseded:
+                    fresh_steps, stale = drop_superseded_steps(fresh_steps, superseded)
+                    if stale:
+                        logger.info("T2 replan dropped step(s) %s still targeting a value the user replaced: %s",
+                                    stale, sorted(superseded))
+                        try:
+                            await obs_events.get_emitter("cloud").emit_span(
+                                ctx.trace_id, "t2.superseded",
+                                attrs={"dropped": ",".join(stale), "replans": replans})
+                        except Exception:
+                            pass
+                    if not fresh_steps:
+                        break
+                kept, blocked = PlanBuilder._filter_safety_origin_side_effect_steps(
+                    fresh_steps, safety_origin_text,
+                )
+                if blocked:
+                    logger.warning(
+                        "Question-shaped utterance replanned into side-effecting "
+                        "step(s) %s; dropping before dispatch",
+                        [step.intent for step in blocked],
+                    )
+                if not kept:
+                    break
+                # 评审三轮 R3-06 兜底：规划器本该已经换成运行时 ID；不认识标签的（替身 / 旧实现）交回来的局部 ID
+                # 若与本轮已知 ID 撞了，这里只改撞名的那些——否则执行器按 `s.id not in done` 把新步当成已完成跳过。
+                collided = assign_runtime_ids(kept, taken, batch_tag, only_colliding=True)
+                if collided:
+                    logger.warning("T2 replan batch reused step id(s) %s; renamed to %s",
+                                   sorted(collided.values()), sorted(collided))
+                decision = ReplanDecision(
+                    done=False,
+                    steps=kept,
+                    skill_effects=list(decision.skill_effects),
+                    local_ids={**dict(getattr(decision, "local_ids", {}) or {}), **collided},
+                )
+                batch_local_ids = dict(decision.local_ids)
+                current = decision.to_plan(
+                    goal, safety_origin_text=safety_origin_text,
+                )
+                # W16-b：再规划步的起点原话是任务的（续接轮里 ctx.raw_text 是槽答案，不是它们从哪来）
+                for step in current.steps:
+                    step.origin_text = safety_origin_text
+                current.origin_exchange_id = str(
+                    getattr(initial_plan, "origin_exchange_id", "") or
+                    (getattr(ctx, "task_identity", None) or {}).get("origin_exchange_id") or
+                    (getattr(ctx, "request_id", "") if getattr(ctx, "raw_text", "") == safety_origin_text else ""))
+                bind_step_inputs(current, origin_exchange_id=current.origin_exchange_id)
+                bind_task_identity(current, ctx, continuation=True)
+                result_bundle.register_plan(ctx, current)
+                # T2 知识继承贯通挂起链（2026-07-27 评审三批）：to_plan 新建的 Plan
+                # skills=[]——若这个再规划步 NEED_SLOT/NEED_CONFIRM 挂起，loop 传给
+                # suspend 的正是 current，序列化空 skills → 恢复后再规划失忆。
+                current.skills = list(getattr(initial_plan, "skills", []) or [])
+                current.exemplars = list(getattr(initial_plan, "exemplars", []) or [])
+
+            done_seed = {result.step_id: result for result in results}
+            batch_start = len(results)     # 批 7 ①：这一批的结果从这里开始
+            executed_steps.extend(current.steps)
+
+            # T2 流式直通：单步 cloud agent 尝试流式，yield speech delta。
+            # 与 engine.py T1 快路径同模式：流式成功则 yield delta 并收集结果，
+            # 失败回退到 executor unary 路径。
+            #
+            # ⚠ 判定不在这里（B5 §4）：流出面状态与三条决策（能不能回退 / 结果确不
+            # 确定 / 流出过没有）统一由 `stream_state` 提供，D0 与本处共用同一份。
+            # B1 修的那个 bug（`elif streamed:` 永不可达 → 部分输出后 unary 重跑：
+            # 话术播两遍、Agent 调两遍、action 已发出时重复副作用）活在**状态推进**
+            # 里而不是判定函数里，所以推进也必须共享——见 `StreamTracker` 的注释。
+            stream = StreamTracker()
+            if (self._stream and len(current.steps) == 1
+                    and current.steps[0].kind == "agent"
+                    and current.steps[0].deployment == "cloud"
+                    # M0a-3 同款（engine D0 有、这里曾漏）：capability 声明 require_confirm
+                    # 的步不走流式直通——流中 action 会绕开 executor._enforce_capability_confirm
+                    # 兜底闸直接放行到 HMI；走 executor 路径让中央闸生效。
+                    and not current.steps[0].require_confirm
+                    # CA2-09：确认恢复的那一步（Agent 动态要求确认，未声明 require_confirm）也不走流式——
+                    # 执行点复核只在 executor 路径上，绕过它就把旧确认用到别的参数上。
+                    and (current.steps[0].meta or {}).get("confirmed") != "true"):
+                step = current.steps[0]
+                if hasattr(self.executor, '_resolve_slot_refs'):
+                    # ⚠ **ctx 必须传**（2026-08-16，Q12 批发现）：此前这里只传两个参，
+                    # 于是挂在这个函数上、依赖 ctx 的东西在 T2 单步流式这条路上
+                    # **全部静默不生效**——跨轮门店锚定（`focus_places`）、城市补全、
+                    # 本批的槽值保真都够不着。D0 那条同族缺陷 2026-08-13 修过一次
+                    # （engine.py:543 的注释就写着「新增挂点必须枚举全部执行路径」），
+                    # **那次只补了 D0 这一条路**。同一形态第三次：
+                    # 「改遍了」和「发现了」是两件事（Q13 卡头那句话的又一例）。
+                    self.executor._resolve_slot_refs(step, done_seed, ctx)
+                timeout = step.latency_budget_ms / 1000.0
+                final_sr = None
+                final_errors: dict = {}   # 步骤 span 的错误码 / 拒绝原因（与调度层同一份 `error_attrs`）
+                response_violation: StepResult | None = None
+                stream_start = self.clock()
+                # 评审二轮 R4：谈话步的增量先过句级闸（与 engine D0 同一条 `ExecutionClaimGate`）。
+                gate = (ExecutionClaimGate()
+                        if bool(getattr(step, "response_only", False)) else None)
+                try:
+                    async for kind, payload in self._stream(
+                            step.endpoint, step.intent, step.slots,
+                            step_call_context(step, ctx), step.meta,   # W16-b
+                            timeout=timeout, context_scopes=step.context_scopes):
+                        if kind == "speech":
+                            if gate is not None:
+                                payload = gate.feed(payload)
+                            stream.on_speech(payload)
+                            if payload:
+                                yield {"kind": "speech", "delta": payload}
+                        elif kind == "action":
+                            if bool(getattr(step, "response_only", False)):
+                                response_violation = self.executor._enforce_response_only(
+                                    step,
+                                    StepResult(
+                                        step_id=step.id,
+                                        status=StepStatus.OK,
+                                        actions=[{"type": "stream_action"}],
+                                    ),
+                                )
+                                continue
+                            stream.on_action()
+                            yield {"kind": "action", "action": payload}
+                        elif kind == "final":
+                            final_sr = DagExecutor._to_result(step.id, payload)
+                            final_errors = error_attrs(payload)
+                except Exception as exc:
+                    logger.warning(
+                        "T2 stream failed for %s, falling back: %s",
+                        step.id, exc)
+                    final_sr = None
+                if gate is not None:
+                    tail = gate.flush()
+                    stream.on_speech(tail)
+                    if tail:
+                        yield {"kind": "speech", "delta": tail}
+                    if gate.removed:
+                        logger.warning("T2 response-only stream held %d execution claim "
+                                       "sentence(s) before release (%s)", gate.removed, step.intent)
+
+                if response_violation is not None:
+                    final_sr = response_violation
+                elif (final_sr is not None
+                      and bool(getattr(step, "response_only", False))):
+                    final_sr = self.executor._enforce_response_only(step, final_sr)
+                # 评审三轮 R3-04：发布即权威（与 engine D0 同一条）——闸拦过东西，这一步的话术就是闸放出去的那份
+                if (gate is not None and gate.removed and final_sr is not None
+                        and final_sr.status == StepStatus.OK):
+                    final_sr.speech = gate.released or CLAIM_STRIPPED_SPEECH
+
+                if final_sr is not None:
+                    stream.on_final()
+                    # M2 Verifier：T2 流式直通同样不经 executor._exec_step，显式对账
+                    # （与 engine D0 同款；allow_retry=False——话术已流出，不重跑）。
+                    if hasattr(self.executor, "_verify_outcome"):
+                        final_sr = await self.executor._verify_outcome(
+                            step, final_sr, ctx, allow_retry=False)
+                    if hasattr(self.executor, "_stamp_source"):
+                        final_sr = self.executor._stamp_source(step, final_sr)
+                    # T2 流式直通也补 step.agent span（与 engine.py D0 一致，否则
+                    # 单步 cloud agent 在 T2 循环里缺这一跳——trace 丢失该 Agent 身份，
+                    # NEED_CONFIRM/NEED_SLOT 挂起时尤其明显）。
+                    _pending = final_sr.status in (
+                        StepStatus.NEED_CONFIRM, StepStatus.NEED_SLOT)
+                    try:
+                        await obs_events.get_emitter("cloud").emit_span(
+                            ctx.trace_id, f"step.agent:{step.agent_id}",
+                            status="wait" if _pending else (
+                                "ok" if final_sr.status == StepStatus.OK else "err"),
+                            duration_ms=(self.clock() - stream_start) * 1000,
+                            attrs={"intent": step.intent, "agent_id": step.agent_id,
+                                   "kind": "agent", "deployment": "cloud",
+                                   "via": "stream",
+                                   # W16-b 可观测（与 dispatcher 同一格）：换了起点原话才出现
+                                   **({"raw_text_from": "origin"}
+                                      if step_call_context(step, ctx) is not ctx else {}),
+                                   # R3-04：闸的首次放行等待与拦下处数（同 engine D0 那一格）
+                                   **({"claim_gate_hold_ms": int(round(gate.first_hold_ms)),
+                                       "claim_gate_removed": int(gate.removed)}
+                                      if gate is not None and gate.first_hold_ms is not None else {}),
+                                   **final_errors})
+                    except Exception:
+                        pass
+                    results.append(final_sr)
+                    if stream.spoke:
+                        spoken.add(id(final_sr))   # 话术已流出，前缀不复读
+                    observations.append(summarize(
+                        final_sr, intent=step.intent, slots=step.slots))
+                    observations = observations[-self.observation_limit:]
+                    if show_process and final_sr.status == StepStatus.OK:
+                        yield make_progress(
+                            "execute", phase_label(step.intent),
+                            summary=step_summary(step, final_sr),
+                            status="done", step_id=step.id)
+                    if final_sr.status in (
+                            StepStatus.NEED_CONFIRM, StepStatus.NEED_SLOT):
+                        yield await self.suspend(
+                            final_sr, results, current, ctx,
+                            prior=_prior(final_sr))
+                        return
+                elif emitted_anything(stream.state):
+                    # 已经流出过输出但 final 丢了（流断 / 超时 / Agent 崩）。
+                    # **不许 unary 重跑**——只有 NO_OUTPUT 才允许回退。
+                    if outcome_uncertain(stream.state, stream.got_final):
+                        # action 已经发给用户了，而 final 没回来：这一步的**结果不确定**，
+                        # 既不能当成功也不能重试（重试 = 重复副作用）。B5 §4.2 把 B1 留的
+                        # 那笔账还上——查一次世界状态再定话术，并打指纹防 replan 重发。
+                        uncertain_sr = await self.executor.stream_uncertain_result(
+                            step, ctx)
+                        if hasattr(self.executor, "_stamp_source"):
+                            uncertain_sr = self.executor._stamp_source(step, uncertain_sr)
+                        results.append(uncertain_sr)
+                        observations.append(summarize(
+                            uncertain_sr, intent=step.intent, slots=step.slots))
+                    else:
+                        # 仅话术已流出：合成空结果避免重跑与复读（既有语义）。
+                        empty_sr = StepResult(
+                            step_id=step.id, status=StepStatus.OK, speech="")
+                        if hasattr(self.executor, "_stamp_source"):
+                            empty_sr = self.executor._stamp_source(step, empty_sr)
+                        results.append(empty_sr)
+                        observations.append(summarize(
+                            empty_sr, intent=step.intent, slots=step.slots))
+                    observations = observations[-self.observation_limit:]
+
+            # 回退到 unary：**零输出且没拿到 final** 才允许（B5 §4 共享判定）。
+            # 两个条件缺一不可——Agent 一句话没说直接给 final 时状态仍是 NO_OUTPUT，
+            # 那种情况已经有结果了，不该再跑一遍。
+            if not stream.got_final and allow_unary_fallback(stream.state):
+                async for step_result in self.executor.run(
+                        current, ctx, done=done_seed):
+                    results.append(step_result)
+                    step = next((s for s in current.steps
+                                 if s.id == step_result.step_id), None)
+                    observations.append(summarize(
+                        step_result, intent=step.intent if step is not None else "",
+                        slots=step.slots if step is not None else None))
+                    observations = observations[-self.observation_limit:]
+                    if show_process and step_result.status == StepStatus.OK:
+                        if step is not None:
+                            yield make_progress(
+                                "execute", phase_label(step.intent),
+                                summary=step_summary(step, step_result),
+                                status="done", step_id=step.id)
+                    if step_result.status in (
+                            StepStatus.NEED_CONFIRM, StepStatus.NEED_SLOT):
+                        yield await self.suspend(
+                            step_result, results, current, ctx,
+                            prior=_prior(step_result))
+                        return
+
+            try:
+                await obs_events.get_emitter("cloud").emit_span(
+                    ctx.trace_id,
+                    "t2.iter",
+                    attrs={
+                        "replans": replans,
+                        "results": len(results),
+                        # R3-06：这一批的运行时 ID ← 模型给的局部 ID（「r1 撞上一批 r1」从此在 trace 上看得见）
+                        **({"local_ids": ",".join(f"{rid}<{lid}" for rid, lid in sorted(batch_local_ids.items()))}
+                           if batch_local_ids else {}),
+                    },
+                )
+            except Exception:
+                pass
+            current = None
+            batch_local_ids = {}
+            if self.clock() >= deadline:
+                exhausted = True
+                break
+            # 批 7 ①：这一批**全部**是「能力做不到」的声明式拒绝 ⇒ 该诉求有终态，不再 replan。
+            # 真栈 RS10 第 3 趟（`cc331315`）：reminder 诚实拒绝之后 loop 又规划出 `reminder.cancel`，
+            # 用户听到「提醒方面也没找到」——一句诚实拒绝被下一轮的换能力再试盖掉。
+            # 判据一份（`runtime.outcome`，与终态账本同源）；混合批照旧回到 replan。
+            if all_refused_unsupported(results[batch_start:]):
+                logger.info("T2 loop: batch is all unsupported refusals; not replanning")
+                break
+
+        elapsed_ms = (self.clock() - (deadline - self.budget_ms / 1000.0)) * 1000
+        metrics.record_intent("t2_loop", elapsed_ms, not exhausted)
+        logger.info("T2 loop done: tier=%s replans=%d/%d exhausted=%s elapsed=%.0fms",
+                    complexity, replans, self.max_iters, exhausted, elapsed_ms)
+
+        # 批 8 ①：完成轮收口（清续接挂起 / 写焦点）在合成之前，与 E 路径同一顺序；
+        # 上面所有挂起出口都已 `return`，走到这里的只有完成轮。
+        if settle is not None:
+            await settle(list(executed_steps), list(results))
+        if show_process:
+            yield make_progress("synthesize", "整理结果",
+                                summary="合并各步结果生成回复", status="start")
+        final = await self.aggregator.compose(
+            user_text or goal, results, thinking=thinking)
+        if exhausted and not final.get("follow_up"):
+            final["follow_up"] = "要我继续吗？"
+        # W13 终态账本：T2 的执行类 final 也按结果集算（engine `run()` 出口统一发 span）
+        yield result_bundle.with_results(
+            {"kind": "final", **final, "_outcome": outcome_of_results(results)}, ctx, results)
+

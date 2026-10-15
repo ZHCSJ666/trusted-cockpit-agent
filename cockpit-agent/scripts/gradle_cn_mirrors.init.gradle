@@ -1,0 +1,122 @@
+// 国内 Maven 镜像前置（仅本机构建；build_mobile.ps1 经 -I 传入，CI 海外 runner 不用）。
+// 背景（2026-08-25 实测）：repo.maven.apache.org 本网络 DNS 不可达（GBK 乱码报「未知的
+// 名称或服务」），Maven Central 上的 org.jetbrains.compose/com.composables 等包拉不动；
+// dl.google.com 反而 3.5MB/s。init script 注册的 allprojects 回调先于工程自身
+// build.gradle 求值，镜像仓库因此排在 google()/mavenCentral() 之前——命中即止，
+// 命不中再落回原仓库（不删原仓库，只前置）。
+// ⚠ 本文件是 .gradle：必须无 BOM（Groovy 解析器见 BOM 即报 Unexpected character）。
+
+def MIRRORS = [
+    'https://maven.aliyun.com/repository/central',
+    'https://maven.aliyun.com/repository/google',
+    'https://maven.aliyun.com/repository/gradle-plugin',
+    'https://mirrors.cloud.tencent.com/nexus/repository/maven-public/',
+]
+
+// ── 实测在镜像上「有 POM 却拿不到 artifact」的 JitPack 坐标（B3 实测，2026-09-01）──
+// expo-blur 依赖 com.github.Dimezis:BlurView:version-3.1.0（JitPack 专属坐标形态
+// com.github.<GitHub 用户名>）。首次重建报
+//     Could not find BlurView-version-3.1.0.jar ... Searched in: <腾讯镜像>/....aar, ....jar
+// 而 **android/build.gradle 里那条 `maven { url 'https://www.jitpack.io' }` 根本没被尝试**。
+// 逐条取证（curl 实测，不是猜）：
+//   · 腾讯镜像该路径 **GET 200**（.pom 1121B / .aar 26973B application/zip），
+//     **HEAD 404**——nexus 对两个动词行为不一致；
+//   · gradle 缓存里**只有 .pom 没有 .aar**（说明元数据下成功、artifact 下失败）；
+//   · jitpack.io 上 .aar GET 200 / 26973B，可达。
+// 机制：Gradle 一旦从某个仓库解析到模块**元数据**，该模块的 artifact 就**只从那个仓库找**
+// （不跨仓库混合）⇒ 镜像的 artifact 存在性探测判否之后，不会回落到后面的 jitpack。
+// ⚠ 只排这一个 group、不排 `com.github.*` 全族：缓存里的 com.github.bumptech.glide 与
+//    com.github.penfeizhou.android.animation **在镜像上是好的**（artifact 都在），把它们
+//    赶去 jitpack 反而要现场构建。判据是「实测在镜像上坏了」，不是「名字长得像 JitPack」
+//    ——再撞到同形态的坐标就往这个列表里加一行，并把取证写进坑账。
+def MIRROR_EXCLUDED_GROUPS = [
+    'com.github.Dimezis',
+]
+
+def addMirrors = { repoHandler ->
+    MIRRORS.each { u ->
+        repoHandler.maven {
+            url u
+            content { c -> MIRROR_EXCLUDED_GROUPS.each { g -> c.excludeGroup(g) } }
+        }
+    }
+}
+
+allprojects {
+    buildscript {
+        repositories { addMirrors(delegate) }
+    }
+    repositories { addMirrors(delegate) }
+}
+
+// ── 给「老式社区库」补上根工程的 SDK 版本 ext（M3-3 实测，2026-08-27）──
+// RN 生态里 2023 年前后的库普遍写成
+//     compileSdkVersion getExt('compileSdkVersion', 33)      // 或 safeExtGet(...)
+// 也就是「根工程告诉我用哪个，没说就用我写死的那个」。而 **Expo SDK 57 生成的根
+// build.gradle 不再设这些 ext**（坑账 §9.16），于是它们**静默回落到自己那个陈旧默认值**
+// ——compileSdk 33 撞上 RN 0.86 拉进来的 androidx（要求 34+），报的是
+// 「Dependency ... requires compile against version 34 or later」，看起来像那个库跟
+// androidx 不兼容，其实只是没人告诉它该用哪个 SDK。
+// ⇒ 在这里把根工程的 ext 补齐。这不是给某个库开的后门：**任何按约定读根 ext 的库都会受益**，
+// 且值来自本机真实安装的 SDK（build_mobile.ps1 用 -P 传入），不是又一处写死。
+// 注意作用域：只设 rootProject 的 ext，各库自己显式写死的版本不受影响（那是它们的选择）。
+gradle.projectsLoaded { g ->
+    def root = g.rootProject
+    def put = { String k, Object v ->
+        if (v != null && !root.ext.has(k)) { root.ext.set(k, v) }
+    }
+    def asInt = { Object v -> v == null ? null : (v.toString().isInteger() ? v.toString().toInteger() : null) }
+    put('compileSdkVersion', asInt(root.findProperty('legacyCompileSdk')))
+    put('targetSdkVersion',  asInt(root.findProperty('legacyTargetSdk')))
+    put('minSdkVersion',     asInt(root.findProperty('legacyMinSdk')))
+    put('buildToolsVersion', root.findProperty('legacyBuildTools'))
+}
+
+settingsEvaluated { settings ->
+    settings.pluginManagement.repositories { addMirrors(delegate) }
+    try {
+        settings.dependencyResolutionManagement.repositories { addMirrors(delegate) }
+    } catch (Throwable ignored) {
+        // 老 Gradle 无此 API 时静默跳过
+    }
+}
+
+// ── react-native-audio-api 的 Windows 硬编码 bash 路径（M2-1 实测，2026-08-26）──
+// 它的 downloadPrebuiltBinaries 任务在 Windows 分支写死了 Git Bash 的**绝对路径**
+// （C 盘的 Program Files\Git\usr\bin\bash.exe，见
+// node_modules/react-native-audio-api/android/build.gradle:320-329）。
+// 本机 Git 装在 D 盘 ⇒「A problem occurred starting process」，而 preBuild 依赖该
+// 任务，整个构建停在这（首次实测 BUILD FAILED in 2m18s）。
+// 与 CN 镜像同性质——**本机环境形态与库的假设不符**，所以落同一份 init script，
+// 不改 node_modules（它是镜像产物，改了每次同步都要重做）。真实路径由
+// build_mobile.ps1 探测后经 -PaudioApiBashPath 传入；CI（Linux runner）走库的
+// 非 Windows 分支，不经过本文件。
+allprojects { proj ->
+    proj.afterEvaluate {
+        if (proj.name != 'react-native-audio-api') return
+        def bashPath = proj.findProperty('audioApiBashPath')
+        if (!bashPath) return
+        proj.tasks.matching { it.name == 'downloadPrebuiltBinaries' }.configureEach { t ->
+            // 只换 executable，args（脚本路径 / android / skipffmpeg）原样保留
+            t.executable = bashPath.toString()
+            // 换对 bash 还不够（第二轮实测）：Exec 继承的是 gradle 进程的 Windows PATH，
+            // 里面没有 Git 的 usr/bin ⇒ 脚本里的 rm/mkdir/unzip 全 command not found、
+            // exit 127；curl 则撞上 System32 那个原生版，它不认 MSYS 路径，写 -o 目标
+            // 报 curl(23)。把 Git 的 usr/bin 与 mingw64/bin **前置**到 PATH 两个都治。
+            def gitRoot = new File(bashPath.toString()).parentFile.parentFile.parentFile
+            def msysPath = [new File(gitRoot, 'usr/bin'), new File(gitRoot, 'mingw64/bin')]
+                    .collect { it.absolutePath }.join(File.pathSeparator)
+            def env = new LinkedHashMap<String, Object>(t.environment)
+            // Windows 上这个键实际叫 Path；按大小写不敏感找出真名再覆盖，别新造一个
+            def pathKey = env.keySet().find { it.toString().equalsIgnoreCase('path') } ?: 'PATH'
+            env.put(pathKey, msysPath + File.pathSeparator + (env.get(pathKey) ?: ''))
+            t.setEnvironment(env)
+            proj.logger.lifecycle("[init] audio-api downloadPrebuiltBinaries bash -> " + bashPath)
+        }
+    }
+}
+
+// ── onnxruntime-react-native 的 Gradle 9 兼容垫片搬去了 gradle_rn_compat.init.gradle（2026-09-20）──
+// 它不是「本机 / 网络形态」的事，CI 的 Linux runner 一样撞（G-05 首次 dispatch：`Could not get unknown
+// property 'VersionNumber'`，Mobile APK 工作流自 M4 起就没跑通过）。本机 build_mobile.ps1 与 CI 各自 -I 那一份，
+// 垫片只留一处。

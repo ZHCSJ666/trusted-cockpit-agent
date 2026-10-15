@@ -1,0 +1,69 @@
+# 流 ③：飞行模式 10s → 恢复 → 消息补达（M3-5 计划原文第三条）
+#
+# 验的是共享 `ws.mjs` 的队列语义：断网时上行帧入队，重连后 flush。
+#
+# ⚠ **「补达」只能断言挂起态消失**（`msg-pending`）。断言回答文本会被**用户自己那条
+# 气泡**满足——同一句话同时在屏上，assertVisible 立刻绿，而消息可能一直卡在队列里。
+# 这是本 flow 最容易写错的一处，MessageBubble 的 testID 注释里也钉了同一句。
+#
+# ⚠ `setAirplaneMode` 的取值是 **`enabled` / `disabled`**（小写），
+# 判据在 `YamlSetAirplaneModeDeserializer`——它**逐字匹配这两个字符串**。
+# ⚠ 别去看 `Commands.kt::AirplaneValue` 那个枚举（`Enable`/`Disable`）：那是内部模型名，
+# 与 YAML 层的关键字**不同名**。我按枚举名改过一次，结果 `Parsing Failed at …:25:26`。
+# ⇒ **核 YAML 关键字要看反序列化器，不是看内部枚举。**
+#
+# ⚠ 设备走 Tailscale 连云栈：关飞行模式后 tailnet 要重新握手，实测比 WiFi 自身恢复
+# 慢一截，所以补达的等待给到 90s。
+appId: com.xiaozhou.companion
+name: 03 断网入队恢复补达
+tags:
+  - online
+# ⚠ `inputText` 之后**必须 `hideKeyboard`**：MIUI 的输入法是独立窗口且会顶到最上层，
+# Maestro 此刻抓到的 hierarchy 里**只有键盘**（`android:id/inputArea` /
+# `android:id/miui_bottom_area`），App 的元素一个都不在树里 ⇒ 紧接着的 `tapOn` 必然报
+# 「Element not found」，而元素其实好好地在屏上。2026-08-28 实跑第一条就撞上了。
+---
+- runFlow: subflows/open-app.yaml
+
+- setAirplaneMode: enabled
+# ⚠ **这里必须等够 ~45 秒，不是 10 秒。** RN 的 WebSocket 在飞行模式下 onclose 不来，
+# 连接要靠 App 的探活判死（`core/api/liveness.ts`：15s 一轮、单次超时 8s（2026-09-12 由 4s 抬高）、
+# 连续 2 次失败）——2026-08-27 真机实测 4s 超时档 **25.7s** 才判死，8s 档要再晚一截。
+# 在那之前 `send()` 仍认为连接是开的、会把帧直接写进死 socket（**已知残留窗口，见 M3-W**）
+# ⇒ 早发的那条根本不入队；2026-09-14 起它会在判死那一刻被结算成「发送状态未知」+ 重发
+# （`store.ts::settleLinkLost`），**不是**补达——所以文末多了一条 `bubble-resend` 不可见的断言，
+# 等得不够长这条 flow 会诚实地红，红的原因是那个已知窗口、不是回归。
+#
+# ⚠ 这里不能再用 `waitForAnimationToEnd` 当计时器：光球 2026-09-13 起空闲 30s 就静置
+# （`orbIdle.ts`），画面静了它会提前返回。按它自己头注的预案换成「等一个永不出现的元素 + optional」。
+- extendedWaitUntil:
+    visible:
+      id: "never-appears-timer"
+    timeout: 45000
+    optional: true
+
+- tapOn:
+    id: "composer-input"
+- inputText: "现在几点了"
+# 收起键盘再点发送——理由见文件头注
+- hideKeyboard
+- tapOn:
+    id: "composer-send"
+
+# 断网期：用户气泡在（本地渲染），助手气泡挂起中
+- assertVisible: "现在几点了"
+- assertVisible:
+    id: "msg-pending"
+
+- setAirplaneMode: disabled
+
+# 补达=挂起态消失。90s 覆盖 tailnet 重握手 + 队列 flush + 后端一轮。
+- extendedWaitUntil:
+    notVisible:
+      id: "msg-pending"
+    timeout: 90000
+# ⚠ 「挂起态消失」还有第二种到法：帧写进了死 socket、判死时被结算成「发送状态未知」+ 重发
+# （settleLinkLost），或 95s 看门狗收成「响应超时」+ 重发——两者都不是补达。
+# 重发键在场 = 这一轮没有拿到回答，flow 必须红。
+- assertNotVisible:
+    id: "bubble-resend"

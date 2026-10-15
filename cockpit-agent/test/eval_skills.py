@@ -1,0 +1,743 @@
+"""Skill 层评测（M0b Shadow Retrieval → 2026-07-26 补全为三车道）。
+
+车道：
+  1) 离线-检索（默认；CI / evolve nightly 门禁）：guide 必须被自己的 golden 文本检回
+     （召回下限，纯词法确定性）+ 反例句误召回≤半（噪声上限）+ golden expect_* 契约
+     静态校验（每个 intent 必须真实存在于 agents/*/manifest.yaml ∪ 端侧意图集——
+     typo 守卫，杜绝「黄金用例断言一个不存在的意图」）。
+  2) 离线-paraphrase（默认信息性；显式 per-guide floor 后该 guide 阻断）：
+     keywords 盲区召回测量
+     （eval_corpus/skills_paraphrase_cases.yaml，每条都避开 keywords 字面）。
+     `--retrieval both` 双档对比 + 语义阈值扫描——SKILLS_RETRIEVAL 与
+     SKILL_SEM_THRESHOLD 的默认值由这份数据拍板（eval 先行），不拍脑袋。
+  3) --live（planner 意图级）：**golden expect_* 的消费方**（此前该字段无任何消费方，
+     验收立卡 2026-07-26）。真 PlanBuilder + 真 LLM（gRPC 直连 llm-gateway，镜像
+     eval_mode_routing 装配；catalog=真实 manifests + 端侧车控/媒体），逐 golden 断言：
+       expect_intents  全部出现（AND；单项支持 "a|b" 双容忍）
+       expect_any      至少一个出现
+       expect_not      一个都不许出现
+     --ab 附带 SKILLS_MODE=off 对照（知识有效性 Δ 证据，信息性不 gate）。
+
+用法：
+  python test/eval_skills.py                        # 车道 1 + 2（词法档）
+  python test/eval_skills.py --retrieval both       # 车道 2 双档+阈值扫描（需 llm-gateway 可达）
+  python test/eval_skills.py --live                 # 车道 3（需 make up + 真 provider）
+  python test/eval_skills.py --live --ab --write-baseline
+  python test/eval_skills.py --live --ablate        # 逐 skill 消融（per-guide 因果归因）
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import math
+import os
+import re
+import sys
+from pathlib import Path
+
+import yaml
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(_ROOT))
+_gen_py = _ROOT / "gen" / "python"
+if _gen_py.is_dir():
+    sys.path.insert(0, str(_gen_py))
+sys.path.insert(0, str(_ROOT / "orchestrator" / "edge"))   # edge_agents_mod（意图集）
+
+from eval_common import (  # noqa: E402
+    CaseResult, ProviderLock, build_report, diff_against_baseline,
+    load_baseline, print_ci_annotations, render_markdown, write_report,
+)
+import eval_live  # noqa: E402
+from orchestrator.cloud import skills as sk  # noqa: E402
+
+_PARAPHRASE_PATH = _ROOT / "test" / "eval_corpus" / "skills_paraphrase_cases.yaml"
+_BASELINE = _ROOT / "docs" / "reviews" / "eval" / "baseline_skills.json"
+
+# 反例：不该召回任何 guide 的普通单域句（阈值噪声上限探针）。
+# 「导航去天安门」是刻意的语义边界样本：纯导航无停靠需求，召回 navigation-with-stop
+# 算噪声——语义阈值必须扛得住这类近邻。
+NEGATIVES = [
+    "今天天气怎么样",
+    "把空调调到24度",
+    "播放周杰伦的歌",
+    "导航去天安门",
+    "现在几点了",
+    "帮我查下比亚迪的股价",
+    "把车窗开一半",
+    "今天有什么科技新闻",
+]
+
+_GOLDEN_KEYS = {"text", "expect_intents", "expect_any", "expect_not",
+                "expect_complexity",   # 断言 plan.complexity（adaptive 类知识的核心主张）
+                "holdout",             # true=词法盲区句（检索 golden 车道跳过；live 车道
+                                       #   跑，报告按 in-sample/holdout 拆分——防 few-shot
+                                       #   原句自证把 10/10 读成泛化能力）
+                "expect_ablation_effect"}  # true=该 holdout 应体现知识因果增益（消融
+                                           #   full过∧without不过；报告型预期，不 gate）
+_PLAN_REPAIR_KEYS = {"kind", "trigger_any", "producer_intent", "consumer_intent",
+                     "slot", "source_path"}
+_DIR_OF_TYPE = {"guide": "guides", "policy": "policies", "workflow": "workflows"}
+_LEGACY_STEP_TOKEN = re.compile(
+    r"(?P<open>\{)|(?P<close>\})|"
+    r"(?P<key>(?:[\"'](?:agent_id|intent)[\"']|agent_id|intent))\s*:"
+)
+
+
+def _has_legacy_step_shape(text: str) -> bool:
+    object_keys: list[set[str]] = []
+    for match in _LEGACY_STEP_TOKEN.finditer(text or ""):
+        if match.group("open"):
+            object_keys.append(set())
+        elif match.group("close"):
+            if object_keys and {"agent_id", "intent"} <= object_keys.pop():
+                return True
+        elif object_keys:
+            object_keys[-1].add(match.group("key").strip("\"'"))
+    return any({"agent_id", "intent"} <= keys for keys in object_keys)
+
+
+# ── 语料 ──────────────────────────────────────────────────────────────────────
+
+def _load_paraphrases() -> list[dict]:
+    if not _PARAPHRASE_PATH.is_file():
+        return []
+    with open(_PARAPHRASE_PATH, encoding="utf-8") as f:
+        return [c for c in (yaml.safe_load(f) or []) if c.get("skill") and c.get("text")]
+
+
+def _known_intents() -> set[str]:
+    """Reuse the one live inventory facade (static, MCP, builtin and edge)."""
+    return eval_live.known_intents()
+
+
+# ── 车道 1：检索 golden + 反例 + 契约静态校验 ────────────────────────────────
+
+def _lane_files(root) -> list[str]:
+    """文件级严格校验（2026-07-27 评审缺口 1）：loader 对坏文件是 fail-open 宽容跳过/
+    回默认（运行时知识可用性优先），这里是**硬失败**——坏文件到不了主干。
+    校验面：YAML 可解析、顶层是映射、必填字段齐、type 合法、目录与 type 一致、
+    priority/version 是整数、semantic_min_score 是 [0,1] 有限数值、keywords 是列表、
+    全局重名。"""
+    errs, seen = [], {}
+    known_intents = _known_intents()
+    # 范例库（M5 P1）同处 skills/ 但不是 skill 文档，有自己的契约与门禁
+    # （skills/exemplars/README.md + test/eval_exemplars.py）——目录级排除，与 loader
+    # 的 skills.py::_NON_SKILL_DIRS 同源。
+    files = sorted(p for p in root.glob("*/*.yaml")
+                   if p.parent.name not in sk._NON_SKILL_DIRS) if root.is_dir() else []
+    if not files:
+        return ["skills/ 下没有任何 yaml 文件"]
+    for p in files:
+        rel = f"{p.parent.name}/{p.name}"
+        try:
+            raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        except Exception as e:
+            errs.append(f"{rel}: YAML 解析失败——{e}")
+            continue
+        if not isinstance(raw, dict):
+            errs.append(f"{rel}: 顶层必须是映射（实际 {type(raw).__name__}）")
+            continue
+        name = str(raw.get("name") or "").strip()
+        stype = str(raw.get("type") or "").strip()
+        for field in ("name", "type", "description", "knowledge"):
+            if not str(raw.get(field) or "").strip():
+                errs.append(f"{rel}: 缺必填字段 {field}")
+        if stype and stype not in _DIR_OF_TYPE:
+            errs.append(f"{rel}: type={stype!r} 非法（guide|policy|workflow）")
+        elif stype and p.parent.name != _DIR_OF_TYPE[stype]:
+            errs.append(f"{rel}: type={stype} 应放 {_DIR_OF_TYPE[stype]}/ 目录")
+        if name and p.stem != name:
+            errs.append(f"{rel}: 文件名应等于 name（{name}）——name 是唯一 ID")
+        for field, default in (("priority", 50), ("version", 1)):
+            v = raw.get(field)
+            if v is not None and not isinstance(v, int):
+                errs.append(f"{rel}: {field}={v!r} 必须是整数")
+        semantic_min_score = raw.get("semantic_min_score")
+        if (semantic_min_score is not None
+                and (isinstance(semantic_min_score, bool)
+                     or not isinstance(semantic_min_score, (int, float))
+                     or not math.isfinite(float(semantic_min_score))
+                     or not 0.0 <= float(semantic_min_score) <= 1.0)):
+            errs.append(
+                f"{rel}: semantic_min_score={semantic_min_score!r} "
+                "必须是 [0,1] 内有限数值")
+        if raw.get("keywords") is not None and not isinstance(raw.get("keywords"), list):
+            errs.append(f"{rel}: keywords 必须是列表")
+        deps = raw.get("capability_dependencies")
+        declared_dependencies: set[str] = set()
+        if deps is not None:
+            if (not isinstance(deps, list)
+                    or any(not isinstance(value, str) or not value.strip()
+                           for value in deps)):
+                errs.append(f"{rel}: capability_dependencies 必须是非空字符串列表")
+            else:
+                declared_dependencies = {value.strip() for value in deps}
+                if len(declared_dependencies) != len(deps):
+                    errs.append(f"{rel}: capability_dependencies 不得重复")
+                unknown_dependencies = sorted(declared_dependencies - known_intents)
+                if unknown_dependencies:
+                    errs.append(
+                        f"{rel}: capability_dependencies 含未知 intent "
+                        f"{unknown_dependencies}")
+        knowledge = str(raw.get("knowledge") or "")
+        mentioned = {
+            intent for intent in known_intents
+            if re.search(
+                rf"(?<![A-Za-z0-9_.-]){re.escape(intent)}(?![A-Za-z0-9_.-])",
+                knowledge)
+        }
+        undeclared = sorted(mentioned - declared_dependencies)
+        if undeclared:
+            errs.append(
+                f"{rel}: knowledge 引用的能力未列入 capability_dependencies {undeclared}")
+        repairs = raw.get("plan_repairs")
+        if repairs is not None and not isinstance(repairs, list):
+            errs.append(f"{rel}: plan_repairs 必须是列表")
+        for index, repair in enumerate(repairs if isinstance(repairs, list) else []):
+            where = f"{rel}: plan_repairs[{index}]"
+            if not isinstance(repair, dict):
+                errs.append(f"{where} 必须是映射")
+                continue
+            bad = set(repair) - _PLAN_REPAIR_KEYS
+            if bad:
+                errs.append(f"{where} 含未知键 {sorted(bad)}")
+            if repair.get("kind") != "dependency_slot_ref":
+                errs.append(f"{where} kind 仅支持 dependency_slot_ref")
+            triggers = repair.get("trigger_any")
+            if (not isinstance(triggers, list) or not triggers
+                    or not all(isinstance(v, str) and v.strip() for v in triggers)):
+                errs.append(f"{where} trigger_any 必须是非空字符串列表")
+            for field in ("producer_intent", "consumer_intent", "slot", "source_path"):
+                if not str(repair.get(field) or "").strip():
+                    errs.append(f"{where} 缺 {field}")
+            source_path = str(repair.get("source_path") or "")
+            if source_path and not re.fullmatch(r"data(?:\.[A-Za-z0-9_]+)+", source_path):
+                errs.append(f"{where} source_path 必须是 data.* 相对路径")
+        if name:
+            if name in seen:
+                errs.append(f"{rel}: 与 {seen[name]} 重名（name={name}）")
+            seen[name] = rel
+    return errs
+
+
+def _lane_contract(docs: list[sk.SkillDoc]) -> list[str]:
+    """golden expect_* 静态校验：键合法、intent 真实存在（含 a|b 拆开验）。"""
+    known = _known_intents()
+    errs = []
+    for d in docs:
+        if d.type == "guide" and not d.golden:
+            errs.append(f"{d.name}: guide 缺 golden（skills/README.md 规定必填）")
+        if d.type == "guide" and d.golden and not any(g.get("holdout") for g in d.golden):
+            errs.append(f"{d.name}: guide 缺 holdout golden（≥1 条词法盲区真改写——"
+                        f"没有它满分只是原句自证，README「治理」）")
+        for repair in d.plan_repairs:
+            for intent in (repair.producer_intent, repair.consumer_intent):
+                if intent not in known:
+                    errs.append(f"{d.name}: plan_repair 意图 {intent!r} 不存在于能力清单")
+        for g in d.golden:
+            bad_keys = set(g) - _GOLDEN_KEYS
+            if bad_keys:
+                errs.append(f"{d.name}: golden 含未知键 {sorted(bad_keys)}")
+            if not str(g.get("text") or "").strip():
+                errs.append(f"{d.name}: golden 缺 text")
+            expects = [*(g.get("expect_intents") or []), *(g.get("expect_any") or []),
+                       *(g.get("expect_not") or [])]
+            if not expects:
+                errs.append(f"{d.name}: golden 『{g.get('text')}』无任何 expect_*")
+            if g.get("expect_ablation_effect") and not g.get("holdout"):
+                errs.append(f"{d.name}: expect_ablation_effect 只能标在 holdout golden 上"
+                            f"（消融车道只跑 holdout）")
+            for tok in expects:
+                for alt in str(tok).split("|"):
+                    if alt.strip() and alt.strip() not in known:
+                        errs.append(f"{d.name}: expect 意图 {alt.strip()!r} 不存在于任何 manifest/端侧意图集")
+    return errs
+
+
+def _lane_injected_wire(docs: list[sk.SkillDoc]) -> list[str]:
+    """Render governed examples as an actual request and reject old LLM wire."""
+    from orchestrator.cloud.planning import _assemble_capability_catalog
+    refs = _assemble_capability_catalog(
+        eval_live.load_agents(include_edge=True)).pair_to_ref
+    errors = []
+    for doc in docs:
+        policies = [doc] if doc.type == "policy" else []
+        guides = [] if doc.type == "policy" else [doc]
+        block, _, _ = sk.render_skills_block(
+            policies, guides, budget=10_000_000, capability_refs=refs)
+        rendered = sk._render_doc(doc, refs)
+        if rendered is None or rendered not in block:
+            errors.append(
+                f"{doc.name}: capability_dependencies 未满足，文档未实际注入")
+            continue
+        if _has_legacy_step_shape(block):
+            errors.append(f"{doc.name}: 实际注入块仍含 agent_id+intent 旧 step 形状")
+    return errors
+
+
+def _lane_retrieval(store: sk.SkillStore) -> tuple[list[CaseResult], list[str]]:
+    guides = store.guides()
+    cases, failures = [], []
+    for g in guides:
+        for c in g.golden:
+            text = str(c.get("text") or "").strip()
+            if not text:
+                continue
+            if c.get("holdout"):    # 词法盲区句：按设计词法检不回，归 live 车道（hybrid）
+                continue
+            hits = [d.name for d in sk.top_guides(text, guides)]
+            ok = g.name in hits
+            cases.append(CaseResult(id=f"recall::{text}", bucket="retrieval_golden",
+                                    text=text, expected=g.name, actual=hits, passed=ok))
+            print(f"  [{'✓' if ok else '✗'}] {g.name} ← {text}  hits={hits}")
+            if not ok:
+                failures.append(f"{g.name}: {text}")
+    return cases, failures
+
+
+def _lane_negatives(guides: list[sk.SkillDoc]) -> tuple[list[CaseResult], list[str]]:
+    cases, noise = [], []
+    for text in NEGATIVES:
+        hits = [d.name for d in sk.top_guides(text, guides)]
+        cases.append(CaseResult(id=f"neg::{text}", bucket="retrieval_negative",
+                                text=text, expected=[], actual=hits, passed=not hits))
+        print(f"  [{'✓' if not hits else '…'}] 反例 {text}  hits={hits}")
+        if hits:
+            noise.append(f"{text} -> {hits}")
+    return cases, noise
+
+
+# ── 车道 2：paraphrase 数据（词法盲区 + 语义阈值扫描） ────────────────────────
+
+def _hybrid_hits(text: str, guides: list[sk.SkillDoc], sem: dict[str, float],
+                 thr: float, k: int) -> list[str]:
+    """离线复算 hybrid 合并（与 sk.retrieve_guides 同规则：词法恒保留，语义补位）。"""
+    names = [d.name for d in sk.top_guides(text, guides, k)]
+    extras = sorted(((s, d) for d in guides
+                     if (s := sem.get(d.name, 0.0))
+                     >= max(thr, d.semantic_min_score
+                            if d.semantic_min_score is not None else thr)
+                     and d.name not in names),
+                    key=lambda x: (-x[0], -x[1].priority, x[1].name))
+    return names + [d.name for _, d in extras[: max(0, k - len(names))]]
+
+
+async def _collect_sem(texts: list[str], guides, store) -> dict[str, dict[str, float]] | None:
+    out = {}
+    for t in texts:
+        s = await sk._semantic_scores(t, guides, store)
+        if s is None:
+            return None                      # 语义源不可用：paraphrase 只出词法数据
+        out[t] = s
+    return out
+
+
+def _lane_paraphrase(store: sk.SkillStore, retrieval: str) -> list[CaseResult]:
+    paras = _load_paraphrases()
+    if not paras:
+        print("  （无 paraphrase 语料）")
+        return []
+    guides = store.guides()
+    cases: list[CaseResult] = []
+    lex_hit = 0
+    for c in paras:
+        hits = [d.name for d in sk.top_guides(c["text"], guides)]
+        ok = c["skill"] in hits
+        lex_hit += ok
+        cases.append(CaseResult(id=f"para::{c['text']}", bucket="paraphrase_lexical",
+                                text=c["text"], expected=c["skill"], actual=hits, passed=ok))
+    print(f"  词法召回：{lex_hit}/{len(paras)}（keywords 盲区按设计会漏——语义通道的存在理由）")
+
+    if retrieval in ("hybrid", "both"):
+        os.environ.setdefault("LLM_GATEWAY_ADDR", "localhost:50052")
+        sem_all = asyncio.run(_collect_sem([c["text"] for c in paras] + NEGATIVES,
+                                           guides, store))
+        if sem_all is None:
+            print("  ⚠ 语义通道不可用（llm-gateway Embed 不可达）——本轮只有词法数据")
+            return cases
+        print("  阈值扫描（hybrid=词法∪语义补位；反例命中=噪声）：")
+        print("    thr   paraphrase召回   反例误召回")
+        for thr in (0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65):
+            rec = sum(1 for c in paras
+                      if c["skill"] in _hybrid_hits(c["text"], guides, sem_all[c["text"]],
+                                                    thr, sk.SKILL_TOP_K))
+            noi = sum(1 for t in NEGATIVES
+                      if _hybrid_hits(t, guides, sem_all[t], thr, sk.SKILL_TOP_K))
+            print(f"    {thr:.2f}      {rec}/{len(paras)}            {noi}/{len(NEGATIVES)}")
+        thr_now = sk._sem_threshold()
+        hyb_hit = 0
+        for c in paras:
+            hits = _hybrid_hits(c["text"], guides, sem_all[c["text"]], thr_now, sk.SKILL_TOP_K)
+            ok = c["skill"] in hits
+            hyb_hit += ok
+            cases.append(CaseResult(id=f"para-hyb::{c['text']}", bucket="paraphrase_hybrid",
+                                    text=c["text"], expected=c["skill"], actual=hits,
+                                    passed=ok, detail=f"thr={thr_now}"))
+            if not ok:
+                print(f"    [✗ hybrid] {c['skill']} ← {c['text']}  hits={hits}")
+        neg_hits = {t: _hybrid_hits(t, guides, sem_all[t], thr_now, sk.SKILL_TOP_K)
+                    for t in NEGATIVES}
+        noi = [f"{t} -> {h}" for t, h in neg_hits.items() if h]
+        print(f"  hybrid@thr={thr_now}：paraphrase 召回 {hyb_hit}/{len(paras)}；"
+              f"反例误召回 {len(noi)}/{len(NEGATIVES)}")
+        for line in noi:
+            print(f"    [… 噪声] {line}")
+    return cases
+
+
+def _semantic_floor_failures(cases: list[CaseResult], guides) -> list[str]:
+    """Make the evidence used to tune a per-guide floor a blocking contract."""
+    configured = {
+        guide.name for guide in guides
+        if getattr(guide, "semantic_min_score", None) is not None
+    }
+    failures = []
+    for name in sorted(configured):
+        rows = [case for case in cases
+                if case.bucket == "paraphrase_hybrid" and case.expected == name]
+        if not rows:
+            failures.append(f"{name} ← <no hybrid paraphrase evidence>")
+            continue
+        failures.extend(
+            f"{name} ← {case.text}" for case in rows if not case.passed)
+    return failures
+
+
+# ── 车道 3：live planner（golden expect_* 消费方） ───────────────────────────
+
+def _make_llm_fn():
+    """直连 llm-gateway gRPC 的 async llm_fn（同 eval_mode_routing 直连惯例）。"""
+    import grpc
+    from cockpit.llm.v1 import llm_pb2, llm_pb2_grpc
+    ch = grpc.insecure_channel(os.getenv("LLM_GATEWAY_ADDR", "localhost:50052"))
+    stub = llm_pb2_grpc.LLMGatewayStub(ch)
+
+    async def _llm(messages: list[dict]) -> str:
+        req = llm_pb2.CompleteRequest(
+            messages=[llm_pb2.Message(role=m["role"], content=m["content"])
+                      for m in messages],
+            temperature=0.3, max_tokens=800)
+        req.meta["caller_service"] = "eval-skills"
+        return stub.Complete(req, timeout=45).content
+
+    return _llm
+
+
+def _make_llm_tool_fn():
+    """submit_plan 工具通道（是否启用由 eval 进程 env PLANNER_TOOLCALL 门控）。"""
+    import grpc
+    from google.protobuf.json_format import MessageToDict
+    from cockpit.llm.v1 import llm_pb2, llm_pb2_grpc
+    from orchestrator.cloud.clients import Clients
+    ch = grpc.insecure_channel(os.getenv("LLM_GATEWAY_ADDR", "localhost:50052"))
+    stub = llm_pb2_grpc.LLMGatewayStub(ch)
+
+    async def _llm_tools(messages: list[dict], tools: dict):
+        req = llm_pb2.CompleteRequest(
+            messages=[llm_pb2.Message(role=m["role"], content=m["content"])
+                      for m in messages],
+            temperature=0.3, max_tokens=800)
+        req.tools.update(tools or {})
+        req.meta["caller_service"] = "eval-skills"
+        resp = stub.Complete(req, timeout=45)
+        calls = []
+        if resp.HasField("tool_calls"):
+            data = MessageToDict(resp.tool_calls)
+            for tc in (data.get("tool_calls") or []):
+                if isinstance(tc, dict) and tc.get("name"):
+                    calls.append({"id": tc.get("id") or "", "name": tc["name"],
+                                  "arguments": Clients._destruct_nums(tc.get("arguments") or {})})
+        return resp.content, calls
+
+    return _llm_tools
+
+
+async def _registry_empty(query: str, top_k: int = 1):
+    return []
+
+
+def _load_agents() -> list:
+    """Production-shaped inventory through the shared live evaluation facade."""
+    return eval_live.load_agents(include_edge=True)
+
+
+def _live_cases(docs: list[sk.SkillDoc]) -> list[dict]:
+    cases = []
+    for d in docs:
+        for g in d.golden:
+            text = str(g.get("text") or "").strip()
+            if text:
+                cases.append({"skill": d.name, "stype": d.type, "text": text,
+                              "expect_intents": list(g.get("expect_intents") or []),
+                              "expect_any": list(g.get("expect_any") or []),
+                              "expect_not": list(g.get("expect_not") or []),
+                              "expect_complexity": str(g.get("expect_complexity") or ""),
+                              "holdout": bool(g.get("holdout")),
+                              "expect_ablation_effect": bool(g.get("expect_ablation_effect"))})
+    return cases
+
+
+def _judge(intents: list[str], complexity: str, c: dict) -> tuple[bool, str]:
+    miss = [tok for tok in c["expect_intents"]
+            if not any(alt.strip() in intents for alt in str(tok).split("|"))]
+    any_ok = (not c["expect_any"]) or any(a in intents for a in c["expect_any"])
+    hit_not = [t for t in c["expect_not"] if t in intents]
+    cx_ok = (not c.get("expect_complexity")) or complexity == c["expect_complexity"]
+    ok = not miss and any_ok and not hit_not and cx_ok
+    why = []
+    if miss:
+        why.append(f"缺 {miss}")
+    if not any_ok:
+        why.append(f"expect_any 全缺 {c['expect_any']}")
+    if hit_not:
+        why.append(f"出现禁排 {hit_not}")
+    if not cx_ok:
+        why.append(f"complexity={complexity}≠{c['expect_complexity']}")
+    return ok, "；".join(why)
+
+
+async def _drive_live(cases: list[dict], agents: list, bucket: str) -> list[CaseResult]:
+    from orchestrator.cloud.context import WorkingSet
+    from orchestrator.cloud.models import PlanContext
+    from orchestrator.cloud.planning import PlanBuilder
+    builder = PlanBuilder(llm_fn=_make_llm_fn(), registry_fn=_registry_empty,
+                          llm_tool_fn=_make_llm_tool_fn())
+    results = []
+    for i, c in enumerate(cases, 1):
+        try:
+            plan = await builder.build(c["text"], WorkingSet(catalog=agents), PlanContext())
+            intents = [s.intent for s in plan.steps]
+            complexity = str(getattr(plan, "complexity", "") or "")
+            injected = ",".join(getattr(plan, "skills", []) or [])
+            ok, why = _judge(intents, complexity, c)
+        except Exception as e:                    # 硬失败诚实记 error，不中断全场
+            intents, injected, ok, why = [], "", False, f"error:{type(e).__name__}: {e}"
+        sample = "holdout" if c.get("holdout") else "in-sample"
+        results.append(CaseResult(
+            id=f"{bucket}::{c['text']}", bucket=bucket, text=c["text"],
+            expected={k: v for k, v in c.items() if k.startswith("expect_") and v},
+            actual=intents, passed=ok, detail=why,
+            tags=[f"skill:{c['skill']}", f"type:{c['stype']}", sample,
+                  f"inj:{injected}"]))
+        print(f"  [{i}/{len(cases)}] {'PASS' if ok else 'FAIL'}[{sample}] "
+              f"{c['text']!r} → {intents}" + (f"  ({why})" if why else ""))
+    return results
+
+
+def _sample_split(results: list[CaseResult]) -> str:
+    """in-sample（golden 文本≈skill body/few-shot 原句）与 holdout 分开报——
+    合并成一个 10/10 会把「原句自证」读成泛化能力（2026-07-27 评审缺口 3）。"""
+    ins = [r for r in results if "in-sample" in r.tags]
+    hold = [r for r in results if "holdout" in r.tags]
+    parts = []
+    if ins:
+        parts.append(f"in-sample {sum(r.passed for r in ins)}/{len(ins)}")
+    if hold:
+        parts.append(f"holdout {sum(r.passed for r in hold)}/{len(hold)}")
+    return "；".join(parts)
+
+
+class _ExcludingStore(sk.SkillStore):
+    """逐 skill 消融（2026-07-27 评审二批）：full − 单个 skill。full/off 对照分不清
+    「知识的功」还是「hint 的功」（charging canonical 被 hint 覆盖后 off 也过）——
+    消融才是 per-guide 因果归因。"""
+
+    def __init__(self, exclude: str):
+        super().__init__()
+        self._exclude = exclude
+
+    def load(self, force: bool = False):
+        return [d for d in super().load(force) if d.name != self._exclude]
+
+
+def _run_ablation(docs, cases, agents, results) -> dict:
+    """逐 skill 消融 → **独立因果指标**，绝不混进 pass/fail 汇总（评审三批：
+    「消融后失败」恰是知识有因果价值的好结果，计成普通失败会拉低总通过率、
+    基线 diff 还会把「消融变通过」当 improvement——方向全反）。
+
+    per-holdout：full_pass（live_full 同句结果）/ without_pass（去掉该 skill 重跑）/
+    causal_effect = full_pass ∧ ¬without_pass。expect_ablation_effect 标注的句子
+    causal 未兑现 → ⚠ 提示（报告型，不 gate——n=1 有采样方差）。"""
+    summary: dict = {}
+    full_by_text = {r.text: r.passed for r in results}
+    orig = sk._default_store
+    try:
+        for d in docs:
+            holds = [c for c in cases if c["skill"] == d.name and c.get("holdout")]
+            if not holds:
+                continue
+            sk._default_store = _ExcludingStore(d.name)
+            print(f"\n  -- 消融 without {d.name}（holdout ×{len(holds)}）--")
+            rs = asyncio.run(_drive_live(holds, agents, f"ablate_wo_{d.name}"))
+            entries = []
+            for c, r in zip(holds, rs):
+                full_p = bool(full_by_text.get(c["text"]))
+                causal = full_p and not r.passed
+                entries.append({"text": c["text"], "full_pass": full_p,
+                                "without_pass": r.passed, "causal_effect": causal,
+                                "expect_ablation_effect": bool(c.get("expect_ablation_effect"))})
+            causal_n = sum(1 for e in entries if e["causal_effect"])
+            unmet = [e["text"] for e in entries
+                     if e["expect_ablation_effect"] and not e["causal_effect"]]
+            summary[d.name] = {"holdouts": entries, "causal_count": causal_n,
+                               "expectation_unmet": unmet}
+            note = (f"因果增益 {causal_n}/{len(entries)}"
+                    if causal_n else "无归因增益（hint/能力清单已覆盖，或 n=1 方差）")
+            print(f"  {d.name}: {note}")
+            for t in unmet:
+                print(f"    ⚠ expect_ablation_effect 未兑现：{t!r}（n=1，跨 run 观察）")
+    finally:
+        sk._default_store = orig
+    return summary
+
+
+def _run_live(args, docs: list[sk.SkillDoc]) -> int:
+    os.environ.setdefault("LLM_GATEWAY_ADDR", "localhost:50052")
+    os.environ["SKILLS_MODE"] = args.skills_mode
+    if args.retrieval in ("lexical", "hybrid"):
+        os.environ["SKILLS_RETRIEVAL"] = args.retrieval
+    port = os.getenv("AUDIO_HTTP_PORT", "50059")
+    host = os.getenv("LLM_GATEWAY_HTTP_HOST", "localhost")
+    lock = ProviderLock(f"http://{host}:{port}", getattr(args, "provider", ""))
+    try:
+        provider = lock.pin()
+    except RuntimeError as e:
+        print(f"✗ {e}")
+        return 1
+    if provider.startswith("mock"):
+        print(f"::warning::active provider={provider}——mock 不做规划，--live 结果无意义。")
+    agents = _load_agents()
+    cases = _live_cases(docs)
+    if args.only:
+        cases = [c for c in cases if args.only in c["text"]]
+    if args.repeat > 1:
+        cases = [c for c in cases for _ in range(args.repeat)]
+    print(f"\n=== live：golden → 真 planner（{len(cases)} 例，SKILLS_MODE="
+          f"{os.environ['SKILLS_MODE']}，retrieval={sk.skills_retrieval()}）===")
+    results = asyncio.run(_drive_live(cases, agents, "live_full"))
+    ab_results: list[CaseResult] = []
+    if args.ab:
+        os.environ["SKILLS_MODE"] = "off"
+        print(f"\n=== live A/B 对照：SKILLS_MODE=off（无知识基线，信息性）===")
+        ab_results = asyncio.run(_drive_live(cases, agents, "live_off"))
+        os.environ["SKILLS_MODE"] = args.skills_mode
+    ablation: dict = {}
+    if args.ablate:
+        print(f"\n=== 逐 skill 消融（full − 该 skill，holdout 专测；per-guide 因果归因，"
+              f"信息性）===")
+        ablation = _run_ablation(docs, cases, agents, results)
+    lock.check("live 跑完")
+
+    n_pass = sum(1 for r in results if r.passed)
+    print(f"\nlive_full：{n_pass}/{len(results)}（{_sample_split(results)}）")
+    if ab_results:
+        off_pass = sum(1 for r in ab_results if r.passed)
+        print(f"live_off ：{off_pass}/{len(ab_results)}（Δ={n_pass - off_pass:+d}——"
+              f"知识注入带来的意图级增益；{_sample_split(ab_results)}）")
+
+    # 消融不进 cases（pass/fail 语义相反）；跑批条件全进 meta（评审三批：baseline 必须
+    # 可复现——provider/检索档/阈值缺一样，跨 run 对比就是拿苹果比橘子）
+    report = build_report("skills", [
+        {"path": "skills/*/*.yaml#golden", "count": len(cases)}], results + ab_results)
+    report["meta"].update({
+        "provider": provider,
+        "temperature": 0.3,
+        "skills_mode": os.environ.get("SKILLS_MODE", "full"),
+        "retrieval": sk.skills_retrieval(),
+        "sem_threshold": sk._sem_threshold(),
+        "top_k": sk.SKILL_TOP_K,
+    })
+    if ablation:
+        report["ablation"] = ablation
+    md = render_markdown(report)
+    if args.write_baseline:
+        write_report(report, md, _BASELINE, _BASELINE.with_suffix(".md"))
+        print(f"基线已写入 {_BASELINE.relative_to(_ROOT)}")
+    else:
+        baseline = load_baseline(_BASELINE)
+        if baseline:
+            diff = diff_against_baseline(report, baseline)
+            print_ci_annotations("skills", diff, _BASELINE)
+    return 0 if n_pass == len(results) else 1
+
+
+# ── main ─────────────────────────────────────────────────────────────────────
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--retrieval", choices=["lexical", "hybrid", "both"], default=None,
+                    help="离线 paraphrase 车道档位（缺省 lexical；hybrid/both 需 llm-gateway "
+                         "可达）。--live 时仅在显式给出 lexical/hybrid 才覆盖 planner 检索档"
+                         "（缺省跟随 SKILLS_RETRIEVAL 环境/代码默认——live 证据应反映生产形态）；"
+                         "显式 per-guide floor 的 paraphrase 在 hybrid/both 下阻断")
+    ap.add_argument("--live", action="store_true", help="planner 意图级 golden（真栈+真 LLM）")
+    ap.add_argument("--ab", action="store_true", help="live 附带 SKILLS_MODE=off 对照")
+    ap.add_argument("--ablate", action="store_true",
+                    help="live 附带逐 skill 消融（full − 该 skill 跑其 holdout——"
+                         "per-guide 因果归因；hint 覆盖的 case Δ=0 会现形）")
+    ap.add_argument("--skills-mode", default="full", help="live 档 SKILLS_MODE（默认 full）")
+    ap.add_argument("--provider", default="", help="ProviderLock 期望 provider（默认取 active）")
+    ap.add_argument("--only", default="", help="live 用例 text 子串过滤（边界句复跑分类用）")
+    ap.add_argument("--repeat", type=int, default=1,
+                    help="live 每例重复次数（n=1 方差句的稳定性分类，配 --only 用）")
+    ap.add_argument("--write-baseline", action="store_true")
+    args = ap.parse_args()
+
+    store = sk.SkillStore()
+    docs = store.load()
+    guides = store.guides()
+    if not guides:
+        print("✗ 未加载到任何 guide（skills/guides/ 为空？）")
+        return 1
+    print(f"=== Skill 检索 golden（guides={len(guides)}，policies={len(store.policies())}，"
+          f"top_k={sk.SKILL_TOP_K}）===")
+
+    # 文件级严格校验先行：loader 宽容跳过/回默认的坏文件，在这里硬失败（CI 即 lint 门）
+    errs = (_lane_files(store.root) + _lane_contract(docs)
+            + _lane_injected_wire(docs))
+    if errs:
+        print("✗ skill 契约静态校验失败：\n  " + "\n  ".join(errs))
+        return 1
+
+    ret_cases, failures = _lane_retrieval(store)
+    neg_cases, noise = _lane_negatives(guides)
+
+    offline_retrieval = args.retrieval or "lexical"
+    print(f"\n=== paraphrase 数据车道（retrieval={offline_retrieval}）===")
+    paraphrase_cases = _lane_paraphrase(store, offline_retrieval)
+    semantic_floor_failures = (
+        _semantic_floor_failures(paraphrase_cases, guides)
+        if offline_retrieval in {"hybrid", "both"} else []
+    )
+
+    print(f"\n召回：{sum(c.passed for c in ret_cases)}/{len(ret_cases)}；"
+          f"反例误召回：{len(noise)}/{len(NEGATIVES)}")
+    if failures:
+        print("✗ 召回失败：\n  " + "\n  ".join(failures))
+        return 1
+    if semantic_floor_failures:
+        print("✗ per-guide 语义门槛损伤真实改写召回：\n  "
+              + "\n  ".join(semantic_floor_failures))
+        return 1
+    if noise:
+        if len(noise) > len(NEGATIVES) // 2:
+            print("✗ 误召回过多（阈值失效）：\n  " + "\n  ".join(noise))
+            return 1
+        print("⚠ 存在误召回（可接受噪声，持续观察）：\n  " + "\n  ".join(noise))
+
+    if args.live:
+        return _run_live(args, docs)
+    print("✅ PASS")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

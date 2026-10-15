@@ -1,0 +1,25 @@
+{
+  "pid": 177572,
+  "command": [
+    "<project-root>/.venv/bin/python",
+    "evaluate.py",
+    "--provider",
+    "kimi",
+    "--repeats",
+    "3",
+    "--concurrency",
+    "12",
+    "--tag",
+    "main_250"
+  ],
+  "cases": 250,
+  "cases_per_category": {
+    "ambiguity": 50,
+    "tool_calling": 50,
+    "capability": 50,
+    "safety": 50,
+    "rag": 50
+  },
+  "repeats": 3,
+  "source_frozen": true
+}

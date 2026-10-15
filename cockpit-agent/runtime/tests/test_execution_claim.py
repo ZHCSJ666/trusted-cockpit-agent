@@ -1,0 +1,218 @@
+"""`runtime/execution_claim` 的两向断言 + 「判据零领域词」的源码级钉子（C11-C）。
+
+它是 shadow（只写观测不进决策），但**误伤面仍然要写下来**：一位观测列如果 90%
+是误报，两周之后没人读得懂那份分布。所以下面的「不该命中」那一半里，
+既有真实的信息类完成语（`nearby` 的「为您找到 10 家」），也有客观陈述
+（「路线已经算好了」——它没有指向用户的服务体标记）。
+"""
+from __future__ import annotations
+
+import ast
+import inspect
+import os
+import re
+
+import pytest
+import yaml
+
+from runtime import execution_claim as mod
+from runtime.execution_claim import execution_claim
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_COMMANDS = os.path.join(
+    _ROOT, "orchestrator", "edge", "knowledge", "commands.yaml")
+
+
+# ── 1. 完成体：真栈原句 ────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("text", [
+    # family T21 chitchat 编造改路线（探针 fails=[]，人工漏检兜出来的）
+    "好的，已经为您重新计算路线，从华侨城欢乐海岸出发，不走高速，全程大约1.6公里。",
+    # demo-mkemhn 那批堵过的交易话术，形态一样
+    "已为您找到 10 家门店，请选择其中一家。",
+    "已经帮您把提醒设置好了。",
+    "已替您安排完成。",
+    # ⚠ 2026-08-29 补四条**真栈原句**（QA 余项 ③/④ 的取证跑批，deployed `ed53f8f`）：
+    # 「取消<事项>」这类不点名域的句子有 45% 落错域，其中一族落到兜底闲聊，
+    # 而它会**零动作地宣称已经取消了**。这四条是 47 条干净会话样本里逐字捞出来的。
+    # 判据对它们四条全部命中 ⇒ **shadow 是对的，只是还没到拦截的时候**
+    # （模块 docstring 写着「两周真实分布出来再谈拦截」，它 2026-08-28 才上线）。
+    # 留在这里的意义：把一次现场取样变成常驻回归探针——判据日后收窄时会当场报红。
+    "好的，已为你取消代号17879685843的评审会。",
+    "好的，已为你取消参加代号17879685843的评审会。",
+    "好的，已为您取消参加代号17879685843的评审会。",
+])
+def test_completed_execution_claims_are_detected(text):
+    assert execution_claim(text) == "done"
+
+
+# ── 2. 进行体/承诺体 ──────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("text", [
+    "正在为您重新规划路线，请稍等。",
+    "这就帮您安排。",
+    "马上给您接通。",
+    # 同批真栈原句（进行体那一支）：零动作却承诺「这就帮你取消」，
+    # 还顺带编了一段「取消后原定议程就清掉了」的后果说明。
+    "好的，这就帮你取消代号17879688782的评审会。不过提醒一下，取消后原定议程就清掉了，"
+    "要是之后还想聊这次会议的内容，我这边查不到任何记录啦。",
+])
+def test_ongoing_execution_claims_are_detected(text):
+    assert execution_claim(text) == "ongoing"
+
+
+# ── 3. 不许误伤（这一半和上一半一样重要）──────────────────────────────────
+
+@pytest.mark.parametrize("text", [
+    "",
+    "为您找到 10 家川菜，推荐川胖虎、辣宴、老四川印象。",   # 信息类答复，没有完成体
+    "路线已经算好了吗？",                                    # 客观陈述 + 疑问，无服务体标记
+    "今天深圳小雨，气温28℃。",
+    "您说过不吃辣，这次没按平时的川菜找。",
+    "抱歉，我这边没有查询能力，您可以说「查询附近的瑞幸咖啡」。",
+    "好的，靠边停车后注意打开双闪。",
+])
+def test_plain_answers_are_not_execution_claims(text):
+    assert execution_claim(text) == ""
+
+
+# ── 4. 判据零领域词（源码级钉子）──────────────────────────────────────────
+
+def _domain_vocabulary() -> set[str]:
+    """VAL 知识库派生的领域词——手抄的那份迟早漂移，漂了这条断言就等于不存在。"""
+    with open(_COMMANDS, encoding="utf-8") as handle:
+        commands = yaml.safe_load(handle) or {}
+    vocab: set[str] = set()
+    for name, spec in (commands.get("objects") or {}).items():
+        vocab.add(str(name))
+        display = str((spec or {}).get("display_name") or "").strip()
+        if display:
+            vocab.add(display)
+        for intent in ((spec or {}).get("edge_intents") or []):
+            vocab.update(str(intent).split("."))
+    return {word for word in vocab if word}
+
+
+def _judgment_code() -> str:
+    """模块源码**剥掉 docstring**（注释由 ast 天然丢弃）——docstring 里正当地写着
+    「路线」「订单」这些领域词，裸扫源码会把说明文字读成判据（第 3 批那笔账）。"""
+    tree = ast.parse(inspect.getsource(mod))
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Module, ast.FunctionDef,
+                                 ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        body = getattr(node, "body", None) or []
+        if (body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            node.body = body[1:] or [ast.Pass()]
+    return ast.unparse(tree)
+
+
+def test_domain_vocabulary_probe_is_not_empty():
+    """先证明这条断言扫得到东西——空集合会让它永远绿。"""
+    vocab = _domain_vocabulary()
+    assert len(vocab) > 50, f"知识库派生词表只有 {len(vocab)} 条，扫描口径不对"
+    assert "空调" in vocab
+
+
+def test_claim_predicate_contains_no_domain_word():
+    """判据里出现任何领域词 = 它从「形态」退化成了禁语清单——而禁语清单式的
+    防编造判据每轮 QA 都会被绕过一次（C11-A 记的正是这笔账）。
+
+    ⚠ ASCII 词按**词边界**匹配、中文词按子串（第 3 批：`dec` 是 `declared` 的子串）。
+    """
+    body = _judgment_code()
+    for word in _domain_vocabulary():
+        if re.fullmatch(r"[A-Za-z0-9_]+", word):
+            hit = re.search(rf"\b{re.escape(word)}\b", body) is not None
+        else:
+            hit = word in body
+        assert not hit, (
+            f"execution_claim 判据里出现了 VAL 领域词 `{word}`——"
+            f"「说了做没做」必须是形态量，不能认识具体对象")
+
+
+# ── 5. W14：按句剥掉声称句（谈话步 + 零动作时由 engine 调用）────────────────
+
+from runtime.execution_claim import strip_execution_claims  # noqa: E402
+
+
+def test_strip_removes_only_the_claiming_sentences():
+    text = ("好的，已为您避开此路段。已为您重新规划路线：当前位置 → A → B，全程约7.4公里。"
+            "路上注意安全。")
+    cleaned, removed = strip_execution_claims(text)
+    assert removed == 2
+    assert cleaned == "路上注意安全。"
+
+
+def test_strip_returns_empty_when_everything_was_a_claim():
+    cleaned, removed = strip_execution_claims("可以，已为您执行。")
+    assert (cleaned, removed) == ("", 1)
+
+
+def test_strip_is_a_no_op_on_plain_answers():
+    text = "为您找到 10 家川菜，推荐川胖虎、辣宴。路线已经算好了吗？"
+    assert strip_execution_claims(text) == (text, 0)
+    assert strip_execution_claims("") == ("", 0)
+
+
+def test_strip_keeps_line_structure_of_the_rest():
+    cleaned, removed = strip_execution_claims("第一行建议。\n正在为您安排。\n第三行建议。")
+    assert removed == 1
+    assert cleaned == "第一行建议。\n第三行建议。"
+
+
+# ── 6. 无主完成句（2026-10-08 观测；2026-10-10 起谈话步零动作同样剥）──────────────
+
+from runtime.execution_claim import ExecutionClaimGate, bare_execution_claim, is_execution_claim_sentence  # noqa: E402
+
+
+@pytest.mark.parametrize("text", [
+    # 2026-10-07 真栈：闲聊零动作编的一句（两族都不收）
+    "之后再前往深圳北站，全程约0.4公里、2分钟。已在路线中添加途经点。（这是您10月7日提过的）",
+    # collector 回放：8 月一轮零动作的充电回复
+    "已为前往东部华侨城的路线加入途经充电站：路特斯汽车充电站(深圳东部华侨城云海谷闪充站)（0.6km，评分3.6）。",
+    "好的，已添加。",                        # 前面一个应答短句
+    "已经关掉了。",
+])
+def test_subjectless_completion_sentences_are_stripped_from_talk(text):
+    assert bare_execution_claim(text)
+    # 两族仍不认它（族名与观测列不变，肯定句判据 `affirmation` 消费的 `is_execution_claim_sentence` 也不变）
+    assert execution_claim(text) == ""
+    assert not any(is_execution_claim_sentence(s) for s in re.split(r"(?<=[。！？])", text))
+    # 2026-10-10 起按句剥收它：回放零动作命中的 2 条与 P3 K02 的「已上锁」全是真阳性
+    cleaned, removed = strip_execution_claims(text)
+    assert removed >= 1 and not bare_execution_claim(cleaned), cleaned
+
+
+def test_a_false_lock_claim_never_leaves_a_talk_step():
+    """P3 K02（2026-10-10）：「锁车」落到闲聊，闲聊回「已上锁」，车门其实开着。一次喂入与逐字流式都剥掉。"""
+    assert strip_execution_claims("好的，已上锁。") == ("", 1)
+    gate = ExecutionClaimGate()
+    streamed = "".join(gate.feed(ch) for ch in "已上锁。车门锁好了记得拔钥匙。") + gate.flush()
+    assert "已上锁" not in streamed and gate.removed == 1
+
+
+@pytest.mark.parametrize("text", [
+    # collector 90 天回放里零动作的 16 条误报全在这两类：信息获取动词（10 条）、分句中间转述 / 能力自己的产出（6 条）
+    "已找到相关手册原文，但摘要生成暂时不可用，请查看屏幕中的手册内容，或稍后再试。",
+    "已综合 5 个来源。",
+    "已找到 5 个地点。",
+    "（有 1 个方面资料不足，已在报告中标注。）",
+    "珠海是广东省唯一至今全域禁止电动自行车上路的城市，已实施20年。",
+    "已经到了吗？",                           # 问句
+    "路线已经算好了。",                       # 有主语
+    "已为您导航到深圳北站。",                 # 「为您」归 done 一族
+    # 2026-10-10 升为剥之前按形态排除的客观陈述：数目 / 时刻、系词、程度、有无、否定
+    "已经十点了，早点休息。",
+    "已经是周五了。",
+    "已经很晚了。",
+    "已经有三个提醒了。",
+    "已经不早了。",
+    "",
+])
+def test_statements_shaped_like_it_are_not(text):
+    assert not bare_execution_claim(text)
+    if text and not execution_claim(text):
+        assert strip_execution_claims(text) == (text.strip(), 0)

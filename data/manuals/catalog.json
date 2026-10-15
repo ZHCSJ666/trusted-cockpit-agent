@@ -1,0 +1,49 @@
+{
+  "documents": [
+    {
+      "filename": "Volvo_EC40_2026_UK_en.pdf",
+      "vehicle": "Volvo EC40 2026 UK",
+      "title": "EC40 2026 (25w46) User Manual",
+      "source_url": "https://www.volvocars.com/static/support-content/pdfs/uk_en-GB_ec40_2026_UM_8bbd937f411a2582b90516ef58b938ae.pdf",
+      "sha256": "1fcca03a413beb0242dd5282a5f645b2b1b5a313610e620e46ec6c28ac4a0939",
+      "downloaded_at": "2026-10-11",
+      "language": "en-GB",
+      "notice": "官方完整PDF，适用性以车型/版本/地区为准。",
+      "model": "EC40",
+      "year": "2026",
+      "region": "UK",
+      "version": "2025-10-28",
+      "pages": 433
+    },
+    {
+      "filename": "Volvo_EC40_2026_US_en.pdf",
+      "vehicle": "Volvo EC40 2026 US",
+      "title": "EC40 2026 (25w17) User Manual",
+      "source_url": "https://www.volvocars.com/static/support/pdf/us_en-US_ec40_2026_UM_d2f062b9377f3b650b74c5c6841da8fc.pdf",
+      "sha256": "15bb5257af9ff6c032b13a5ad0fc3539b038df60aaabb953bf7068faadffa0f4",
+      "downloaded_at": "2026-10-11",
+      "language": "en-US",
+      "notice": "官方完整PDF，适用性以车型/版本/地区为准。",
+      "model": "EC40",
+      "year": "2026",
+      "region": "US",
+      "version": "2025-07-03",
+      "pages": 421
+    },
+    {
+      "filename": "Tesla_Model3_2024plus_US_en.pdf",
+      "vehicle": "Tesla Model 3 2024+ US",
+      "title": "Model 3 2024+ Owner’s Manual",
+      "source_url": "https://www.tesla.com/ownersmanual/model3/en_us/Owners_Manual.pdf",
+      "sha256": "0b211f472b0089fd0fc82e09fe64513bdbddb60649371d4ad9249145bf0d539d",
+      "downloaded_at": "2026-10-11",
+      "language": "en-US",
+      "notice": "官方完整PDF，适用性以车型/版本/地区为准。",
+      "model": "Model 3",
+      "year": "2024+",
+      "region": "North America",
+      "version": "Software 2026.32",
+      "pages": 328
+    }
+  ]
+}

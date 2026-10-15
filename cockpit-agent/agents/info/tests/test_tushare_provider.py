@@ -1,0 +1,178 @@
+"""TushareStockProvider 单测：mock 掉底层 HTTP，喂 Tushare 黄金响应。不发真实网络。"""
+import asyncio
+from types import SimpleNamespace
+import pytest
+
+from agents._sdk.http import ProviderError
+from agents.info.src.providers.stock_tushare import TushareStockProvider
+
+
+def _provider(responses: dict):
+    p = TushareStockProvider(token="test-token")
+    p.requests = []
+
+    async def fake_post_json(url, json_body=None, op="post", headers=None, meta=None):
+        p.requests.append(json_body or {})
+        api_name = (json_body or {}).get("api_name", "")
+        for key, val in responses.items():
+            if key == api_name:
+                if isinstance(val, Exception):
+                    raise val
+                return val
+        raise AssertionError(f"no scripted response for api_name={api_name}")
+
+    p._http.post_json = fake_post_json
+    return p
+
+
+_DAILY_OK = {
+    "code": 0,
+    "data": {
+        "fields": ["ts_code", "trade_date", "open", "high", "low", "close",
+                    "pre_close", "change", "pct_chg", "vol", "amount"],
+        "items": [["600519.SH", "20260620", "1860.00", "1900.50",
+                   "1855.00", "1888.00", "1862.50", "25.50", "1.37",
+                   "12345", "234567.89"]],
+    },
+}
+
+_INDEX_DAILY_OK = {
+    "code": 0,
+    "data": {
+        "fields": ["ts_code", "trade_date", "open", "high", "low", "close",
+                    "pre_close", "change", "pct_chg", "vol", "amount"],
+        "items": [["000300.SH", "20260824", "3920.00", "3950.00",
+                   "3900.00", "3944.50", "3910.00", "34.50", "0.88",
+                   "123456", "987654.32"]],
+    },
+}
+
+_SSE_INDEX_DAILY_OK = {
+    "code": 0,
+    "data": {
+        "fields": ["ts_code", "trade_date", "open", "high", "low", "close",
+                   "pre_close", "change", "pct_chg", "vol", "amount"],
+        "items": [["000001.SH", "20260824", "3820.00", "3850.00",
+                   "3800.00", "3844.50", "3810.00", "34.50", "0.91",
+                   "223456", "887654.32"]],
+    },
+}
+
+_DAILY_WINDOW_OK = {
+    "code": 0,
+    "data": {
+        "fields": ["ts_code", "trade_date", "open", "high", "low", "close",
+                    "pre_close", "change", "pct_chg", "vol", "amount"],
+        # Tushare 日线默认倒序，Provider 必须输出正序给 K 线渲染。
+        "items": [
+            ["600519.SH", "20260620", "1875", "1900", "1870", "1888",
+             "1870", "18", "0.96", "12000", "222222"],
+            ["600519.SH", "20260619", "1860", "1880", "1850", "1870",
+             "1855", "15", "0.81", "11000", "211111"],
+        ],
+    },
+}
+
+_STOCK_BASIC_OK = {
+    "code": 0,
+    "data": {
+        "fields": ["ts_code", "name"],
+        "items": [["600519.SH", "贵州茅台"]],
+    },
+}
+
+
+def test_quote_parses():
+    p = _provider({"daily": _DAILY_OK, "stock_basic": _STOCK_BASIC_OK})
+    q = asyncio.run(p.quote("600519.SH"))
+    assert q.name == "贵州茅台"
+    assert q.symbol == "600519.SH"
+    assert q.price == "1888.00"
+    assert q.change == "25.50"
+    assert q.change_pct == "1.37%"
+    assert q.market_time == "20260620"
+
+
+def test_quote_resolves_short_code():
+    """6位纯数字自动补 .SH/.SZ。"""
+    p = _provider({"daily": _DAILY_OK, "stock_basic": _STOCK_BASIC_OK})
+    q = asyncio.run(p.quote("600519"))
+    assert q.symbol == "600519.SH"  # 6 开头 → SH
+
+
+def test_quote_resolves_chinese_stock_name_before_requesting_daily_data():
+    p = _provider({"daily": _DAILY_OK, "stock_basic": _STOCK_BASIC_OK})
+    lookup_requests = []
+
+    async def fake_lookup(url, params=None, op="get", headers=None, meta=None):
+        lookup_requests.append({"url": url, "params": params, "op": op})
+        return {
+            "QuotationCodeTable": {
+                "Data": [{"Code": "600519", "Name": "贵州茅台", "MktNum": "1"}],
+            },
+        }
+
+    p._lookup_http = SimpleNamespace(get_json=fake_lookup)
+
+    q = asyncio.run(p.quote("贵州茅台"))
+
+    assert q.symbol == "600519.SH"
+    daily_request = next(r for r in p.requests if r["api_name"] == "daily")
+    assert lookup_requests[0]["params"]["input"] == "贵州茅台"
+    assert not [r for r in p.requests if r["api_name"] == "stock_basic"]
+    assert daily_request["params"]["ts_code"] == "600519.SH"
+
+
+def test_quote_error_raises():
+    p = _provider({"daily": {"code": -1, "msg": "token invalid"}})
+    with pytest.raises(ProviderError, match="token invalid"):
+        asyncio.run(p.quote("600519.SH"))
+
+
+def test_quote_no_data_raises():
+    p = _provider({"daily": {"code": 0, "data": {"fields": [], "items": []}}})
+    with pytest.raises(ProviderError, match="no daily data"):
+        asyncio.run(p.quote("999999.SZ"))
+
+
+def test_index_maps_chinese_name():
+    p = _provider({"index_daily": _SSE_INDEX_DAILY_OK})
+    q = asyncio.run(p.index("上证"))
+    assert q.symbol == "000001.SH"  # 上证指数
+    assert q.price == "3844.50"
+
+
+def test_hs300_uses_index_daily_and_keeps_the_index_name():
+    p = _provider({"index_daily": _INDEX_DAILY_OK})
+
+    q = asyncio.run(p.quote("沪深300"))
+
+    assert q.name == "沪深300"
+    assert q.symbol == "000300.SH"
+    assert q.price == "3944.50"
+    assert [request["api_name"] for request in p.requests] == ["index_daily"]
+
+
+def test_history_parses_ohlc_in_chronological_order():
+    p = _provider({"daily": _DAILY_WINDOW_OK, "stock_basic": _STOCK_BASIC_OK})
+
+    candles = asyncio.run(p.history("600519.SH", limit=2))
+
+    assert [(c.date, c.open, c.high, c.low, c.close, c.volume) for c in candles] == [
+        ("20260619", "1860", "1880", "1850", "1870", "11000"),
+        ("20260620", "1875", "1900", "1870", "1888", "12000"),
+    ]
+
+
+def test_quote_rejects_a_row_for_another_security():
+    p = _provider({"index_daily": _INDEX_DAILY_OK})
+
+    with pytest.raises(ProviderError, match="no daily data"):
+        asyncio.run(p.quote("上证"))
+
+
+def test_history_rejects_rows_for_another_security():
+    p = _provider({"daily": _DAILY_WINDOW_OK})
+
+    with pytest.raises(ProviderError, match="no daily history"):
+        asyncio.run(p.history("000001.SZ", limit=2))

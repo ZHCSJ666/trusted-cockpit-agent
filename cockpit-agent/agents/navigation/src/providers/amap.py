@@ -1,0 +1,302 @@
+"""高德地图 POIProvider 适配（Web 服务 API）。
+
+凭证经 env(AMAP_KEY) 注入，绝不进代码/日志。任一调用失败抛 ProviderError，
+Agent/工厂侧据此回退 mock，不击穿主链。
+
+高德约定：坐标顺序为 ``"lng,lat"``（经度在前，经典坑）；HTTP 200 但 ``status!="1"``
+即逻辑失败（看 ``info``/``infocode``，如 key 错为 10001）；空字段有时返回 ``[]``。
+docs: https://lbs.amap.com/api/webservice/guide/api/georegeo （地理/逆地理编码）
+"""
+from __future__ import annotations
+import logging
+
+from agents._sdk.http import AsyncHttpClient, ProviderError
+from agents.navigation.src.route_geometry import route_path_from_amap
+from .base import POIProvider, POI, GeoPoint
+
+logger = logging.getLogger("agent.navigation.amap")
+
+_BASE = "https://restapi.amap.com"
+
+
+def _as_str(v) -> str:
+    """高德空字段有时返回 []，统一成空串。"""
+    if isinstance(v, list):
+        return ""
+    return str(v) if v is not None else ""
+
+
+def _pct(v) -> float:
+    """高德态势接口的百分比是字符串（"90.00%"）；解析不出记 0。"""
+    try:
+        return round(float(_as_str(v).rstrip("%") or 0), 1)
+    except ValueError:
+        return 0.0
+
+
+# 路线 `extensions=all` 逐段 `tmcs.status` 的取值 → 我们的键（批 7 ②）。高德文档给的就是这五个中文值；
+# 认不出的一律记 unknown，不猜。
+_TMC_STATUS_KEY = {"畅通": "expedite_km", "缓行": "slow_km", "拥堵": "congested_km",
+                   "严重拥堵": "blocked_km"}
+
+
+def traffic_from_path(path: dict) -> dict | None:
+    """把一条 path 的逐段 tmcs 聚合成各状态公里数；path 里一段 tmcs 都没有 ⇒ None（**没有就是没有**）。"""
+    totals = {"expedite_km": 0.0, "slow_km": 0.0, "congested_km": 0.0,
+              "blocked_km": 0.0, "unknown_km": 0.0}
+    seen = False
+    for step in (path.get("steps") or []):
+        for tmc in (step.get("tmcs") or []):
+            if not isinstance(tmc, dict):
+                continue
+            try:
+                metres = float(tmc.get("distance") or 0)
+            except (TypeError, ValueError):
+                continue
+            seen = True
+            key = _TMC_STATUS_KEY.get(_as_str(tmc.get("status")), "unknown_km")
+            totals[key] += metres / 1000
+    if not seen:
+        return None
+    return {k: round(v, 1) for k, v in totals.items()}
+
+
+class AmapPOIProvider(POIProvider):
+    def __init__(self, key: str, base_url: str = _BASE):
+        if not key:
+            raise ValueError("AMAP_KEY required for AmapPOIProvider")
+        self._key = key
+        self._base = base_url.rstrip("/")
+        self._http = AsyncHttpClient(vendor="amap", service="navigation")
+
+    async def _get(self, path: str, params: dict, op: str, meta) -> dict:
+        data = await self._http.get_json(
+            f"{self._base}{path}", params={**params, "key": self._key}, op=op, meta=meta)
+        if str(data.get("status")) != "1":
+            raise ProviderError(
+                f"amap {op} failed: {data.get('info', 'unknown')} ({data.get('infocode', '')})")
+        return data
+
+    async def _geocode(self, address: str, meta) -> str | None:
+        """地址 → "lng,lat"。无结果返回 None。"""
+        data = await self._get("/v3/geocode/geo", {"address": address}, "geocode", meta)
+        geocodes = data.get("geocodes") or []
+        return (_as_str(geocodes[0].get("location")) or None) if geocodes else None
+
+    async def geocode_address(self, address: str, city: str, meta=None) -> dict | None:
+        """门牌地址在 `city` 里的正向地理编码 → {level, location("lng,lat"), formatted_address, city}；无结果 None。
+
+        `city` 限定城市（高德 `city` 参数）：不带城市时人民路 100 号这类到处都有。失败照常抛 ProviderError，调用方降级。"""
+        data = await self._get("/v3/geocode/geo", {"address": address, "city": city}, "geocode", meta)
+        geocodes = data.get("geocodes") or []
+        if not geocodes:
+            return None
+        g = geocodes[0]
+        return {"level": _as_str(g.get("level")), "location": _as_str(g.get("location")),
+                "formatted_address": _as_str(g.get("formatted_address")), "city": _as_str(g.get("city"))}
+
+    async def geocode_level(self, address: str, meta=None) -> tuple[str, str]:
+        """正向地理编码返回 (行政级别, "lng,lat")。
+
+        R1（旅程 B3-2/B2-3 家族）：「导航去惠州/广州塔」这类短名，带 near 偏置的关键词
+        搜索会把就近弱匹配顶上 top1（0.3km 的「惠州出口」）。高德 geocode 的 level 字段
+        （国家/省/市/区县/…/兴趣点）是行政级别的权威判据。失败返回 ("", "")，调用方 fail-open。
+        """
+        try:
+            data = await self._get("/v3/geocode/geo", {"address": address}, "geocode", meta)
+        except ProviderError:
+            return "", ""
+        geocodes = data.get("geocodes") or []
+        if not geocodes:
+            return "", ""
+        return _as_str(geocodes[0].get("level")), _as_str(geocodes[0].get("location"))
+
+    async def _resolve_location(self, point: GeoPoint | None, meta) -> str | None:
+        """把 GeoPoint 归一成高德的 "lng,lat"；地名经地理编码解析。"""
+        if point is None:
+            return None
+        if point.lng and point.lat:
+            return f"{point.lng},{point.lat}"
+        addr = (point.address or "").strip()
+        if not addr:
+            return None
+        parts = addr.split(",")
+        if len(parts) == 2:  # 已是 "lng,lat"
+            try:
+                float(parts[0]); float(parts[1])
+                return addr
+            except ValueError:
+                pass
+        return await self._geocode(addr, meta)
+
+    def _poi_from(self, p: dict) -> POI:
+        lng = lat = 0.0
+        loc = _as_str(p.get("location"))
+        if "," in loc:
+            try:
+                lng_s, lat_s = loc.split(",")[:2]
+                lng, lat = float(lng_s), float(lat_s)
+            except ValueError:
+                pass
+        try:
+            rating = float((p.get("business") or {}).get("rating") or 0)
+        except (ValueError, TypeError):
+            rating = 0.0
+        dist_km = 0.0
+        dist = p.get("distance")
+        if dist not in (None, "", []):
+            try:
+                dist_km = round(float(dist) / 1000, 1)
+            except (ValueError, TypeError):
+                dist_km = 0.0
+        return POI(
+            id=_as_str(p.get("id")), name=_as_str(p.get("name")),
+            address=_as_str(p.get("address")), lat=lat, lng=lng,
+            rating=rating, distance_km=dist_km, category=_as_str(p.get("type")),
+            city=_as_str(p.get("cityname")),
+        )
+
+    async def search(self, keyword: str, near: GeoPoint = None, category: str = "",
+                     rating_min: float = 0, limit: int = 5, page: int = 1,
+                     meta: dict | None = None, *, rank: str = "",
+                     radius_m: int = 0, region: str = "") -> list[POI]:
+        loc = await self._resolve_location(near, meta)
+        common = {"keywords": keyword,
+                  "page_size": str(max(1, min(limit, 25))),
+                  "page_num": str(max(1, page)),  # 翻页："换一批"取下一页不同结果
+                  "show_fields": "business"}
+        if loc:  # 有位置 → 周边搜索（带 distance）；缺省半径 5 km、按距离排
+            params = {**common, "location": loc}
+            if rank == "weight":
+                params["sortrule"] = "weight"
+            if radius_m:
+                params["radius"] = str(max(1, min(int(radius_m), 50000)))   # 高德上限 50 km
+            data = await self._get("/v5/place/around", params, "place_around", meta)
+        else:     # 无位置 → 关键字检索；region 限定城市
+            params = dict(common)
+            if region:
+                params.update(region=region, city_limit="true")
+            data = await self._get("/v5/place/text", params, "place_text", meta)
+        results: list[POI] = []
+        for p in (data.get("pois") or []):
+            poi = self._poi_from(p)
+            if rating_min and poi.rating < float(rating_min):
+                continue
+            results.append(poi)
+            if len(results) >= limit:
+                break
+        return results
+
+    async def get_route(self, origin: GeoPoint, destination: GeoPoint,
+                        meta: dict | None = None, with_polyline: bool = False,
+                        waypoints: list[GeoPoint] | None = None,
+                        strategy: str = "") -> dict:
+        o = await self._resolve_location(origin, meta)
+        d = await self._resolve_location(destination, meta)
+        if not o or not d:
+            raise ProviderError("amap route: cannot resolve origin/destination")
+        # with_polyline=True → extensions=all 返回逐步几何，供沿途取点（如充电途经点）；
+        # 默认 base 更轻，不影响既有调用。
+        ext = "all" if with_polyline else "base"
+        params = {"origin": o, "destination": d, "extensions": ext}
+        # 路线策略（G11）：v3 driving 的 strategy——4 躲避拥堵 / 6 不走高速 / 1 费用优先 /
+        # 7 不走高速且避免收费 / 8 躲避收费和拥堵 / 9 不走高速且躲避收费和拥堵 / 3 不走快速路。
+        if strategy:
+            params["strategy"] = str(strategy)
+        # waypoints：途经点（出发地→途经点→目的地），供路线规划卡算真实全程距离/时长
+        if waypoints:
+            wlocs = []
+            for w in waypoints:
+                wl = await self._resolve_location(w, meta)
+                if wl:
+                    wlocs.append(wl)
+            if wlocs:
+                params["waypoints"] = ";".join(wlocs)
+        data = await self._get("/v3/direction/driving", params,
+                               "direction_driving", meta)
+        paths = (data.get("route") or {}).get("paths") or []
+        if not paths:
+            raise ProviderError("amap route: no path")
+        path = paths[0]
+        result = {
+            "distance_km": round(float(path.get("distance") or 0) / 1000, 1),
+            "duration_min": round(float(path.get("duration") or 0) / 60, 1),
+            "steps": [_as_str(s.get("instruction"))
+                      for s in (path.get("steps") or []) if s.get("instruction")],
+        }
+        if with_polyline:
+            # 批 7 ②：`extensions=all` 的逐段 tmcs 一直在响应里、一直被丢掉——路况能力从这里接真数据。
+            traffic = traffic_from_path(path)
+            if traffic is not None:
+                result["traffic"] = traffic
+            # 逐步累计里程，记录每步终点坐标——用于按"沿途第 N 公里"取一个途经坐标
+            points, cum_m = [], 0.0
+            for s in (path.get("steps") or []):
+                cum_m += float(s.get("distance") or 0)
+                poly = _as_str(s.get("polyline"))
+                last = poly.split(";")[-1] if poly else ""
+                if "," in last:
+                    try:
+                        lng_s, lat_s = last.split(",")[:2]
+                        points.append({"lng": float(lng_s), "lat": float(lat_s),
+                                       "cum_km": round(cum_m / 1000, 1)})
+                    except ValueError:
+                        pass
+            result["points"] = points
+            # 2026-09-11：整条折线（各 step polyline 串接、抽样 ≤ 240 点、[lat, lng]）——
+            # route_plan / charging_route 卡带上它，Android 地图页画路线。判据在 route_geometry.py 一处。
+            result["path"] = route_path_from_amap(path)
+        return result
+
+    async def reverse_geocode(self, lng: float, lat: float,
+                              meta: dict | None = None) -> GeoPoint:
+        """逆地理编码：坐标 → 地址。高德 /v3/geocode/regeo。"""
+        location = f"{lng},{lat}"
+        data = await self._get("/v3/geocode/regeo",
+                               {"location": location, "extensions": "base"},
+                               "geocode_regeo", meta)
+        regeocode = data.get("regeocode") or {}
+        addr = _as_str(regeocode.get("formatted_address"))
+        component = regeocode.get("addressComponent") or {}
+        # 直辖市的 city 是 []，城市名落在 province（北京市 / 上海市…）；adcode 是区级码，态势接口也认。
+        city = _as_str(component.get("city")) or _as_str(component.get("province"))
+        return GeoPoint(lat=lat, lng=lng, address=addr, city=city,
+                        adcode=_as_str(component.get("adcode")))
+
+    async def road_traffic(self, name: str, city: str,
+                           meta: dict | None = None) -> dict:
+        """按路名查实时态势。高德 /v3/traffic/status/road（Web 服务 API，city 必填：名称或 adcode）。"""
+        road = (name or "").strip()
+        if not road or not (city or "").strip():
+            raise ProviderError("amap road_traffic: name and city are required")
+        data = await self._get("/v3/traffic/status/road",
+                               {"name": road, "city": city.strip(), "extensions": "base"},
+                               "traffic_status_road", meta)
+        info = data.get("trafficinfo") or {}
+        evaluation = info.get("evaluation") or {}
+        if not isinstance(evaluation, dict) or not evaluation:
+            raise ProviderError(f"amap road_traffic: no evaluation for {road}")
+        try:
+            status = int(_as_str(evaluation.get("status")) or 0)
+        except ValueError:
+            status = 0
+        return {
+            "name": road,
+            "status": status,
+            "description": _as_str(evaluation.get("description")) or _as_str(info.get("description")),
+            "expedite_pct": _pct(evaluation.get("expedite")),
+            "congested_pct": _pct(evaluation.get("congested")),
+            "blocked_pct": _pct(evaluation.get("blocked")),
+            "unknown_pct": _pct(evaluation.get("unknown")),
+        }
+
+    async def poi_detail(self, poi_id: str,
+                         meta: dict | None = None) -> POI:
+        """查询 POI 详情。高德 /v5/place/detail。"""
+        data = await self._get("/v5/place/detail",
+                               {"id": poi_id, "show_fields": "business"},
+                               "place_detail", meta)
+        pois = data.get("pois") or []
+        if not pois:
+            raise ProviderError(f"amap poi_detail: no result for {poi_id}")
+        return self._poi_from(pois[0])

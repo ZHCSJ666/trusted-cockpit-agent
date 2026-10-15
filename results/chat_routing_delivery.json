@@ -1,0 +1,19 @@
+{
+  "at": "2026-10-11T16:48:14.457009+00:00",
+  "unit_tests": {
+    "passed": 151,
+    "log": "results/chat_routing_unit_tests.log"
+  },
+  "browser": "results/chat_routing_acceptance.json",
+  "note": "Fresh pre-fix sessions sometimes worked. Missing tool-call behavior covered by fault-injection regression; real model required-tool option was separately probed successfully. Existing user process on 8787 is not restarted; restart start.py to load these source changes. Original 250-case evaluation unchanged.",
+  "sha256": {
+    "cockpit-agent/interview/chat_intents.py": "92874354b605a7b264a8a87573991d7917ab91f58fcd5a9c8da8d711305b78ea",
+    "cockpit-agent/interview/runtime.py": "3e806aaf21c36acbb551b0f2d737a8070a3439dc4172db4c0d2d01914e5ab0ca",
+    "cockpit-agent/interview/llm.py": "6f038d027a4450fcd9a9e61c291b96d1b21422e7aa3f5add7906bc5d6c906c2a",
+    "cockpit-agent/interview/services.py": "372aadbdd916545f69ac166514732af5df9e76c62b4f08869ef6f704a0525d36",
+    "tests/test_chat_routing.py": "a099df7d82901c90d285b83663cf0baa5379b582ef3b9819eaaefd834b38f872",
+    "tests/test_expanded_services.py": "57478ef8044a5507ced9e28ff83c5f307020dbd3bf6cad6cfd226acc03c9d21c",
+    "tests/chat_routing_browser.py": "7750c8ab23ee2e25957d0f2f7206c3ca6fbf37e6ad56b892f4371400ba2c6037",
+    "run_tests.py": "df7840808491c98445a4612b2c822c59d5cc629c8819a59e09d044ec97376450"
+  }
+}

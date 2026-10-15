@@ -1,0 +1,339 @@
+// 在场收集器：把既有状态机的事实收齐 → derivePresence（纯函数）。
+// 这里**不做任何判断**——所有「谁压过谁」都在 presence.ts 里且有测试；这里只负责订阅与计时。
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { useStore } from 'zustand'
+
+import { performHaptic } from '@/core/haptics'
+import { commitmentTitle } from '@/core/session/actionSummary'
+import type { SessionCore } from '@/core/session/store'
+import { currentTurn } from '@/core/session/turnView'
+import { settingsStore } from '@/core/settings/store'
+import { getVisionCaptureSnapshot, subscribeVisionCapture } from '@/core/vision/frame'
+import { getAudioCaptureSnapshot, subscribeAudioCapture } from '@/core/voice/captureFacts'
+import { getAudioPlaybackSnapshot, subscribeAudioPlayback } from '@/core/voice/playbackFacts'
+import {
+  ARMED_CAPSULE_MS,
+  derivePresence,
+  DRIVING_SHEET_SETTLE_MS,
+  ERROR_SHOW_MS,
+  NOTICE_SHOW_MS,
+  RECONNECTING_GRACE_MS,
+  type Degradation,
+  type PresenceInput,
+  type PresenceSnapshot,
+  type VoiceFacts,
+} from '@/core/presence/presence'
+import { DRIVING_EXIT_GRACE_MS, drivingActive, drivingSuggested } from '@/core/presence/drivingMode'
+import { hapticCueForTransition } from '@/core/presence/hapticCue'
+import { cueToneAllowed, soundCueForTransition, type CueSlice } from '@/core/presence/soundCue'
+import { playCueTone } from '@/core/voice/cueTone'
+import { presenceTrail } from '@/core/presence/presenceTrail'
+
+import type { HandsFreeUi } from './useHandsFree'
+import type { PttHandle } from './usePtt'
+
+/** 用户对语音层的显式操作，钉在某一轮上（换轮即失效） */
+export interface SheetOverride {
+  turnId: string
+  mode: 'open' | 'dismissed'
+}
+
+export interface UsePresenceOpts {
+  interactive?: boolean
+  core: SessionCore
+  hf: HandsFreeUi
+  ptt: PttHandle | null
+  /** token 对应的 user_id（隐私栏「当前：xx」）；ServerConfig 里没有就显示 token 尾 4 位 */
+  user: string
+  sheetOverride: SheetOverride | null
+  /** 窗口横屏（§6 触发③的一个条件）。**不经 layout**——useLayout 读 snapshot.driving，
+   *  排在 usePresence 之后；这里要的是 useWindowDimensions 直接算的那一份 */
+  landscape: boolean
+  /** 此刻在支持页（宿主事实 `facts.route !== '/'`）：只影响行车档的层常驻（判据 derivePresence::supportRoute）。
+   *  缺省 false = 对话页 */
+  supportRoute?: boolean
+  /** 折叠屏桌面姿态（姿态事实，**不经 layout**，理由同 landscape）：对话页上层不升（判据 derivePresence::tabletop）。缺省 false */
+  tabletop?: boolean
+}
+
+/** 只在这些秒级量变化时才需要重算：倒计时 / 3s 延迟 / 4s error / 8s 长任务 */
+const TICK_MS = 1000
+
+/* eslint-disable react-hooks/refs, react-hooks/purity --
+ * 「`value` 最后一次变成现在这个值，是什么时刻」。connStatus 的 3s 重连宽限与 hf.fsm 的 3s
+ * armed 胶囊都要这个基准，原来在 hook 体里各写了一遍（AR06 合成到这一处）。
+ *
+ * 为什么**必须**是渲染期写 ref，而不是 React 文档推荐的「渲染期调 setState 调整派生状态」：
+ * 本 hook 在同一次渲染的末尾会调 `presenceTrail.record(input, snapshot)`（取证轨迹，见文件末）。
+ * 用 setState 调整派生状态时，当前这一趟渲染仍然读到**旧**的时刻，React 丢弃输出再渲一趟——
+ * 被丢弃的那一趟已经把一条用旧时刻算出来的轨迹记进去了。ref 写在同一趟里立即可见，没有这个缝。
+ * 换句话说这条偏离是**为了取证正确性**，不是图省事；要改得先把 record 挪出渲染期（AR09 的活）。
+ *
+ * `Date.now()` 同理：这一层是**时钟驱动**的状态机，把 now 存进 state 会在停表期间留下陈旧读数，
+ * 重新起表的那一帧倒计时就是错的（下方 `const now` 处有完整论证）。AR09 复核这两条时一并测。
+ */
+function useChangedAt<T>(value: T): number {
+  const at = useRef(Date.now())
+  const prev = useRef(value)
+  if (prev.current !== value) {
+    prev.current = value
+    at.current = Date.now()
+  }
+  return at.current
+}
+/* eslint-enable react-hooks/refs, react-hooks/purity */
+
+export function usePresence({ core, hf, ptt, user, sheetOverride, landscape, interactive = true, supportRoute = false, tabletop = false }: UsePresenceOpts): PresenceSnapshot {
+  const { messages, pendingOps, connStatus, pendingLocationText, queued, uncertainIds, turnMeta, drivingEdge, drivingDismissedAt, draftUserId } =
+    useStore(core.store)
+  const { settings } = useStore(settingsStore)
+
+  // 播报中 / 抓帧中：订阅式信号（Task 5）。
+  // **播报事实取 `playbackFacts` 而不是 `SpeechController.speaking`**（AR03）：S2S 自答走的是
+  // `S2SClient` 自己的播放器，不经 SpeechController ⇒ 旧的那一份在端到端挡位上恒 false，
+  // `agent` 于是整轮停在 idle（没有播报态、没有胶囊、没有停止入口）。
+  const vision = useSyncExternalStore(subscribeVisionCapture, getVisionCaptureSnapshot)
+  const audioCapture = useSyncExternalStore(subscribeAudioCapture, getAudioCaptureSnapshot)
+  const playback = useSyncExternalStore(subscribeAudioPlayback, getAudioPlaybackSnapshot)
+  const speaking = playback.playing
+  const visionCapturing = vision.preparing || vision.cameraActive || vision.uploading
+
+  // connStatus 变化时刻（reconnecting 3s 延迟的基准）
+  const connChangedAt = useChangedAt(connStatus)
+  // hf.fsm 变化时刻（armed 胶囊 3s 的基准，评审 D2）：登记的是事实，判据在 presence.ts
+  const hfFsmChangedAt = useChangedAt(hf.fsm)
+
+  // 挂载那一刻列表里就已经有的 error 气泡**不算刚发生**（第 2 批遗留③）：登记成 0 =
+  // 永远过期，红胶囊只留给挂载之后新出现的那条。
+  // 写成 useState 的惰性初始化器 = 每个组件实例只跑一次，且不在渲染期改 ref；
+  // seed(k, 0) 幂等，StrictMode 重跑初始化器也不改变结果。
+  useState(() => {
+    for (const m of messages) if (m.role === 'assistant' && m.error) seen.seed('err:' + m.id, 0)
+    return true
+  })
+
+  // 最近一条错误（4s 短显）
+  const lastError = useMemo(() => pickLastError(messages, (k) => seen.firstSeen(k)), [messages])
+
+  // 语音层的三个事实（判据在 derivePresence）：这一轮谁发起、用户有没有下拉过、有没有字/卡
+  const turn = currentTurn(messages)
+  const latestTurnId = turn.assistant?.id ?? ''
+  const voice: VoiceFacts = {
+    turnSource: (latestTurnId && turnMeta[latestTurnId]?.source) || 'text',
+    override: sheetOverride && sheetOverride.turnId === latestTurnId ? sheetOverride.mode : null,
+    answer: !!turn.assistant?.text,
+    card: !!turn.assistant?.uiCard,
+    // B4-11：本轮 final 到达时刻（行车档 +3s 内容回落读它）。0 = 还没答完
+    answeredAt: (latestTurnId && turnMeta[latestTurnId]?.finalAt) || 0,
+    // 2026-09-17：当前轮的用户气泡是不是转写草稿——收音中它出现之前 currentTurn 还是上一轮（判据在 derivePresence）
+    draft: !!turn.user && !!draftUserId && turn.user.id === draftUserId,
+  }
+
+  // 在飞轮 + 过程区
+  const active = [...messages].reverse().find((m) => m.role === 'assistant' && (m.pending || m.streaming || m.processActive))
+  const processLabel = active?.process?.length ? active.process[active.process.length - 1].label : ''
+  const processSince = active?.processActive ? seen.firstSeen('proc:' + active.id) : 0
+
+  // 降级轴（§12.1）：B1 只接今天就有信号的四种
+  const degradations: Degradation[] = []
+  if (ptt?.errorKind === 'permission') degradations.push({ kind: 'permission_denied', what: 'mic', text: ptt.error })
+  // 免唤醒开着却没起来（G-06）：权限成因并进 mic 权限那一条（不重复报），其余按服务降级报出原因
+  if (hf.error && hf.errorKind === 'permission' && ptt?.errorKind !== 'permission') degradations.push({ kind: 'permission_denied', what: 'mic', text: hf.error })
+  else if (hf.error && hf.errorKind !== 'permission') degradations.push({ kind: 'service_degraded', text: '免唤醒没有启动：' + hf.error })
+  if (hf.bargeInDisabled) degradations.push({ kind: 'audio_echo_degraded', reason: hf.bargeInDisabled })
+  if (hf.pipelineDegraded) degradations.push({ kind: 'service_degraded', text: hf.pipelineDegraded })
+  if (uncertainIds.length) degradations.push({ kind: 'transport_unknown', messageIds: uncertainIds })
+
+  // ── 秒级时钟 ──
+  // `now` **每次渲染都取当前值**，tick 只负责「让它重渲一次」——把 now 存进 state 会在停表
+  // 期间留下一个陈旧的读数，重新起表的**那一帧**倒计时就是错的。
+  //
+  // 而这块表**只在真的有人依赖 now 时才走**：无条件常开时真机实测（对话屏静置 10s、零交互、
+  // 零消息）ChatBody 重渲 11 次、FlashList 可见气泡重渲 88 次——每秒把整列表重画一遍，
+  // 而屏上什么都没变。下面四条是 `derivePresence` 里**全部**读 now 的分支，都不成立就停表。
+  // 2s 提示：取消（§5.1.1 的隐私文案——「不会发给」而不是「未上传」）与回声（§5.2 规则 5）——取更晚的那个
+  const cancelNotice = ptt?.cancelledAt ? { text: '已取消，这段话不会发给小舟', at: ptt.cancelledAt } : null
+  const echoNotice = hf.echoAt ? { text: '像是我自己的声音，没算数', at: hf.echoAt } : null
+  // 云端拒掉免唤醒那一句（2026-10-10）：提示文字由免唤醒回路给（两端同一句），这里只取最近的一条
+  const notice = [cancelNotice, echoNotice, hf.rejected]
+    .reduce<{ text: string; at: number } | null>((latest, n) => (n && (!latest || n.at > latest.at) ? n : latest), null)
+  // 上面那段就是这条偏离的论证：这一层是时钟驱动的状态机，`now` 必须是**这一帧**的墙钟。
+  // 存进 state 会在停表期留下陈旧读数，重新起表那一帧的倒计时就是错的；useMemo 也不行
+  // （依赖不变就冻住）。AR09 复核在场层负载时连同 useChangedAt 一起测。
+  // eslint-disable-next-line react-hooks/purity -- 见上
+  const now = Date.now()
+  // B4-2 行车档：手动 ∨ Edge 标 true ∨ 标 false 后 30s 内（判据在 drivingMode.ts）。
+  // 不再读 active?.driving——那只在在飞轮上有值，轮一结束就掉回 false
+  const drivingNow = drivingActive({ manual: settings.drivingManual, edge: drivingEdge, now, dismissedAt: drivingDismissedAt })
+  const [, bumpTick] = useState(0)
+  const needsTick =
+    pendingOps.length > 0 || // 确认卡倒计时（每秒要变）
+    (drivingEdge.falseAt > drivingEdge.trueAt && now - drivingEdge.falseAt < DRIVING_EXIT_GRACE_MS) || // 行车档 30s 退出宽限（到点要重渲一次才退得出）
+    (drivingNow && !!voice.answeredAt && now - voice.answeredAt < DRIVING_SHEET_SETTLE_MS) || // 行车档答后 3s 内容回落（到点要重渲一次才落得下去）
+    !!active?.processActive || // 长任务 8s 门槛
+    (connStatus === 'connecting' && now - connChangedAt < RECONNECTING_GRACE_MS) || // 「正在重连…」3s 门槛
+    (!!lastError && now - lastError.at < ERROR_SHOW_MS) || // error 胶囊 4s 短显
+    (hf.fsm === 'ARMED' && now - hfFsmChangedAt < ARMED_CAPSULE_MS) || // armed 胶囊 3s 隐藏
+    (!!notice && now - notice.at < NOTICE_SHOW_MS) // 取消 / 回声提示 2s 短显
+  useEffect(() => {
+    if (!needsTick) return
+    const t = setInterval(() => bumpTick((n) => n + 1), TICK_MS)
+    return () => clearInterval(t)
+  }, [needsTick])
+
+  // pendingOps 的摘要：**紧邻的上一条用户原话**（评审 D1）。带 operationId 的那条助手气泡
+  // 对每个危险动作都是同一句通用话，不是摘要。判据在 actionSummary.ts，留痕行也从它取。
+  // AR05：标题优先用服务端从**已验证的挂起步骤**合成的摘要（两条并存时不再逐字相同），
+  // 服务端没给才回落「紧邻的上一条用户原话」。风险档/截止时刻/补槽同理：有就用真的。
+  const ops = pendingOps.map((op) => ({
+    id: op.id,
+    ts: op.ts,
+    summary: commitmentTitle(messages, op.id, op.policy?.actionSummary ?? '') || '待确认的操作',
+    // 策略在但不可信（风险档认不出）时按 high 处理，不默认放行到低风险档
+    risk: op.policy?.usable && op.policy.risk === 'low' ? ('low' as const) : ('high' as const),
+    expiresAt: op.expiresAtMs && op.expiresAtMs > 0 ? op.expiresAtMs - (op.clockSkewMs || 0) : 0,
+    // 进度条分母取**服务端窗口**（截止时刻 - 服务端此刻），不是本地 TTL：
+    // 服务端说 60s 而分母写死 300s，进度条一开始就只剩 1/5，看着像马上要过期
+    windowMs:
+      op.policy?.expiresAtMs && op.policy.serverNowMs
+        ? op.policy.expiresAtMs - op.policy.serverNowMs
+        : op.slot?.expiresAtMs && op.slot.serverNowMs
+          ? op.slot.expiresAtMs - op.slot.serverNowMs
+          : 0,
+    // 策略在、但风险档认不出 ⇒ 这条确认不可信，UI 停手
+    policyBroken: !!op.policy && !op.policy.usable,
+    slot: op.slot
+      ? {
+          missing: op.slot.displayName || op.slot.slot,
+          state: op.slot.state === 'held' ? ('held' as const) : ('active' as const),
+          expiresAt: op.slot.expiresAtMs && op.slot.expiresAtMs > 0
+            ? op.slot.expiresAtMs - (op.clockSkewMs || 0)
+            : 0,
+          suggestions: op.slot.suggestions,
+        }
+      : undefined,
+  }))
+
+  const input: PresenceInput = {
+    now,
+    connStatus,
+    connChangedAt,
+    hfEnabled: settings.handsFree,
+    hfUsable: hf.availability.usable,
+    hfFsm: hf.fsm,
+    hfFsmChangedAt,
+    ptt: ptt?.state ?? 'idle',
+    partial: ptt?.partial || hf.partial || '',
+    turn: {
+      pending: !!active?.pending,
+      streaming: !!active?.streaming,
+      processActive: !!active?.processActive,
+      processLabel,
+      processSince,
+    },
+    speaking,
+    pendingOps: ops,
+    pendingLocation: pendingLocationText !== null,
+    voicePipeline: settings.voicePipeline,
+    visionCapturing,
+    audioCapture,
+    visionCameraActive: vision.cameraActive,
+    visionUploading: vision.uploading,
+    queued,
+    lastError,
+    degradations,
+    driving: drivingNow,
+    // B4-10 §6 触发③：身份 C + 横屏 + 常亮 ⇒ **只建议**（判据在 drivingMode.ts，这里只搬事实）
+    drivingSuggest: drivingSuggested({
+      identity: settings.deviceRole,
+      landscape,
+      keepAwake: settings.keepAwake,
+      active: drivingNow,
+    }),
+    identity: settings.deviceRole,
+    user,
+    voice,
+    notice,
+    supportRoute,
+    tabletop,
+  }
+  const snapshot = derivePresence(input)
+  // 在场轨迹（B2 T14，§11.5）：轴没变就不记 ⇒ 渲染期调用是幂等的（每秒 tick / StrictMode 双渲都不留痕）
+  presenceTrail.record(input, snapshot)
+
+  // B3-5 触感：判据纯函数、执行挂 effect——**不挂渲染期**（触感不幂等，StrictMode 双渲会双振；
+  // 上面 presenceTrail.record 能住渲染期是因为它按轴投影去重、幂等，触感没有这个性质。
+  // B2 T14 的红条「渲染 A 时动 B」是同一族）。prev 用 ref，首帧不振（prev=null）。
+  // 无依赖数组 = 每次渲染后跑；「没变就不振」由转移判据自己保证，不靠依赖数组去重。
+  const hapticPrev = useRef<PresenceSnapshot | null>(null)
+  useEffect(() => {
+    const prev = hapticPrev.current
+    hapticPrev.current = snapshot
+    if (!interactive || !prev || !settings.hapticsEnabled) return
+    const kind = hapticCueForTransition(prev, snapshot)
+    if (kind) performHaptic(kind)
+  })
+
+  // B4-4 提示音：与触感同一形态（判据纯函数 + effect 执行，不挂渲染期）。切片多带 hfFsm——
+  // 唤醒确认音只给唤醒（ARMED→LISTENING），PTT 按下进 listening 不响（§4.2）。行车档强制开（Q6）
+  const cuePrev = useRef<CueSlice | null>(null)
+  useEffect(() => {
+    const prev = cuePrev.current
+    const cur: CueSlice = { primary: snapshot.primary, hfFsm: input.hfFsm }
+    cuePrev.current = cur
+    if (!interactive || !prev || !cueToneAllowed(settings.cueToneEnabled, snapshot.driving)) return
+    const kind = soundCueForTransition(prev, cur)
+    if (kind) playCueTone(kind)
+  })
+
+  return snapshot
+}
+
+// ── 时刻登记：`Msg` 是共享类型、不能加字段（计划 §0 第 5 条），所以「这条错误/过程是什么
+//    时候出现的」记在这里。**它答的是「hook 第一次看见它」**——两者只在一种情形下不一样：
+//    挂载那一刻列表里就已经有的那条。第 2 批遗留③的后果具体：几天前的一条 error 气泡会在
+//    进屏时白闪一次 4s 红胶囊。B1 的判据是 `seed()`：挂载时就在的登记成一个永远过期的时刻，
+//    只有挂载**之后**新出现的才算「刚发生」。──
+export class SeenRegistry {
+  private readonly map = new Map<string, number>()
+
+  constructor(
+    private readonly capacity = 200,
+    private readonly clock: () => number = () => Date.now(),
+  ) {}
+
+  /** 只在缺席时登记；已登记的不覆盖——第二次挂载的 seed 不许把新错误洗成旧的 */
+  seed(key: string, at: number): void {
+    if (!this.map.has(key)) this.map.set(key, at)
+  }
+
+  /** 第一次问到时登记 clock()，之后钟走了也返回同一个值 */
+  firstSeen(key: string): number {
+    const t = this.map.get(key)
+    if (t !== undefined) return t
+    const n = this.clock()
+    this.map.set(key, n)
+    if (this.map.size > this.capacity) this.map.delete(this.map.keys().next().value as string)
+    return n
+  }
+}
+
+/** 收集器共用的登记表（模块级：hook 重挂载时不重置，否则「刚发生」会被重挂载刷新一遍） */
+const seen = new SeenRegistry()
+
+export interface ErrorLike {
+  id: string
+  role: 'user' | 'assistant'
+  text: string
+  error?: boolean
+}
+
+/** 最后一条助手 error 气泡 → 胶囊要的 `{ text, at }`；`at` 由调用方给的登记表决定。 */
+export function pickLastError(
+  messages: readonly ErrorLike[],
+  at: (key: string) => number,
+): { text: string; at: number } | null {
+  const m = [...messages].reverse().find((x) => x.role === 'assistant' && x.error)
+  if (!m) return null
+  return { text: m.text.startsWith('出错了') ? '出错了' : m.text.slice(0, 20), at: at('err:' + m.id) }
+}

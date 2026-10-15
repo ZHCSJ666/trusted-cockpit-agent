@@ -1,0 +1,46 @@
+{
+  "passed": true,
+  "base_url": "http://127.0.0.1:8788",
+  "checks": [
+    {
+      "name": "new vehicle control uses actual backend and state",
+      "passed": true
+    },
+    {
+      "name": "preferences create update cross-session persistence delete",
+      "passed": true
+    },
+    {
+      "name": "real place search candidate selection route geometry",
+      "passed": true
+    },
+    {
+      "name": "weather cards show actual provider results",
+      "passed": true
+    },
+    {
+      "name": "full PDF select retrieve and original page links",
+      "passed": true
+    },
+    {
+      "name": "image upload uses real visual model no control side effects",
+      "passed": true
+    },
+    {
+      "name": "lab and workspace conversations isolated",
+      "passed": true
+    },
+    {
+      "name": "historical benchmark unchanged and compact",
+      "passed": true
+    },
+    {
+      "name": "390px all workspace tabs and document library no overflow",
+      "passed": true
+    }
+  ],
+  "page_errors": [],
+  "api_mocked": false,
+  "microphone_hardware_tested": false,
+  "camera_hardware_tested": false
+}

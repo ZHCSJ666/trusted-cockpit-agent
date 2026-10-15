@@ -1,0 +1,343 @@
+[
+  {
+    "input": "从杭州西湖出发，到杭州东站，帮我规划驾车路线",
+    "http_status": 200,
+    "status": "clarify",
+    "message": "起点有多个匹配，请补充完整地址。",
+    "steps": [
+      {
+        "id": "s1",
+        "tool": "plan_route",
+        "args": {
+          "destination": "杭州东站",
+          "origin": "杭州西湖"
+        },
+        "depends_on": [],
+        "status": "clarify",
+        "message": "起点有多个匹配，请补充完整地址。",
+        "data": {
+          "places": [
+            {
+              "id": "way/975340431",
+              "name": "杭州西湖国宾馆",
+              "lat": 30.2394137,
+              "lon": 120.1291445,
+              "address": "中国 · 浙江省 · 杭州市 · 北山街道 · 杨公堤 · 18",
+              "source_url": "https://www.openstreetmap.org/way/975340431",
+              "provider": "Photon / OpenStreetMap",
+              "kind": "commercial",
+              "osm_key": "landuse",
+              "fetched_at": "2026-10-11T16:39:21.085939+00:00",
+              "data_mode": "live",
+              "cache_age_seconds": 0,
+              "distance_m": 4592
+            },
+            {
+              "id": "way/547675730",
+              "name": "杭州西湖蓄电池厂",
+              "lat": 30.2905708,
+              "lon": 120.2307215,
+              "address": "中国 · 浙江省 · 杭州市 · 彭埠街道",
+              "source_url": "https://www.openstreetmap.org/way/547675730",
+              "provider": "Photon / OpenStreetMap",
+              "kind": "industrial",
+              "osm_key": "landuse",
+              "fetched_at": "2026-10-11T16:39:21.085939+00:00",
+              "data_mode": "live",
+              "cache_age_seconds": 0,
+              "distance_m": 7489
+            },
+            {
+              "id": "relation/13164471",
+              "name": "杭州西湖风景名胜区",
+              "lat": 30.2259049,
+              "lon": 120.1195323,
+              "address": "中国 · 浙江省 · 杭州市",
+              "source_url": "https://www.openstreetmap.org/relation/13164471",
+              "provider": "Photon / OpenStreetMap",
+              "kind": "nature_reserve",
+              "osm_key": "leisure",
+              "fetched_at": "2026-10-11T16:39:21.085939+00:00",
+              "data_mode": "live",
+              "cache_age_seconds": 0,
+              "distance_m": 6355
+            },
+            {
+              "id": "way/1089599243",
+              "name": "杭州西湖茶叶市场",
+              "lat": 30.1641245,
+              "lon": 120.0722742,
+              "address": "中国 · 浙江省 · 杭州市 · 转塘街道",
+              "source_url": "https://www.openstreetmap.org/way/1089599243",
+              "provider": "Photon / OpenStreetMap",
+              "kind": "retail",
+              "osm_key": "landuse",
+              "fetched_at": "2026-10-11T16:39:21.085939+00:00",
+              "data_mode": "live",
+              "cache_age_seconds": 0,
+              "distance_m": 14590
+            },
+            {
+              "id": "way/1086184082",
+              "name": "杭州西湖被服有限公司",
+              "lat": 30.1343395,
+              "lon": 120.067519,
+              "address": "中国 · 浙江省 · 杭州市 · 转塘街道",
+              "source_url": "https://www.openstreetmap.org/way/1086184082",
+              "provider": "Photon / OpenStreetMap",
+              "kind": "industrial",
+              "osm_key": "landuse",
+              "fetched_at": "2026-10-11T16:39:21.085939+00:00",
+              "data_mode": "live",
+              "cache_age_seconds": 0,
+              "distance_m": 17673
+            }
+          ]
+        }
+      }
+    ],
+    "trace": [
+      {
+        "stage": "input",
+        "status": "ok",
+        "detail": {
+          "text": "从杭州西湖出发，到杭州东站，帮我规划驾车路线",
+          "source": "user",
+          "vehicle_source": "simulated"
+        }
+      },
+      {
+        "stage": "planner",
+        "status": "ok",
+        "detail": {
+          "round": 1,
+          "tier": "T1",
+          "model": "moonshotai/Kimi-K3",
+          "usage": {
+            "prompt_tokens": 3369,
+            "completion_tokens": 105,
+            "total_tokens": 3474
+          },
+          "latency_ms": 1654.7
+        }
+      },
+      {
+        "stage": "schema",
+        "status": "ok",
+        "detail": {
+          "tool": "plan_route",
+          "step": "s1"
+        }
+      },
+      {
+        "stage": "tool_result",
+        "status": "clarify",
+        "detail": {
+          "step": "s1",
+          "tool": "plan_route",
+          "message": "起点有多个匹配，请补充完整地址。"
+        }
+      },
+      {
+        "stage": "workflow",
+        "status": "stopped",
+        "detail": "需要补槽、确认或出现硬性拒绝时停止后续执行，不自动绕过。"
+      }
+    ],
+    "model": {
+      "model": "moonshotai/Kimi-K3",
+      "usage": {
+        "prompt_tokens": 3369,
+        "completion_tokens": 105,
+        "total_tokens": 3474
+      },
+      "latency_ms": 1654.7
+    }
+  },
+  {
+    "input": "给我查一下今天有什么新闻",
+    "http_status": 200,
+    "status": "answered",
+    "message": "新闻：1. 今日新闻丨多部门出手整顿“速成车”！银河战舰700、新款深蓝L06、新款启源A06上市！特斯拉9月中国销量64837台！ - 电子工程专辑；2. 今日新闻汇｜横店入境游升温 外国游客循着中国影视剧“入戏” - ThePaper.cn；3. Brother Eli价格：SLAY/USD价格图表、市值与今日新闻 - CoinGecko；4. 今日新闻丨保时捷发布2035全新战略！乐道汽车达成20万台交付！ - 电子工程专辑；5. 今日新闻8分钟｜男子港铁遇查骂警被捕 ｜元朗5人MMA两女互扯头发 - 香港01；6. 今日新闻丨捷途旅行者7开启预售，预售价14.99-17.99万元！捷豹Type 01正式亮相！ - 电子工程专辑；7. TeleMoney价格：TM/USD价格图表、市值与今日新闻 - CoinGecko；8. 今日新闻丨比亚迪王朝网第1000万辆车下线！国庆前3天高速新能源汽车充电近300万次！ - 电子工程专辑",
+    "steps": [
+      {
+        "id": "s1",
+        "tool": "get_news",
+        "args": {
+          "limit": 8,
+          "topic": "今日新闻"
+        },
+        "depends_on": [],
+        "status": "answered",
+        "message": "新闻：1. 今日新闻丨多部门出手整顿“速成车”！银河战舰700、新款深蓝L06、新款启源A06上市！特斯拉9月中国销量64837台！ - 电子工程专辑；2. 今日新闻汇｜横店入境游升温 外国游客循着中国影视剧“入戏” - ThePaper.cn；3. Brother Eli价格：SLAY/USD价格图表、市值与今日新闻 - CoinGecko；4. 今日新闻丨保时捷发布2035全新战略！乐道汽车达成20万台交付！ - 电子工程专辑；5. 今日新闻8分钟｜男子港铁遇查骂警被捕 ｜元朗5人MMA两女互扯头发 - 香港01；6. 今日新闻丨捷途旅行者7开启预售，预售价14.99-17.99万元！捷豹Type 01正式亮相！ - 电子工程专辑；7. TeleMoney价格：TM/USD价格图表、市值与今日新闻 - CoinGecko；8. 今日新闻丨比亚迪王朝网第1000万辆车下线！国庆前3天高速新能源汽车充电近300万次！ - 电子工程专辑",
+        "data": {
+          "items": [
+            {
+              "title": "今日新闻丨多部门出手整顿“速成车”！银河战舰700、新款深蓝L06、新款启源A06上市！特斯拉9月中国销量64837台！ - 电子工程专辑",
+              "url": "https://news.google.com/rss/articles/CBMiU0FVX3lxTE5rdElkY2Zqd1pZNTl4dWQxNGpTM3hFd2otM3ZUcEUxdy1HbzdnaVo0SnE0ZFRwX2U5bG1yb09kYk81UGhDYjk3MVlWekxYSHBxd3J3?oc=5",
+              "snippet": "今日新闻丨多部门出手整顿“速成车”！银河战舰700、新款深蓝L06、新款启源A06上市！特斯拉9月中国销量64837台！    电子工程专辑",
+              "published_at": "Sat, 10 Oct 2026 16:13:00 GMT",
+              "source": "电子工程专辑"
+            },
+            {
+              "title": "今日新闻汇｜横店入境游升温 外国游客循着中国影视剧“入戏” - ThePaper.cn",
+              "url": "https://news.google.com/rss/articles/CBMiXkFVX3lxTFBvUnBtVktwVkNjTXZTX1h6UmVJbWZtbUdXb0hNZ1ByLVV5aXJsUVd5WFVuQzlzUE94OERvNmpvZzFQN3FXU0dHNF92TXFLcEx1VGRoVHBKQ2x1OFotZlE?oc=5",
+              "snippet": "今日新闻汇｜横店入境游升温 外国游客循着中国影视剧“入戏”    ThePaper.cn",
+              "published_at": "Tue, 06 Oct 2026 01:20:00 GMT",
+              "source": "ThePaper.cn"
+            },
+            {
+              "title": "Brother Eli价格：SLAY/USD价格图表、市值与今日新闻 - CoinGecko",
+              "url": "https://news.google.com/rss/articles/CBMigwFBVV95cUxPTUpjMjItMUsxUFFTcHRnenNDT1RHWTN1TVI3UEt4ejRocE15SDJNTmhtbzFwWGMwMWRyOHV5OGhHbGVUNFM1dGdLTE9yZ1pzWFhuRHBEeG1NSGZnUWxCMHBOM28wUlpFdG9WNXZQbzlVbGtUTWVRVmtpYmptYzk4Q0tGZw?oc=5",
+              "snippet": "Brother Eli价格：SLAY/USD价格图表、市值与今日新闻    CoinGecko",
+              "published_at": "Sun, 11 Oct 2026 16:09:55 GMT",
+              "source": "CoinGecko"
+            },
+            {
+              "title": "今日新闻丨保时捷发布2035全新战略！乐道汽车达成20万台交付！ - 电子工程专辑",
+              "url": "https://news.google.com/rss/articles/CBMiU0FVX3lxTE9DdTd1aGtDNDFTbWZpdTBnOVVucGZSN2tiZkp6ODdkWHoxVUtZOEU0bEZURXBNZHF5eFN5WUVydkhiZ3RkREpmd3Y5NU1TSDdwbHFv?oc=5",
+              "snippet": "今日新闻丨保时捷发布2035全新战略！乐道汽车达成20万台交付！    电子工程专辑",
+              "published_at": "Thu, 08 Oct 2026 23:00:00 GMT",
+              "source": "电子工程专辑"
+            },
+            {
+              "title": "今日新闻8分钟｜男子港铁遇查骂警被捕 ｜元朗5人MMA两女互扯头发 - 香港01",
+              "url": "https://news.google.com/rss/articles/CBMirwNBVV95cUxNd1NMbS1CUHl1ekJucklQbWRjU1BqdFpQaDdsSU16aDItdVMxeWV1R1I3NzFuZnFrN3hfQkdEVFZUd2FWTUtGRXJkazF6LWV1T3RnTUh4eDVieTMyVEx2QzFCZ2FxYmtYNEhxdGZlUXZUZHZlaW9pSTlhWFZSMVhrSlFpZ0ZSX0RLQm5SR3NOWklkclNRQTl3dmp2MVdya1dSOVpmaFRFODJ2MER3YWdybzdxVl9vblhybTVPcm4tRkRRTFNtSXFxNVZZYmRiUUtnQ1Qyb18tVnV3N2lZUEk4YkMtMjdKRnphcG1FQkN1dG82eXdoRVphY2hmMzE2b28zbEpIamVMYUtwV01zRHZ2QVhYclVZbHhSX3ZaN1h5N3lYdjRpMWktQW5Hb1N4ZFpDZnF3YXF3TXhGbEt3ZFp3aWIxc1hrYlpSLU90cXMxUmtVWE52MVhRYTVoRlgyWHRoOWFfdElPMlFSSzJlQVhTN1RraFp3U0FYQnEzUFY5cTIxNGhJdW1ETmV0MG5fcV9aNFNKSGlNRk1JU2JRZ1dyTm02Yk1qcmREUk9TRFhpYw?oc=5",
+              "snippet": "今日新闻8分钟｜男子港铁遇查骂警被捕 ｜元朗5人MMA两女互扯头发    香港01",
+              "published_at": "Sun, 11 Oct 2026 13:00:00 GMT",
+              "source": "香港01"
+            },
+            {
+              "title": "今日新闻丨捷途旅行者7开启预售，预售价14.99-17.99万元！捷豹Type 01正式亮相！ - 电子工程专辑",
+              "url": "https://news.google.com/rss/articles/CBMiU0FVX3lxTE5zckYxYVZGVzNVdTdHcmdOMzc4Ym95UWpEcElpUnZUdVUyZ0dBNTdrazF4dksyQUdlMUZfZnZETzB5WlZ1YldWRG9KdXdKbjN2OUlZ?oc=5",
+              "snippet": "今日新闻丨捷途旅行者7开启预售，预售价14.99-17.99万元！捷豹Type 01正式亮相！    电子工程专辑",
+              "published_at": "Wed, 07 Oct 2026 16:03:00 GMT",
+              "source": "电子工程专辑"
+            },
+            {
+              "title": "TeleMoney价格：TM/USD价格图表、市值与今日新闻 - CoinGecko",
+              "url": "https://news.google.com/rss/articles/CBMigAFBVV95cUxOYjVDd05DbUt1UnFGck9iQnlhY1NLcVNOTXMxeWcwNUdrdzVUNXVxZnhkcHVGYVJLcVphenpHTHBCM0FPVzhzaEZhMDVBVm92UlhkWlZ1SUJLWS16TE1ySTJfZjRjMnNIeUh4bFJUenhlaHkwMU5MSjNNOHdJMXNQag?oc=5",
+              "snippet": "TeleMoney价格：TM/USD价格图表、市值与今日新闻    CoinGecko",
+              "published_at": "Sun, 11 Oct 2026 07:00:45 GMT",
+              "source": "CoinGecko"
+            },
+            {
+              "title": "今日新闻丨比亚迪王朝网第1000万辆车下线！国庆前3天高速新能源汽车充电近300万次！ - 电子工程专辑",
+              "url": "https://news.google.com/rss/articles/CBMiU0FVX3lxTE9GaTlVTmZvdUtidGUwX21UMm5PR0F6dmFCX0NEZm5DdVJPdlgxckRKa3hvc18tYXBfWG9uNUhfakFkNjhlX3pqc0RXQ2RLbS1DeVIw?oc=5",
+              "snippet": "今日新闻丨比亚迪王朝网第1000万辆车下线！国庆前3天高速新能源汽车充电近300万次！    电子工程专辑",
+              "published_at": "Tue, 06 Oct 2026 16:00:00 GMT",
+              "source": "电子工程专辑"
+            }
+          ],
+          "provider": "Google News RSS",
+          "fetched_at": "2026-10-11T16:39:21.203400+00:00",
+          "data_mode": "live",
+          "cache_age_seconds": 0,
+          "content_trust": "external_untrusted"
+        }
+      },
+      {
+        "id": "s2",
+        "tool": "finish",
+        "args": {
+          "message": "为你找到以下近期新闻（来源：Google News RSS）：\n\n1. 多部门出手整顿\"速成车\"，银河战舰700、新款深蓝L06、新款启源A06上市，特斯拉9月中国销量64837台（电子工程专辑，10月10日）\n2. 横店入境游升温，外国游客循着中国影视剧\"入戏\"（澎湃新闻，10月6日）\n3. 保时捷发布2035全新战略，乐道汽车达成20万台交付（电子工程专辑，10月8日）\n4. 男子港铁遇查骂警被捕；元朗5人MMA两女互扯头发（香港01，10月11日）\n5. 捷途旅行者7开启预售，预售价14.99-17.99万元，捷豹Type 01正式亮相（电子工程专辑，10月7日）\n6. 比亚迪王朝网第1000万辆车下线，国庆前3天高速新能源汽车充电近300万次（电子工程专辑，10月6日）\n\n需要了解哪条新闻的更多细节吗？"
+        },
+        "depends_on": [
+          "s1"
+        ],
+        "status": "answered",
+        "message": "",
+        "data": {}
+      }
+    ],
+    "trace": [
+      {
+        "stage": "input",
+        "status": "ok",
+        "detail": {
+          "text": "给我查一下今天有什么新闻",
+          "source": "user",
+          "vehicle_source": "simulated"
+        }
+      },
+      {
+        "stage": "planner",
+        "status": "ok",
+        "detail": {
+          "round": 1,
+          "tier": "T1",
+          "model": "moonshotai/Kimi-K3",
+          "usage": {
+            "prompt_tokens": 3362,
+            "completion_tokens": 145,
+            "total_tokens": 3507
+          },
+          "latency_ms": 1642.6
+        }
+      },
+      {
+        "stage": "schema",
+        "status": "ok",
+        "detail": {
+          "tool": "get_news",
+          "step": "s1"
+        }
+      },
+      {
+        "stage": "tool_result",
+        "status": "answered",
+        "detail": {
+          "step": "s1",
+          "tool": "get_news",
+          "message": "新闻：1. 今日新闻丨多部门出手整顿“速成车”！银河战舰700、新款深蓝L06、新款启源A06上市！特斯拉9月中国销量64837台！ - 电子工程专辑；2. 今日新闻汇｜横店入境游升温 外国游客循着中国影视剧“入戏” - ThePaper.cn；3. Brother Eli价格：SLAY/USD价格图表、市值与今日新闻 - CoinGecko；4. 今日新闻丨保时捷发布2035全新战略！乐道汽车达成20万台交付！ - 电子工程专辑；5. 今日新闻8分钟｜男子港铁遇查骂警被捕 ｜元朗5人MMA两女互扯头发 - 香港01；6. 今日新闻丨捷途旅行者7开启预售，预售价14.99-17.99万元！捷豹Type 01正式亮相！ - 电子工程专辑；7. TeleMoney价格：TM/USD价格图表、市值与今日新闻 - CoinGecko；8. 今日新闻丨比亚迪王朝网第1000万辆车下线！国庆前3天高速新能源汽车充电近300万次！ - 电子工程专辑"
+        }
+      },
+      {
+        "stage": "planner",
+        "status": "ok",
+        "detail": {
+          "round": 2,
+          "tier": "T2",
+          "model": "moonshotai/Kimi-K3",
+          "usage": {
+            "prompt_tokens": 7329,
+            "completion_tokens": 270,
+            "total_tokens": 7599
+          },
+          "latency_ms": 1164.0
+        }
+      },
+      {
+        "stage": "schema",
+        "status": "ok",
+        "detail": {
+          "tool": "finish",
+          "step": "s2"
+        }
+      },
+      {
+        "stage": "tool_result",
+        "status": "answered",
+        "detail": {
+          "step": "s2",
+          "tool": "finish",
+          "message": ""
+        }
+      },
+      {
+        "stage": "workflow",
+        "status": "stopped",
+        "detail": "需要补槽、确认或出现硬性拒绝时停止后续执行，不自动绕过。"
+      }
+    ],
+    "model": {
+      "model": "moonshotai/Kimi-K3",
+      "usage": {
+        "prompt_tokens": 7329,
+        "completion_tokens": 270,
+        "total_tokens": 7599
+      },
+      "latency_ms": 1164.0
+    }
+  }
+]

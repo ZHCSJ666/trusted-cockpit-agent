@@ -1,0 +1,994 @@
+"""候选集一等对象（QA 卡 Q2）。
+
+**它替换掉的东西**：`Focus` 里一个 `list[str]` 名字数组 + 每轮从当前 plan 重建。
+三条后果各自对应一族问题——
+
+  · 每轮重建 ⇒ 任何一轮不产生候选就抹平上一份（I-019）；
+  · 只存名字 ⇒ 卡片上渲染了营业时间/评分/价格，下一轮上下文里一个字都没有
+    （I-018/I-023）。**卡片是终点**：结构化结果一旦渲染成卡片就不再是可消费的事实，
+    后续比较/合计/序数只能交给 LLM 从话术里回忆——而它没有那些数；
+  · 无来源无版本 ⇒ nearby POI / 商户菜单 / 途经点 / 充电目的地共用一格（I-030）。
+
+**N5 是本卡最容易修错的一处**：I-011 的真根因不是「失败的重搜清空了候选」——
+那次重搜**根本没失败**，泛化兜底搜出 10 家「美食」，于是它**合法地**覆盖了上一份
+川菜候选。所以要修的不是「失败不覆盖成功」，是「**兜底不得顶替用户点名的那份**」。
+"""
+from __future__ import annotations
+
+import json
+import time
+from types import SimpleNamespace
+
+from orchestrator.cloud.context import (
+    Focus, _CANDIDATE_ITEM_KEYS, _CANDIDATE_SETS_MAX, _CANDIDATE_TTL_S,
+    _candidate_items, _derive_choice_view, candidate_downlink, candidate_set_for,
+    extract_focus, label_hit, newest_candidate_set, resolve_candidate_scope,
+)
+from orchestrator.cloud.engine import PlannerEngine
+from orchestrator.cloud.models import Plan, Step
+
+
+class _St:
+    def __init__(self, value="ok"):
+        self.value = value
+
+
+def _result(step_id, data, intent=""):
+    return SimpleNamespace(step_id=step_id, status=_St(), data=data,
+                           source_intent=intent)
+
+
+def _plan(*steps):
+    return SimpleNamespace(steps=[
+        SimpleNamespace(id=sid, intent=intent, agent_id=agent, slots={})
+        for sid, intent, agent in steps])
+
+
+def _extract(intent, agent, data):
+    return extract_focus(_plan(("s1", intent, agent)),
+                         [_result("s1", data, intent)])
+
+
+#: ⚠ **2026-08-19 修：这份 fixture 原来用的是 `open_hours`，而产生方从来不产这个名字。**
+#: `nearby._item()` 出的是 `open_today`（高德 `business.opentime_today`）。于是
+#: 「白名单猜错了字段名、营业时间一个字都没留住」这个真缺陷被本文件**自己掩盖住**
+#: ——测试造了一个现实里不存在的前提，断言当然过。
+#: > CLAUDE.md §6 那条第三例：**测试若替被测系统提供了某个前提，那条前提就不再被验证。**
+#: 现在这份 fixture 逐字复刻产生方（见下方 `_PRODUCER_SHAPES` 与那条守卫）。
+_PLACES = {"items": [
+    {"id": "B0FF1", "name": "川菜·甲", "category": "川菜", "rating": 4.5,
+     "cost": "60", "distance_km": 0.8, "address": "文心五路", "city": "深圳市",
+     "tags": "川菜,辣", "open_today": "10:00-22:00", "lat": 22.5, "lng": 113.9},
+    {"id": "B0FF2", "name": "川菜·乙", "category": "川菜", "rating": 4.1,
+     "cost": "", "distance_km": 1.4, "address": "", "city": "深圳市",
+     "tags": "", "open_today": "", "lat": 22.51, "lng": 113.91},
+]}
+
+
+# ── 结构化属性真的留下来了（I-018/I-023 的载体）───────────────────────────
+
+def test_structured_attributes_survive_the_turn():
+    focus = _extract("nearby.search", "nearby", _PLACES)
+    items = focus.candidate_sets[-1]["items"]
+    assert items[0]["name"] == "川菜·甲"
+    assert items[0]["open_today"] == "10:00-22:00"
+    assert items[0]["rating"] == 4.5
+    assert items[0]["cost"] == "60"
+
+
+def test_item_fields_are_whitelisted_not_passthrough():
+    """白名单不是洁癖：`_resume_result` 已经为「整份 provider 负载落 Redis」
+    付过一次学费（商户 token/电话/地址进会话态）。加字段要有真实消费方。"""
+    kept = _candidate_items([{
+        "name": "甲", "rating": 4.5,
+        "checkout_token": "tok-secret", "deptId": "d-1",
+        "raw_payload": {"a": 1},
+    }])
+    assert kept == [{"name": "甲", "rating": 4.5}]
+
+
+def test_items_without_a_name_are_dropped():
+    """没名字的项无从指代——留着只会让「第 N 个」的序号对不上。"""
+    assert _candidate_items([{"rating": 4.5}, {"name": "甲"}]) == [{"name": "甲"}]
+
+
+# ── 来源与版本（I-030 跨域序数）────────────────────────────────────────────
+
+def test_set_records_its_source():
+    focus = _extract("luckin.menu", "mcp-bridge", {"items": [{"name": "生椰拿铁"}]})
+    entry = focus.candidate_sets[-1]
+    assert entry["source_intent"] == "luckin.menu"
+    assert entry["agent_id"] == "mcp-bridge"
+    assert entry["ts"] > 0
+
+
+# ── N5：兜底不得顶替用户点名的那份 ────────────────────────────────────────
+
+def test_fallback_set_does_not_win_ordinal_binding():
+    focus = Focus()
+    focus.candidate_sets = [
+        {"source_intent": "nearby.search", "purpose": "list", "ts": time.time(),
+         "is_fallback": False, "items": [{"name": "川菜·甲"}, {"name": "川菜·乙"}]},
+        {"source_intent": "nearby.search", "purpose": "list", "ts": time.time(),
+         "is_fallback": True, "items": [{"name": "美食·丙"}, {"name": "美食·丁"}]},
+    ]
+    entry = newest_candidate_set(focus)
+    assert [i["name"] for i in entry["items"]] == ["川菜·甲", "川菜·乙"]
+
+    # 派生视图跟着走——prompt 里渲染的也必须是点名的那份
+    _derive_choice_view(focus)
+    assert focus.last_choices == ["川菜·甲", "川菜·乙"]
+
+
+def test_all_fallback_still_resolves_when_caller_allows_it():
+    """全是兜底时才退回最近一份，且**由调用方决定要不要退**——
+    序数解析宁可诚实说没有，也不要绑到一份我猜的列表上。"""
+    focus = Focus()
+    focus.candidate_sets = [
+        {"source_intent": "nearby.search", "purpose": "list", "ts": time.time(),
+         "is_fallback": True, "items": [{"name": "美食·丙"}]}]
+    assert newest_candidate_set(focus) is None
+    assert newest_candidate_set(focus, allow_fallback=True)["items"][0]["name"] \
+        == "美食·丙"
+
+
+def test_producer_declares_fallback_via_reserved_key():
+    focus = _extract("nearby.search", "nearby",
+                     {"items": [{"name": "美食·丙"}], "_fallback": True})
+    assert focus.candidate_sets[-1]["is_fallback"] is True
+
+
+# ── 时效：粘性但不永生 ────────────────────────────────────────────────────
+
+def test_expired_sets_are_not_resolvable():
+    focus = Focus()
+    focus.candidate_sets = [
+        {"source_intent": "nearby.search", "purpose": "list",
+         "ts": time.time() - _CANDIDATE_TTL_S - 1,
+         "is_fallback": False, "items": [{"name": "陈年·甲"}]}]
+    assert newest_candidate_set(focus, allow_fallback=True) is None
+
+
+def test_timestampless_legacy_set_is_treated_as_expired():
+    """0 = 旧数据无时间戳，按过期处理（同 `last_places_ts` 口径）。
+    上一版部署留下的焦点不能变成一份**永不过期**的候选。"""
+    focus = Focus()
+    focus.candidate_sets = [
+        {"source_intent": "x", "purpose": "list", "ts": 0,
+         "is_fallback": False, "items": [{"name": "甲"}]}]
+    assert newest_candidate_set(focus, allow_fallback=True) is None
+
+
+def test_capacity_is_bounded():
+    assert _CANDIDATE_SETS_MAX == 3
+
+
+# ── 派生视图：形状不变，数据来源变了 ──────────────────────────────────────
+
+def test_choice_view_shape_is_unchanged():
+    focus = _extract("nearby.search", "nearby", _PLACES)
+    assert focus.last_choices == ["川菜·甲", "川菜·乙"]
+    assert focus.last_choice_purpose == "list"
+
+
+def test_waypoint_purpose_still_derived():
+    focus = _extract("navigation.search_poi", "navigation",
+                     {"stops": [{"name": "加油站·甲"}]})
+    assert focus.last_choice_purpose == "waypoint"
+
+
+def test_no_candidates_leaves_the_view_empty():
+    """对照：本轮没有候选就是没有——派生视图不许凭空造。
+    （跨轮保住上一份是 `update_focus` 的接力职责，不是 `extract_focus` 的。）"""
+    focus = _extract("hvac.set", "vehicle", {})
+    assert focus is None or not focus.last_choices
+
+
+# ── 跨轮：台账粘性，新旧共存而不是互相覆盖 ────────────────────────────────
+
+import asyncio  # noqa: E402
+
+from orchestrator.cloud.context import ContextManager  # noqa: E402
+from orchestrator.cloud.models import Plan, Step, StepResult, StepStatus  # noqa: E402
+from orchestrator.cloud.session import SessionStore  # noqa: E402
+
+
+def _mgr():
+    return ContextManager(clients=SimpleNamespace(), session=SessionStore())
+
+
+def _turn(intent, agent, data):
+    return (Plan(steps=[Step(id="s1", agent_id=agent, intent=intent)]),
+            [StepResult(step_id="s1", status=StepStatus.OK,
+                        source_intent=intent, data=data)])
+
+
+def _drive(manager, turns):
+    async def _run():
+        for plan, results in turns:
+            await manager.update_focus("sess", plan, results, user_id="u1")
+        return await manager._load_focus("sess", "u1")
+    return asyncio.run(_run())
+
+
+def test_a_turn_without_candidates_does_not_wipe_the_previous_set():
+    """I-019：`last_choices` 此前每轮从当前 plan 重建，任何一轮不产生候选就抹平。
+
+    ⚠ 这条**两轮测不出来**——第二轮恰好紧邻搜索轮时旧实现也可能看起来是对的；
+    同 2026-08-13 门店锚定那次「三轮才暴露」的教训，这里也跑到第三轮。
+    """
+    focus = _drive(_mgr(), [
+        _turn("nearby.search", "nearby", _PLACES),
+        _turn("info.weather", "info", {}),
+        _turn("hvac.set", "vehicle", {}),
+    ])
+    assert focus.last_choices == ["川菜·甲", "川菜·乙"]
+    assert focus.candidate_sets[-1]["items"][0]["open_today"] == "10:00-22:00"
+
+
+def test_fallback_search_does_not_displace_the_named_one():
+    """N5 的跨轮形态（CD2 原句）：川菜 → 兜底美食 → 序数仍绑川菜那份。"""
+    focus = _drive(_mgr(), [
+        _turn("nearby.search", "nearby", _PLACES),
+        _turn("nearby.search", "nearby",
+              {"items": [{"name": "美食·丙"}, {"name": "美食·丁"}],
+               "_fallback": True}),
+    ])
+    assert [i["name"] for i in newest_candidate_set(focus)["items"]] \
+        == ["川菜·甲", "川菜·乙"]
+    assert focus.last_choices == ["川菜·甲", "川菜·乙"]
+    # 兜底那份**没被丢掉**，只是不赢序数——它仍是台账里的一条
+    assert len(focus.candidate_sets) == 2
+
+
+def test_same_source_and_purpose_replaces_rather_than_accumulates():
+    """两次同类检索是同一件事的两个版本，不该占两格。"""
+    focus = _drive(_mgr(), [
+        _turn("nearby.search", "nearby", {"items": [{"name": "旧·甲"}]}),
+        _turn("nearby.search", "nearby", {"items": [{"name": "新·甲"}]}),
+    ])
+    assert len(focus.candidate_sets) == 1
+    assert focus.last_choices == ["新·甲"]
+
+
+def test_different_sources_coexist():
+    """I-030：nearby POI 与商户菜单是两份候选，跨域「第二个」才有得区分。"""
+    focus = _drive(_mgr(), [
+        _turn("nearby.search", "nearby", _PLACES),
+        _turn("luckin.menu", "mcp-bridge", {"items": [{"name": "生椰拿铁"}]}),
+    ])
+    sources = {s["source_intent"] for s in focus.candidate_sets}
+    assert sources == {"nearby.search", "luckin.menu"}
+
+
+def test_ledger_is_capped():
+    focus = _drive(_mgr(), [
+        _turn(f"x{i}.search", "a", {"items": [{"name": f"n{i}"}]})
+        for i in range(_CANDIDATE_SETS_MAX + 2)])
+    assert len(focus.candidate_sets) == _CANDIDATE_SETS_MAX
+
+
+def test_relay_carries_ts_without_renewal():
+    """同 last_places/active_route 第三条纪律：接力不续期。
+    时效从产生那一刻起算——接力多少轮都不能让「刚才那家」变成「上周那家」。"""
+    manager = _mgr()
+    focus1 = _drive(manager, [_turn("nearby.search", "nearby", _PLACES)])
+    ts1 = focus1.candidate_sets[-1]["ts"]
+    focus2 = _drive(manager, [_turn("info.weather", "info", {})])
+    assert focus2.candidate_sets[-1]["ts"] == ts1
+
+
+# ── 无候选可引用时的确定性弃权（I-052）────────────────────────────────────
+
+from orchestrator.cloud.context import references_a_candidate  # noqa: E402
+
+
+def test_candidate_reference_is_anchored_at_the_start():
+    """锚在句首是刻意的。真栈原样复现过它不该发生的样子：无任何候选集时
+    「第一个营业到几点」被答成一整条编出来的营业记录。"""
+    for t in ("第一个营业到几点？", "第二个多少钱", "刚才第三家的电话",
+              "看看第 2 个", "请问第一款有什么规格"):
+        assert references_a_candidate(t) is True, t
+
+
+def test_ordinal_inside_another_structure_is_not_a_candidate_reference():
+    """对照——**误伤面比漏判面贵**：拦错一句合法请求，用户得到的是
+    「我这边没有列表」这种答非所问。"""
+    for t in ("第二天第一个景点安排什么", "明天第一站去哪", "第三天的行程",
+              "把空调调到第一档", "帮我找附近的咖啡店"):
+        assert references_a_candidate(t) is False, t
+
+
+# ── 白名单与产生方的契约（Q2 残余，2026-08-19）────────────────────────────
+#
+# **为什么非要这条守卫**：`_CANDIDATE_ITEM_KEYS` 原来有 7 个键
+# （`open_hours`/`business_hours`/`opening_hours`/`distance`/`distance_m`/`tel`/`spec`）
+# 是按常见命名**猜**的，与任何产生方都对不上。于是 §9.1b 声称留住了「营业时间」，
+# 而真栈里 I-018「哪家最晚关门」连数据都没有。本文件的 fixture 当时也用着
+# `open_hours`，所以**测试自己把缺陷盖住了**。
+#
+# ⚠ **刻意不做 AST 自动扫描**：四个产生方里两个（charging 的两处）是列表推导里的
+# 内联字典，没有具名函数可锚。半覆盖的结构断言比没有更糟（B3/B4 那条判据），
+# 所以这里选**手写登记表 + 一条自动的「无死键」断言**：
+#   · 死键会被自动抓到（白名单里有、登记表里没有 ⇒ 红）；
+#   · 漏字段靠登记表比对（产生方加字段要来这里登记，SOP 写在 `docs/conventions.md` §9.1b）。
+
+#: 逐字复刻各产生方**当前**产出的 item 形状。改产生方就要改这里。
+_PRODUCER_SHAPES = {
+    # agents/nearby/src/agent.py::_item
+    "nearby.search": ("id", "name", "category", "rating", "cost", "distance_km",
+                      "address", "city", "tags", "open_today", "open_week",
+                      "lat", "lng"),
+    # agents/navigation/src/agent.py 的 poi_list items
+    "navigation.search_poi": ("id", "name", "rating", "distance_km", "address",
+                              "lat", "lng"),
+    # agents/charging_planner/src/agent.py 的 charging_list items
+    "charging.find": ("id", "name", "available", "total", "price", "distance_km",
+                      "operator", "lat", "lng"),
+    # agents/mcp_bridge/src/merchant/{mcdonalds,luckin}.py::_menu_item
+    "mcd.menu": ("id", "name", "price", "subtitle", "image_url"),
+}
+#: 产生方产出、但**刻意不留**的字段。每条都要有理由——空着比写错更容易被人默认放行。
+_DELIBERATELY_DROPPED = {
+    "tags": "特色标签，当前没有聚合消费方（B4：加字段要有真实消费方）",
+    "available": "充电桩空闲数，可聚合（「哪个空闲最多」）但本批不做该维度",
+    "total": "同 available，桩总数",
+    "operator": "运营商名，无消费方",
+    "subtitle": "与 price 同值，第二份声明只会漂移",
+    "image_url": "图片 URL，不该进会话态（`_resume_result` 那次学费）",
+}
+
+
+def test_the_whitelist_is_derived_from_real_producers():
+    """白名单里不许有任何产生方都不产出的键——**死键就是漂移**。"""
+    produced = {key for shape in _PRODUCER_SHAPES.values() for key in shape}
+    dead = sorted(set(_CANDIDATE_ITEM_KEYS) - produced)
+    assert not dead, (
+        f"这些白名单键没有任何产生方产出：{dead}。"
+        "要么是猜错了字段名（2026-08-19 那 7 个就是），要么该删。")
+
+
+def test_every_produced_field_is_either_kept_or_deliberately_dropped():
+    """产生方的每个字段都要有归宿：留下、或**登记为刻意不留**。
+
+    漏字段的失败模式与死键相反、代价一样：I-018 要的 `open_today` 当初就在
+    产生方手里，只是没人把它列进白名单。
+    """
+    for intent, shape in _PRODUCER_SHAPES.items():
+        for key in shape:
+            assert key in _CANDIDATE_ITEM_KEYS or key in _DELIBERATELY_DROPPED, (
+                f"{intent} 产出的 `{key}` 既不在白名单里、也没登记为刻意不留")
+
+
+def test_a_real_producer_shape_keeps_the_facts_i018_and_i023_need():
+    """端到端形状断言：拿真实形状灌进裁剪器，**I-018/I-023 要的那两个数必须活着**。
+
+    这是本批的核心回归——它红过一次（2026-08-19 离线复现：`open_today` 被裁掉、
+    `distance_km` 被裁掉、营业时间在不在 = False）。
+    """
+    place = dict.fromkeys(_PRODUCER_SHAPES["nearby.search"], "x")
+    place.update({"name": "甲", "open_today": "10:00-23:00", "rating": 4.5,
+                  "cost": "60", "distance_km": 0.8})
+    kept = _candidate_items([place])[0]
+    assert kept["open_today"] == "10:00-23:00"      # I-018 的那个数
+    assert kept["distance_km"] == 0.8
+    assert "tags" not in kept                       # 刻意不留的仍然不留
+
+    product = dict.fromkeys(_PRODUCER_SHAPES["mcd.menu"], "x")
+    product.update({"name": "巨无霸", "price": "26.50"})
+    kept = _candidate_items([product])[0]
+    assert kept["price"] == "26.50"                 # I-023 的那个数
+    assert "image_url" not in kept
+
+
+# ── 下发面（Q10 接手第 7 步）────────────────────────────────────────
+#
+# Q2 残余批**刻意没建这条通道**（history §58.6）：那批的消费方在云侧短路里、
+# 不依赖下发，而 B4 判据是「无消费方的声明只会漂移」。第 7 步（Q10 双入口收敛）
+# 才是它真正的消费方，所以到这一批才落。
+#
+# ⚠ 本组断言的重点不是「下发了什么」而是「**没有**下发什么」：
+# 「跨轮留住」和「可以离开编排」是两个问题，合成一张表就会让前者自动等于后者。
+
+def test_downlink_keeps_only_the_index_and_the_name():
+    """坐标/价格/评分/id 一个都不许出现在下发面上。
+
+    · 坐标——精确位置是红线级敏感上下文（CLAUDE.md §5），而桥的 manifest 连
+      `location` scope 都没有；候选集不能成为绕过那条声明的第二条路。
+    · 价格/评分/营业时间——它们的消费方（`candidate_query` 四个聚合维度）**在云侧**。
+    · id——收敛目标是**按钮送出的那个规范名**，再给一条 id 通道会让两个入口重新
+      变得不一样，只是反了个方向。
+    """
+    entry = {"source_intent": "nearby.search", "agent_id": "nearby",
+             "ts": 1.0, "is_fallback": False,
+             "items": [{"id": "B0FF1", "name": "川菜·甲", "lat": 22.5,
+                        "lng": 113.9, "city": "深圳市", "address": "文心五路",
+                        "rating": 4.5, "cost": "60", "price": "26.50",
+                        "open_today": "10:00-22:00", "distance_km": 0.8}]}
+    got = candidate_downlink(entry)
+    assert got == {"source_intent": "nearby.search",
+                   "items": [{"index": 1, "name": "川菜·甲"}]}
+    leaked = set(got["items"][0]) - {"index", "name"}
+    assert not leaked, f"下发面泄漏了 {sorted(leaked)}"
+
+
+def test_downlink_index_is_the_card_number_not_the_array_offset():
+    """序号从 1 开始、且**由下发方给**——裁剪会让下标漂移，序号不会。"""
+    entry = {"source_intent": "mcd.menu",
+             "items": [{"name": f"第{n}款"} for n in range(1, 15)]}
+    got = candidate_downlink(entry)
+    assert [it["index"] for it in got["items"]] == list(range(1, 11))
+
+
+def test_downlink_keeps_menu_product_identity_but_never_poi_identity():
+    """同名商品必须靠商户商品码闭合；POI id 仍不得越过位置权限边界。"""
+    menu = candidate_downlink({
+        "source_intent": "mcd.menu",
+        "items": [{"id": "M001", "name": "同名套餐"}],
+    })
+    assert menu == {
+        "source_intent": "mcd.menu",
+        "items": [{"index": 1, "name": "同名套餐", "id": "M001"}],
+    }
+
+    poi = candidate_downlink({
+        "source_intent": "nearby.search",
+        "items": [{"id": "B0FF1", "name": "某门店", "lat": 22.5, "lng": 113.9}],
+    })
+    assert poi == {
+        "source_intent": "nearby.search",
+        "items": [{"index": 1, "name": "某门店"}],
+    }
+
+
+def test_downlink_drops_nameless_items_and_empty_sets():
+    assert candidate_downlink(None) is None
+    assert candidate_downlink({"items": []}) is None
+    assert candidate_downlink({"items": [{"id": "x"}, {"name": "  "}]}) is None
+    assert candidate_downlink({"items": ["not a dict", {"name": "甲"}]}) == {
+        "source_intent": "", "items": [{"index": 1, "name": "甲"}]}
+
+
+def test_downlink_only_reaches_agents_that_declared_the_scope():
+    """与 `focus_active_route` 同一门控通道：未声明就收不到。"""
+    plan = Plan(steps=[
+        Step(id="s1", agent_id="mcp-bridge", intent="mcd.order",
+             context_scopes=["candidates"]),
+        Step(id="s2", agent_id="chitchat", intent="chitchat.talk",
+             context_scopes=[]),
+        Step(id="s3", agent_id="nearby", intent="nearby.search",
+             context_scopes=["location"]),
+    ])
+    focus = Focus(candidate_sets=[{
+        "source_intent": "mcd.menu", "agent_id": "mcp-bridge",
+        "purpose": "list", "ts": time.time(), "is_fallback": False,
+        "items": [{"name": "巨无霸套餐", "price": "36.90 元"}]}])
+
+    PlannerEngine._apply_focus_meta(plan, focus)
+
+    payload = json.loads(plan.steps[0].meta["focus_candidate_set"])
+    assert payload["items"] == [{"index": 1, "name": "巨无霸套餐"}]
+    assert "focus_candidate_set" not in plan.steps[1].meta
+    assert "focus_candidate_set" not in plan.steps[2].meta
+
+
+def test_downlink_is_absent_when_there_is_nothing_to_reference():
+    """没有可引用的候选就不写这个键——空值和「没有」必须长得不一样。"""
+    plan = Plan(steps=[Step(id="s1", agent_id="mcp-bridge", intent="mcd.order",
+                            context_scopes=["candidates"])])
+    PlannerEngine._apply_focus_meta(plan, Focus())
+    assert "focus_candidate_set" not in plan.steps[0].meta
+
+
+def test_downlink_expired_set_is_not_delivered():
+    """限龄与云侧消费方同一口径（`newest_candidate_set`），不另算一遍。"""
+    plan = Plan(steps=[Step(id="s1", agent_id="mcp-bridge", intent="mcd.order",
+                            context_scopes=["candidates"])])
+    focus = Focus(candidate_sets=[{
+        "source_intent": "mcd.menu", "ts": time.time() - _CANDIDATE_TTL_S - 1,
+        "is_fallback": False, "items": [{"name": "巨无霸套餐"}]}])
+    PlannerEngine._apply_focus_meta(plan, focus)
+    assert "focus_candidate_set" not in plan.steps[0].meta
+
+
+def test_downlink_prefers_the_set_the_user_named_over_the_fallback_one():
+    """绑哪一组的口径**只有一份**（N5）：兜底那份不得顶替用户点名的那份。"""
+    plan = Plan(steps=[Step(id="s1", agent_id="mcp-bridge", intent="mcd.order",
+                            context_scopes=["candidates"])])
+    now = time.time()
+    focus = Focus(candidate_sets=[
+        {"source_intent": "mcd.menu", "ts": now - 5, "is_fallback": False,
+         "items": [{"name": "巨无霸套餐"}]},
+        {"source_intent": "nearby.search", "ts": now, "is_fallback": True,
+         "items": [{"name": "随便什么美食"}]},
+    ])
+    PlannerEngine._apply_focus_meta(plan, focus)
+    payload = json.loads(plan.steps[0].meta["focus_candidate_set"])
+    assert payload["source_intent"] == "mcd.menu"
+
+
+# ── I-030 组指代：点名了哪一组 ────────────────────────────────────────────
+#
+# **卡上的定性被真栈取证改了一档。** 卡写的是「跨组比较做不了」（答非所问）；
+# 实测形态是**跨组会给出一个算错的确定性答案**——两家菜单都在会话里时，
+# 「麦当劳的第二个多少钱」被 `newest_candidate_set` 绑到瑞幸那组，零方差地答
+# 「「生椰拿铁」16 元」。**商品名与价格都真实存在**，没有任何一处对不上，
+# 所以它比编造更难被发现。⇒ 本节的用例先钉这一半。
+
+def _labelled(
+    intent,
+    label,
+    items,
+    *,
+    ts_offset=0.0,
+    fallback=False,
+    now=None,
+):
+    return {"source_intent": intent, "agent_id": "x", "purpose": "list",
+            "ts": (time.time() if now is None else now) + ts_offset,
+            "is_fallback": fallback,
+            "label": label, "items": items}
+
+
+def _merchant_sets():
+    """Build TTL-bound fixtures at test execution time, not module import."""
+    now = time.time()
+    return (
+        _labelled(
+            "mcd.menu",
+            "麦当劳",
+            [
+                {"name": "巨无霸", "price": 26.5},
+                {"name": "麦辣鸡腿堡", "price": 19.5},
+            ],
+            ts_offset=-60,
+            now=now,
+        ),
+        _labelled(
+            "luckin.menu",
+            "瑞幸",
+            [
+                {"name": "美式", "price": 15.0},
+                {"name": "生椰拿铁", "price": 16.0},
+            ],
+            now=now,
+        ),
+    )
+
+
+def test_merchant_sets_are_timestamped_when_each_test_requests_them(monkeypatch):
+    monkeypatch.setattr(time, "time", lambda: 10_000.0)
+
+    mcd, luckin = _merchant_sets()
+
+    assert mcd["ts"] == 9_940.0
+    assert luckin["ts"] == 10_000.0
+
+
+def test_set_records_the_label_its_producer_declared():
+    """组标签由**产生方**声明（保留键 `_candidate_label`），判据同 `_fallback`：
+    编排看不出 `mcd.menu` 那一组该叫「麦当劳」。"""
+    focus = _extract("mcd.menu", "mcp-bridge",
+                     {"items": [{"name": "巨无霸"}], "_candidate_label": "麦当劳"})
+    assert focus.candidate_sets[-1]["label"] == "麦当劳"
+
+
+def test_an_undeclared_label_leaves_the_group_unnameable():
+    """未声明 = 点不了名 = **行为逐字同旧**。这是本能力可以安全上线的全部理由：
+    没跟上的产生方不会因此改变任何一个字。"""
+    focus = _extract("navigation.search_poi", "navigation",
+                     {"items": [{"name": "甲"}]})
+    entry = focus.candidate_sets[-1]
+    assert entry["label"] == ""
+    assert label_hit("甲那份里第一个多少钱", entry) is None
+
+
+def test_a_one_character_label_is_treated_as_undeclared():
+    """1 字标签的命中面太大（同 `_named` 那条 2 字下限）——宁可点不了名。"""
+    focus = _extract("mcd.menu", "mcp-bridge",
+                     {"items": [{"name": "甲"}], "_candidate_label": "麦"})
+    assert focus.candidate_sets[-1]["label"] == ""
+
+
+def test_naming_a_group_binds_to_it_instead_of_the_newest_one():
+    """**I-030 的核心断言**：点名了麦当劳，就不许拿瑞幸那组的事实回答。"""
+    mcd, luckin = _merchant_sets()
+    focus = Focus(candidate_sets=[mcd, luckin])
+    primary, named = resolve_candidate_scope("麦当劳的第二个多少钱", focus)
+    assert primary["source_intent"] == "mcd.menu"
+    assert [g["label"] for g in named] == ["麦当劳"]
+    # 反向对照：**没点名的句子一个字都不许变**——仍是最新那一组。
+    primary, named = resolve_candidate_scope("第二个多少钱", focus)
+    assert primary["source_intent"] == "luckin.menu" and named == []
+
+
+def test_a_named_scope_never_escapes_the_named_set():
+    """「附近的麦当劳」→「看看菜单」会产生两个都叫「麦当劳」的组（门店列表 + 菜单）。
+    它们是同一家的两份东西，取新的那份；**关键是两份都姓麦当劳**——
+    无论取哪份都不会拿瑞幸的事实作答。"""
+    stores = _labelled("nearby.search", "麦当劳",
+                       [{"name": "麦当劳碧海君庭餐厅"}], ts_offset=-120)
+    mcd, luckin = _merchant_sets()
+    focus = Focus(candidate_sets=[stores, mcd, luckin])
+    primary, named = resolve_candidate_scope("麦当劳的第二个多少钱", focus)
+    assert primary["source_intent"] == "mcd.menu"
+    assert {g["source_intent"] for g in named} == {"nearby.search", "mcd.menu"}
+
+
+def test_the_label_prefix_channel_catches_the_short_form():
+    """产生方声明「川菜馆」而用户说的是「川菜」——2 字前缀通道。"""
+    entry = _labelled("nearby.search", "川菜馆", [{"name": "甲"}])
+    assert label_hit("刚才川菜列表里的第二家叫什么", entry) == 2
+    assert label_hit("附近的咖啡店呢", entry) is None
+
+
+def test_a_named_fallback_group_still_loses_to_the_named_real_one():
+    """N5 在**命中集内**同样成立——组指代多了一维筛选，不该把旧判据丢掉。"""
+    named_real = _labelled("nearby.search", "川菜馆",
+                           [{"name": "川菜·甲"}], ts_offset=-30)
+    named_fb = _labelled("nearby.search", "川菜馆",
+                         [{"name": "美食·丙"}], fallback=True)
+    focus = Focus(candidate_sets=[named_real, named_fb])
+    primary, _ = resolve_candidate_scope("川菜那份里第一家叫什么", focus)
+    assert primary["items"][0]["name"] == "川菜·甲"
+
+
+def test_an_expired_group_cannot_be_named():
+    """限龄先于点名——过期那组连被点名的资格都没有。"""
+    stale = _labelled("mcd.menu", "麦当劳", [{"name": "巨无霸"}],
+                      ts_offset=-_CANDIDATE_TTL_S - 1)
+    _, luckin = _merchant_sets()
+    focus = Focus(candidate_sets=[stale, luckin])
+    primary, named = resolve_candidate_scope("麦当劳的第二个多少钱", focus)
+    assert named == [] and primary["source_intent"] == "luckin.menu"
+
+
+# ── I-030 段 A：下发面逐步选组 ───────────────────────────────────────────
+
+def test_downlink_prefers_the_step_s_own_domain():
+    """判据是**结构的、零领域词**：步的 intent 域 == 组的 `source_intent` 域。
+
+    此前一律下发最新那一组，于是「先看瑞幸菜单、再说在麦当劳点第一个」时
+    `mcd.order` 拿到的是 luckin 那份——桥侧按域前缀拒收（那一侧 fail-safe），
+    但麦当劳那组明明还在焦点里，用户的「第一个」白丢。
+    """
+    plan = Plan(steps=[
+        Step(id="s1", agent_id="mcp-bridge", intent="mcd.order",
+             context_scopes=["candidates"]),
+        Step(id="s2", agent_id="mcp-bridge", intent="luckin.order",
+             context_scopes=["candidates"]),
+    ])
+    mcd, luckin = _merchant_sets()
+    PlannerEngine._apply_focus_meta(plan, Focus(candidate_sets=[mcd, luckin]))
+    assert json.loads(plan.steps[0].meta["focus_candidate_set"])[
+        "source_intent"] == "mcd.menu"
+    assert json.loads(plan.steps[1].meta["focus_candidate_set"])[
+        "source_intent"] == "luckin.menu"
+
+
+def test_downlink_falls_back_to_the_newest_when_the_domain_has_none():
+    """反向对照：同域没有候选时**逐字保持旧行为**（消费方自己按归属判据拒收）。
+    改成「什么都不发」是一处未经证据的收窄。"""
+    plan = Plan(steps=[Step(id="s1", agent_id="mcp-bridge", intent="mcd.order",
+                            context_scopes=["candidates"])])
+    _, luckin = _merchant_sets()
+    PlannerEngine._apply_focus_meta(plan, Focus(candidate_sets=[luckin]))
+    assert json.loads(plan.steps[0].meta["focus_candidate_set"])[
+        "source_intent"] == "luckin.menu"
+
+
+def test_candidate_set_for_keeps_the_n5_preference_within_a_domain():
+    """同域内仍然优先非兜底那份——`_newest_of` 是唯一实现，三个入口共用。"""
+    real = _labelled("nearby.search", "川菜馆", [{"name": "川菜·甲"}], ts_offset=-30)
+    fb = _labelled("nearby.search", "美食", [{"name": "美食·丙"}], fallback=True)
+    got = candidate_set_for(Focus(candidate_sets=[real, fb]), "nearby")
+    assert got["items"][0]["name"] == "川菜·甲"
+
+
+# ── I-024（Q10 残余，2026-08-30）：看得见的选择卡，它的候选也要进候选集 ────────
+
+def _need_slot_result(step_id, data, card, intent=""):
+    return SimpleNamespace(step_id=step_id, status=_St("need_slot"), data=data,
+                           ui_card=card, source_intent=intent)
+
+
+_STORES = [{"name": "瑞幸咖啡(海王银河科技大厦大堂店)", "id": "s-1"},
+           {"name": "瑞幸咖啡(麻雀岭东区餐饮街店)", "id": "s-2"}]
+
+
+def test_visible_choice_card_contributes_its_candidates():
+    """商户选店卡是 `NEED_SLOT` 的产物（「要在哪家下？」），而 `extract_focus`
+    原先只扫**成功步** ⇒ **门店候选集根本不存在**，下一句「第一个」无处可解、
+    探针的 `say_button` 也拿不到按钮（真栈 SP1/SP2/SP3 的那一层）。
+
+    ⚠ **fixture 用产生方的真实形状**：`luckin._store_choices` 的
+    `data` 里只有 `checkout_token`，候选在 **`ui_card["items"]`**。
+    首版 fixture 把候选塞进 `data`，于是测试绿、真栈仍答「没有您刚才那页选项的记录」
+    ——**装置不真实，读数就会指向错误的根因**（同 `_obs` 那次）。
+    """
+    focus = extract_focus(
+        _plan(("s1", "luckin.order", "mcp-bridge")),
+        [_need_slot_result("s1", {"checkout_token": "tok"},
+                           {"type": "merchant_choices", "purpose": "store_choice",
+                            "items": _STORES},
+                           "luckin.order")])
+
+    assert focus is not None
+    assert [c["items"][0]["name"] for c in focus.candidate_sets] == [_STORES[0]["name"]]
+
+
+def test_a_need_slot_step_without_a_choice_card_contributes_nothing():
+    """误伤对照 ①：**没渲染成选择卡的 NEED_SLOT 步，一个候选都不许进来。**
+
+    C10-A 的铁律：「第N条」只许指向**用户最后一眼看到的那份列表**。
+    用户一眼没见过的 items 收进来就是给序数指代埋雷——放宽的是**可见性**，
+    不是「成功与否」。
+    """
+    focus = extract_focus(
+        _plan(("s1", "luckin.order", "mcp-bridge")),
+        [_need_slot_result("s1", {"checkout_token": "tok"},
+                           {"type": "merchant_order_preview", "items": _STORES},
+                           "luckin.order")])
+
+    assert focus is None or not focus.candidate_sets
+
+
+def test_a_visible_choice_card_does_not_move_the_control_focus():
+    """误伤对照 ②：这一步**没做成**，所以只取候选集这一维。
+
+    目的地/城市/控制焦点都是「这一步做成了什么」——它没做成，
+    那些一个字都不许被它改写。
+    """
+    plan = SimpleNamespace(steps=[SimpleNamespace(
+        id="s1", intent="navigation.search_poi", agent_id="navigation",
+        slots={"destination": "世界之窗"})])
+    focus = extract_focus(plan, [_need_slot_result(
+        "s1", {},
+        {"type": "poi_list", "purpose": "dest_choice", "items": _STORES},
+        "navigation.search_poi")])
+
+    assert focus is not None and focus.candidate_sets
+    assert not focus.last_destination, "没做成的步不许改写目的地焦点"
+
+
+# ── 评审四轮（`4438ea6b` 真栈 RS39）：挂起轮也登记本轮已执行的事实，候选只收挂起步自己 ────────
+
+_ROUTE_SESSION = {"destination": "深圳湾公园", "lat": 22.5190, "lng": 113.9726,
+                  "waypoints": [], "strategy": "", "arrive_by_ts": 0}
+
+
+def _suspend_turn(pending):
+    """「导航去公司，顺便……」形态：s1 导航做成了（带路线会话、带一份列表），s2 挂起。"""
+    plan = _plan(("s1", "navigation.navigate_to", "navigation"), ("s2", "reminder.create", "reminder"))
+    done = _result("s1", {"destination": "深圳湾公园", "lat": 22.519, "lng": 113.9726,
+                          "_route_session": _ROUTE_SESSION, **_PLACES}, "navigation.navigate_to")
+    return extract_focus(plan, [done, pending], candidates_from={"s2"})
+
+
+def test_a_suspend_turn_still_registers_what_was_executed():
+    """挂起步是 NEED_SLOT（没做成），兄弟步的导航做成了：路线会话 / 目的地照常登记——下一句「取消导航」靠它。"""
+    focus = _suspend_turn(_need_slot_result("s2", {}, None, "reminder.create"))
+
+    assert focus is not None
+    assert focus.active_route.get("destination") == "深圳湾公园"
+    assert focus.last_destination == "深圳湾公园"
+
+
+def test_a_suspend_turn_keeps_the_siblings_list_out_of_the_candidates():
+    """C10-A：挂起 final 的卡片只是挂起步自己的，兄弟步那份列表用户没以卡片看见过 ⇒ 不进候选集；
+    挂起步自己的选择卡照常进（I-024 原来那条）。对照：完成轮（不给 `candidates_from`）兄弟步列表照旧进。"""
+    plain = _suspend_turn(_need_slot_result("s2", {}, None, "reminder.create"))
+    assert not plain.candidate_sets
+
+    card = {"type": "poi_list", "purpose": "dest_choice", "items": _STORES}
+    choice = _suspend_turn(_need_slot_result("s2", {}, card, "reminder.create"))
+    assert [c["items"][0]["name"] for c in choice.candidate_sets] == [_STORES[0]["name"]]
+    # 同层另一个也出了选择卡、但没挂起（只挂第一条）的 NEED_SLOT 步：它的卡没显示出来，同样不收
+    hidden = extract_focus(_plan(("s1", "navigation.navigate_to", "navigation"), ("s2", "reminder.create", "reminder")),
+                           [_need_slot_result("s1", {}, card, "navigation.navigate_to"),
+                            _need_slot_result("s2", {}, None, "reminder.create")],
+                           candidates_from={"s2"})
+    assert hidden is None or not hidden.candidate_sets
+
+    completed = extract_focus(
+        _plan(("s1", "navigation.navigate_to", "navigation")),
+        [_result("s1", {"_route_session": _ROUTE_SESSION, **_PLACES}, "navigation.navigate_to")])
+    assert [c["items"][0]["name"] for c in completed.candidate_sets] == ["川菜·甲"]
+
+
+# ── 评审 2026-09-19 F03 / W08：同能力不同查询共存，同查询是新版本 ───────────
+
+def _turn_with_slots(intent, agent, slots, data):
+    return (Plan(steps=[Step(id="s1", agent_id=agent, intent=intent, slots=dict(slots))]),
+            [StepResult(step_id="s1", status=StepStatus.OK,
+                        source_intent=intent, data=data)])
+
+
+def test_same_capability_with_a_different_query_keeps_both_batches():
+    """评审复算：先搜 A 附近餐厅、再搜 B 附近餐厅，两次都是 `nearby.search`——旧合并键
+    `(source_intent, purpose, is_fallback)` 让第二批顶掉第一批，「刚才 A 那批第二家」无处可解。"""
+    focus = _drive(_mgr(), [
+        _turn_with_slots("nearby.search", "nearby",
+                         {"category": "餐饮", "location": "万象城"},
+                         {"items": [{"name": "万象·甲"}, {"name": "万象·乙"}],
+                          "_candidate_label": "餐饮"}),
+        _turn_with_slots("nearby.search", "nearby",
+                         {"category": "餐饮", "location": "科技园"},
+                         {"items": [{"name": "科技·甲"}, {"name": "科技·乙"}],
+                          "_candidate_label": "餐饮"}),
+    ])
+    assert len(focus.candidate_sets) == 2
+    # 裸序数仍绑最新那批（行为逐字同旧）
+    assert focus.last_choices == ["科技·甲", "科技·乙"]
+    # 点名「万象城那批」⇒ 经既有的标签通道绑到旧批（地点提示派生自查询槽）
+    primary, named = resolve_candidate_scope("刚才万象城那批第二家怎么样", focus)
+    assert [i["name"] for i in primary["items"]] == ["万象·甲", "万象·乙"]
+    assert len(named) == 1
+
+
+def test_the_same_query_again_is_a_new_revision_not_a_second_batch():
+    """「换一批」= 同一查询的下一版：同键替换、revision+1，不占第二格。"""
+    focus = _drive(_mgr(), [
+        _turn_with_slots("nearby.search", "nearby", {"category": "餐饮", "location": "万象城"},
+                         {"items": [{"name": "旧·甲"}]}),
+        _turn_with_slots("nearby.search", "nearby", {"category": "餐饮", "location": "万象城"},
+                         {"items": [{"name": "新·甲"}]}),
+    ])
+    assert len(focus.candidate_sets) == 1
+    assert focus.candidate_sets[0]["revision"] == 2
+    assert focus.last_choices == ["新·甲"]
+
+
+def test_every_set_carries_its_query_signature_and_revision():
+    focus = _extract("nearby.search", "nearby", _PLACES)
+    entry = focus.candidate_sets[-1]
+    assert entry["query_signature"] and entry["revision"] == 1
+    assert entry.get("place_hint", "") == ""          # 没有地点槽就没有地点提示
+
+
+def test_focus_block_names_the_earlier_batch_so_the_planner_can_tell_them_apart():
+    from orchestrator.cloud.context import _render_focus
+    focus = _drive(_mgr(), [
+        _turn_with_slots("nearby.search", "nearby",
+                         {"category": "餐饮", "location": "万象城"},
+                         {"items": [{"name": "万象·甲"}, {"name": "万象·乙"}],
+                          "_candidate_label": "餐饮"}),
+        _turn_with_slots("nearby.search", "nearby",
+                         {"category": "餐饮", "location": "科技园"},
+                         {"items": [{"name": "科技·甲"}, {"name": "科技·乙"}],
+                          "_candidate_label": "餐饮"}),
+    ])
+    block = _render_focus(focus)
+    assert "最新候选=1:科技·甲/2:科技·乙" in block
+    assert "较早候选" in block and "万象城" in block and "万象·甲" in block
+
+
+def test_a_revision_is_visible_to_the_planner():
+    from orchestrator.cloud.context import _render_focus
+    focus = _drive(_mgr(), [
+        _turn_with_slots("nearby.search", "nearby", {"category": "餐饮"},
+                         {"items": [{"name": "旧·甲"}]}),
+        _turn_with_slots("nearby.search", "nearby", {"category": "餐饮"},
+                         {"items": [{"name": "新·甲"}]}),
+    ])
+    assert "第2批" in _render_focus(focus)
+
+
+def test_place_hint_matches_on_a_three_char_common_run_not_on_a_city_prefix():
+    """真栈 CD8 第 2 次取样：planner 填 `location=深圳湾万象城`，用户说「万象城」。"""
+    entry = {"label": "餐饮", "place_hint": "深圳湾万象城", "items": [{"name": "甲"}]}
+    assert label_hit("刚才万象城那批第二家评分多少", entry) is not None
+    assert label_hit("深圳今天天气怎么样", entry) is None          # 「深圳」两字不算点名
+    assert label_hit("科技园那批第二家", entry) is None
+
+
+def test_place_hint_falls_back_to_the_keyword_slot_when_the_planner_misfiles_the_place():
+    """真栈 CD8 第 3 趟第 1 次取样：planner 填 `keyword=万象城`、没填 `location`。"""
+    from orchestrator.cloud.context import _place_hint
+    assert _place_hint({"category": "餐厅", "keyword": "万象城"}) == "万象城"
+    assert _place_hint({"category": "餐厅", "location": "科技园", "keyword": "火锅"}) == "科技园"
+
+
+# ── 批 5 W18-a：被顶掉 / 过期的那批被点名时，不许悄悄换成另一批 ────────────────
+
+from orchestrator.cloud.context import (  # noqa: E402
+    _RETIRED_SETS_MAX, retired_candidate_hit)
+
+
+def _search_turn(location: str, names: list[str]):
+    """同能力、不同地点的一次 nearby 检索（W08：query_signature 靠 slots 分开）。"""
+    plan = Plan(steps=[Step(id="s1", agent_id="nearby", intent="nearby.search",
+                            slots={"keyword": "餐厅", "location": location})])
+    results = [StepResult(step_id="s1", status=StepStatus.OK, source_intent="nearby.search",
+                          data={"items": [{"name": n} for n in names],
+                                "_candidate_label": "餐饮"})]
+    return plan, results
+
+
+def test_an_evicted_set_leaves_a_tombstone_the_user_can_still_name():
+    """台账封顶 3 组：第 4 批进来时「万象城那批」被顶掉——它的名字要留下（墓碑），
+    点名它时才知道「那批已经不在」而不是把最新那批当它答。"""
+    focus = _drive(_mgr(), [
+        _search_turn("万象城", ["A1", "A2"]),
+        _search_turn("科技园", ["B1", "B2"]),
+        _search_turn("欢乐海岸", ["C1", "C2"]),
+        _search_turn("南山书城", ["D1", "D2"]),
+    ])
+    assert len(focus.candidate_sets) == _CANDIDATE_SETS_MAX
+    assert [s["place_hint"] for s in focus.retired_candidate_sets] == ["万象城"]
+    hit = retired_candidate_hit("万象城那批第二家评分多少", focus)
+    assert hit is not None and hit["place_hint"] == "万象城"
+    # 点的是还活着的那批 ⇒ 不是墓碑命中
+    assert retired_candidate_hit("科技园那批第二家评分多少", focus) is None
+    # 没点名 ⇒ 不是墓碑命中（照旧绑最新那批）
+    assert retired_candidate_hit("第二家评分多少", focus) is None
+
+
+def test_a_same_query_revision_is_not_a_tombstone():
+    """「换一批」是同键新版本（revision+1），旧版本被替换不是被顶掉——点名它仍指向新版本。"""
+    focus = _drive(_mgr(), [
+        _search_turn("万象城", ["A1", "A2"]),
+        _search_turn("万象城", ["A3", "A4"]),
+    ])
+    assert focus.retired_candidate_sets == []
+    assert focus.candidate_sets[-1]["revision"] == 2
+
+
+def test_an_expired_set_still_in_the_ledger_counts_as_retired():
+    """限龄先于点名（`test_an_expired_group_cannot_be_named`）——但过期那组被点名时，
+    也得说「不在了」，不能让最新那组顶替它作答。"""
+    stale = _labelled("mcd.menu", "麦当劳", [{"name": "巨无霸"}],
+                      ts_offset=-_CANDIDATE_TTL_S - 1)
+    _, luckin = _merchant_sets()
+    focus = Focus(candidate_sets=[stale, luckin])
+    hit = retired_candidate_hit("麦当劳的第二个多少钱", focus)
+    assert hit is not None and hit["label"] == "麦当劳"
+    assert retired_candidate_hit("瑞幸的第二个多少钱", focus) is None
+
+
+def test_tombstones_are_capped_and_aged():
+    manager = _mgr()
+    turns = [_search_turn(f"地点{i:02d}号", [f"n{i}"]) for i in range(_RETIRED_SETS_MAX + 6)]
+    focus = _drive(manager, turns)
+    assert len(focus.retired_candidate_sets) == _RETIRED_SETS_MAX
+    # 最新被顶掉的在最后
+    assert focus.retired_candidate_sets[-1]["place_hint"] == f"地点{_RETIRED_SETS_MAX + 2:02d}号"
+    old = dict(focus.retired_candidate_sets[0], ts=time.time() - 8000)
+    aged = Focus(retired_candidate_sets=[old], candidate_sets=list(focus.candidate_sets))
+    assert retired_candidate_hit(f"{old['place_hint']}那批第一个", aged) is None
+
+
+
+# ── 批 7 追加（真栈 continuity T9 → T18，2026-09-22）：地点提示优先读产生方声明的 `_candidate_place` ──
+
+def test_place_hint_prefers_the_place_the_producer_declares_over_the_slots():
+    from orchestrator.cloud.context import _place_hint
+    # planner 把地名整个丢了（真栈原槽）：只看槽 ⇒ 空；产生方声明 ⇒ 科技园
+    assert _place_hint({"cuisine": "餐厅", "sort": "rating"}) == ""
+    assert _place_hint({"cuisine": "餐厅", "sort": "rating"}, {"_candidate_place": "科技园"}) == "科技园"
+    # 声明优先于槽（槽里是别的填法时，以 Agent 真正搜的那个地方为准）
+    assert _place_hint({"keyword": "万象城"}, {"_candidate_place": "深圳湾万象城"}) == "深圳湾万象城"
+    # 声明太短 / 没声明 ⇒ 退回槽派生（行为逐字同旧）
+    assert _place_hint({"location": "科技园"}, {"_candidate_place": "x"}) == "科技园"
+    assert _place_hint({"location": "科技园"}, {}) == "科技园"
+
+
+def test_a_batch_whose_slots_lost_the_place_is_still_nameable_when_the_producer_declared_it():
+    """真栈 continuity：T9「科技园附近的餐厅」planner 槽 `{cuisine, sort}`，T16 之后「科技园那批第二家」
+    零命中 ⇒ 退回最新（南山书城）答了别人家的店。产生方声明地点后，点名绑到它自己那批。"""
+    focus = _drive(_mgr(), [
+        _turn_with_slots("nearby.search", "nearby",
+                         {"cuisine": "餐厅", "sort": "rating"},
+                         {"items": [{"name": "科技·甲"}, {"name": "科技·乙"}],
+                          "_candidate_label": "餐厅", "_candidate_place": "科技园"}),
+        _turn_with_slots("nearby.search", "nearby",
+                         {"category": "餐厅", "location": "南山书城"},
+                         {"items": [{"name": "书城·甲"}, {"name": "书城·乙"}],
+                          "_candidate_label": "美食"}),
+    ])
+    assert [s["place_hint"] for s in focus.candidate_sets] == ["科技园", "南山书城"]
+    primary, named = resolve_candidate_scope("科技园那批第二家评分多少", focus)
+    assert [i["name"] for i in primary["items"]] == ["科技·甲", "科技·乙"]
+    assert len(named) == 1
+    # 裸序数仍绑最新那批（行为逐字同旧）
+    assert focus.last_choices == ["书城·甲", "书城·乙"]

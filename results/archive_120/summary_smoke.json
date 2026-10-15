@@ -1,0 +1,77 @@
+{
+  "generated_at": "2026-10-11T11:32:26.843245+02:00",
+  "model": "vllm/moonshotai/Kimi-K3",
+  "cases": 5,
+  "repeats": 1,
+  "groups": [
+    {
+      "name": "Kimi · 简化对照",
+      "provider": "kimi",
+      "mode": "baseline",
+      "model": "vllm/moonshotai/Kimi-K3",
+      "total": 5,
+      "passed": 5,
+      "pass_rate": 1.0,
+      "consistent_rate": 1.0,
+      "avg_latency_ms": 3604.9,
+      "p95_latency_ms": 5035.7,
+      "model_errors": 0,
+      "categories": {
+        "ambiguity": {
+          "total": 5,
+          "passed": 5,
+          "pass_rate": 1.0
+        }
+      }
+    },
+    {
+      "name": "Kimi · 可信执行",
+      "provider": "kimi",
+      "mode": "guarded",
+      "model": "vllm/moonshotai/Kimi-K3",
+      "total": 5,
+      "passed": 5,
+      "pass_rate": 1.0,
+      "consistent_rate": 1.0,
+      "avg_latency_ms": 3604.9,
+      "p95_latency_ms": 5035.7,
+      "model_errors": 0,
+      "categories": {
+        "ambiguity": {
+          "total": 5,
+          "passed": 5,
+          "pass_rate": 1.0
+        }
+      }
+    }
+  ],
+  "corpus_sha256": "e169a74f3236634d7eaf6e389f11b02e322b7e53dd6b56377b57005c3c913a34",
+  "source_sha256": {
+    "cockpit-agent/interview/app.py": "6476c43a0b99f8e634b5b2f705bec088d12966182bb689b31131e956e09b4784",
+    "cockpit-agent/interview/engine.py": "42da0472e26be544b002c5303662926fd04c3c56686aeca5571264e9f4ed4c0c",
+    "cockpit-agent/interview/rag.py": "9139e5c16ab4eac2b37abe49d2ca027b3c9af9fe5037e38fab00bcf90d28bd36",
+    "cockpit-agent/interview/__init__.py": "093d26f5c1e32aff361e223a36498ca6cf6ef711f85bfec5b26d21d8cafd7c39",
+    "cockpit-agent/interview/service.py": "f0c248c0f81c66fdc9161b556526f567d158e0daa0aa2f25ae914f230642decc",
+    "cockpit-agent/interview/llm.py": "6597c4472fcf042011db5ea2ad51f328e3f84dc3d4bb59353b44b423d9e064bc",
+    "cockpit-agent/interview/engine_tests.py": "83ce1d805f2d79c6c46a0ceae798bd0ac1c8517d0a48a65bf35efe909563dab2",
+    "tests/cases.json": "c8fc0947ebd3452494cd5a3b0c4502b4d8030cdb7528bb238232153ceca421f7",
+    "evaluate.py": "4e4703408f2e04f77840648dbfdcc9490c3cb818102f47e320809df08f87b803"
+  },
+  "upstream_sha": "c705f8c40e76436e06dd7163fa3865451b35ca5d",
+  "usage": {
+    "kimi": {
+      "prompt_tokens": 4836,
+      "completion_tokens": 1174,
+      "total_tokens": 6010
+    }
+  },
+  "run_seconds": 5.2,
+  "limitations": [
+    "120例开发可见回归集，split为预分组，不是盲测或CAR-bench官方成绩。",
+    "简化对照保留上游VAL与确认，不代表完整上游；两组复用同一模型计划与基线RAG草稿。",
+    "故障由本地模拟器注入；模拟状态与回执不能证明真实车辆执行。",
+    "RAG使用小型人工来源审阅语料；关键事实评分是词法近似，需要人工复核。",
+    "一致率表示同一用例全部重复均通过的比例；离线重复是确定性回归，不衡量模型随机性。",
+    "Token数量实际记录；服务端未提供单价，因此不估算人民币或美元成本。"
+  ]
+}

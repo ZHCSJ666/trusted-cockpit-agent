@@ -1,0 +1,326 @@
+"""Aggregator 卡片择优：多意图下优先展示充能路线卡（途经点），而非首个卡。"""
+import asyncio
+
+from orchestrator.cloud.aggregator import Aggregator
+from orchestrator.cloud.models import StepResult, StepStatus
+
+
+async def _fake_llm(messages, **kwargs):
+    return "已为您规划好路线并安排了途中补电。"
+
+
+def test_prefers_charging_route_card_over_first_card():
+    agg = Aggregator(_fake_llm)
+    nav = StepResult(step_id="s1", status=StepStatus.OK, speech="已规划路线",
+                     ui_card={"type": "poi_list", "items": [{"name": "东车村委会"}]})
+    charge = StepResult(step_id="s2", status=StepStatus.OK, speech="途中补电1次",
+                        ui_card={"type": "charging_route", "display_priority": 0,
+                                 "destination": "东车村",
+                                 "stops": [{"name": "南网充电站", "at_km": 212}]})
+    out = asyncio.run(agg.compose("导航去东车村并规划途中充电", [nav, charge]))
+    # 即便导航卡在前，也应展示充能路线卡（途经点对"规划充电"更相关）
+    assert out["ui_card"]["type"] == "charging_route"
+    assert out["ui_card"]["stops"][0]["at_km"] == 212
+
+
+def test_single_card_unchanged():
+    agg = Aggregator(_fake_llm)
+    nav = StepResult(step_id="s1", status=StepStatus.OK, speech="已规划路线",
+                     ui_card={"type": "poi_list", "items": []})
+    out = asyncio.run(agg.compose("导航去东车村", [nav]))
+    assert out["ui_card"]["type"] == "poi_list"
+
+
+def test_single_failed_step_speaks_the_agents_own_words(monkeypatch):
+    """C11-B（真栈 family T34）：桥说的是「未能确认本次订单预览清理完成，请稍后再试」，
+    用户听到的却是「抱歉，处理失败。」——**恢复指引连同「失败在哪一步」一起被吞掉**。
+
+    成因是一条空查表：`AgentResult` 没有 error 字段、executor 的 `_to_result` 也不设，
+    于是 `_ERROR_FRIENDLY.get("", "处理失败")` 恒命中默认值。
+    """
+    agg = Aggregator(_fake_llm)
+    failed = StepResult(
+        step_id="s1", status=StepStatus.FAILED,
+        speech="未能确认本次订单预览清理完成，请稍后再试。",
+        follow_up="您也可以说「查一下我的订单」核对",
+        ui_card={"type": "merchant_draft_cleanup", "drafts_after": 1})
+    out = asyncio.run(agg.compose("第二个先取消，其他继续", [failed]))
+
+    assert out["speech"] == "未能确认本次订单预览清理完成，请稍后再试。"
+    assert out["follow_up"] == "您也可以说「查一下我的订单」核对"
+    assert out["ui_card"]["type"] == "merchant_draft_cleanup"
+    assert out["actions"] == []
+
+
+def test_single_failed_step_without_speech_keeps_the_generic_wording():
+    """另一半必须仍然成立：**没有话术可播的真异常**（超时/熔断，error 由 executor 填）
+    照旧出通用失败话术——C11-B 换的是「有话术时谁说了算」，不是把闸拆了。"""
+    agg = Aggregator(_fake_llm)
+    boom = StepResult(step_id="s1", status=StepStatus.FAILED, speech="",
+                      error="step_timeout")
+    out = asyncio.run(agg.compose("查一下", [boom]))
+    assert out["speech"] == "抱歉，处理超时了，请稍后再试。"
+
+    naked = StepResult(step_id="s2", status=StepStatus.FAILED, speech="")
+    out2 = asyncio.run(agg.compose("查一下", [naked]))
+    assert out2["speech"] == "抱歉，处理失败。"
+
+
+def test_compose_strips_markdown_from_speech():
+    """speech 出口统一剥 markdown（2026-07-12 决策：不上渲染）：单步与多步聚合两路都剥。"""
+    agg = Aggregator(_fake_llm)
+    md = StepResult(step_id="s1", status=StepStatus.OK,
+                    speech="**结论**：`固态电池`更优。\n| A | B |\n|---|---|")
+    out = asyncio.run(agg.compose("查一下", [md]))
+    assert "**" not in out["speech"] and "`" not in out["speech"] and "|" not in out["speech"]
+    assert "结论：固态电池更优。" in out["speech"]
+
+    async def md_llm(messages, **kwargs):
+        return "**要点一**；`要点二`。"
+
+    agg2 = Aggregator(md_llm)
+    two = [StepResult(step_id="s1", status=StepStatus.OK, speech="a"),
+           StepResult(step_id="s2", status=StepStatus.OK, speech="b")]
+    out2 = asyncio.run(agg2.compose("多意图", two))
+    assert out2["speech"] == "要点一；要点二。"
+
+
+def test_md_delta_softener_strips_inline_across_chunks():
+    """D0 流式增量软化：** 与 ` 跨 chunk 剥除；单个 *（乘号）不误伤。"""
+    from orchestrator.cloud.aggregator import MdDeltaSoftener
+    s = MdDeltaSoftener()
+    out = [s.feed("这是**加"), s.feed("粗**和`代"), s.feed("码`片段"), s.flush()]
+    assert "".join(x for x in out if x) == "这是加粗和代码片段"
+    s2 = MdDeltaSoftener()
+    out2 = [s2.feed("3*"), s2.feed("4=12"), s2.flush()]
+    assert "".join(x for x in out2 if x) == "3*4=12"
+    s3 = MdDeltaSoftener()   # 跨 chunk 的 ** 对（尾悬单星 + 下个增量开头星）
+    out3 = [s3.feed("重点*"), s3.feed("*内容"), s3.flush()]
+    assert "".join(x for x in out3 if x) == "重点内容"
+
+
+def test_merges_charging_waypoint_into_navigate_action():
+    """导航 navigate 动作 + 充电步 data.waypoint → 途经点并入 navigate.payload.waypoints。"""
+    agg = Aggregator(_fake_llm)
+    nav = StepResult(
+        step_id="s1", status=StepStatus.OK, speech="已规划路线",
+        actions=[{"type": "navigate",
+                  "payload": {"destination": "华润春笋大厦", "lat": 22.5, "lng": 113.94},
+                  "require_confirm": False}])
+    charge = StepResult(
+        step_id="s2", status=StepStatus.OK, speech="已加入途经充电站",
+        ui_card={"type": "charging_route", "display_priority": 0, "destination": "华润春笋大厦",
+                 "stops": [{"name": "特来电·春笋站"}]},
+        data={"waypoint": {"name": "特来电·春笋站", "lat": 22.4998, "lng": 113.9385,
+                           "address": "深圳湾"}})
+    out = asyncio.run(agg.compose("导航去华润春笋大厦，附近找个充电桩", [nav, charge]))
+    navs = [a for a in out["actions"] if a["type"] == "navigate"]
+    assert len(navs) == 1
+    wps = navs[0]["payload"]["waypoints"]
+    assert wps[0]["name"] == "特来电·春笋站" and wps[0]["lat"] == 22.4998
+    assert out["ui_card"]["type"] == "charging_route"   # 仍优先展示充能路线卡
+    # 站被并进了路线：系统确定性说一句，不靠模型改写（CA2-19 S3 登记项）
+    assert out["speech"].endswith("已把特来电·春笋站加入导航途经点。")
+
+
+def test_waypoint_line_only_for_stops_another_step_declared_into_a_navigation():
+    """导航步自己的途经点它自己会说；本轮没有导航动作时充电步只是推荐，不能说「已加入途经点」。"""
+    own = StepResult(step_id="s1", status=StepStatus.OK, speech="已规划路线，途经肯德基",
+                     actions=[{"type": "navigate", "payload": {"destination": "万象天地"}}],
+                     data={"waypoints": [{"name": "肯德基", "lat": 22.5, "lng": 113.9}]})
+    weather = StepResult(step_id="s2", status=StepStatus.OK, speech="今天晴。")
+    assert Aggregator.merged_waypoint_line([own, weather], own.actions) == ""
+    charge = StepResult(step_id="s3", status=StepStatus.OK, speech="附近有国网充电站",
+                        data={"waypoint": {"name": "国网充电站", "lat": 22.6, "lng": 114.0}})
+    assert Aggregator.merged_waypoint_line([charge, weather], []) == ""
+    out = asyncio.run(Aggregator(_fake_llm).compose("查附近充电站和天气", [charge, weather]))
+    assert "加入导航途经点" not in out["speech"]
+
+
+def test_prefers_waypoint_choice_card_over_other_cards():
+    """多意图『导航+找餐厅』若 planner 误拆出 food，导航的 waypoint_choice 真实候选卡应胜出。"""
+    agg = Aggregator(_fake_llm)
+    nav = StepResult(step_id="s1", status=StepStatus.OK, speech="规划路线",
+                     ui_card={"type": "poi_list", "purpose": "waypoint_choice",
+                              "display_priority": 1,
+                              "destination": "中国华润大厦", "items": [{"name": "餐厅A"}]})
+    food = StepResult(step_id="s2", status=StepStatus.OK, speech="需要订位吗",
+                      ui_card={"type": "place_list", "items": [{"name": "美食·名店1"}]})
+    out = asyncio.run(agg.compose("导航去X在附近找餐厅", [nav, food]))
+    assert out["ui_card"]["purpose"] == "waypoint_choice"
+
+
+def test_dedupes_duplicate_navigate_actions():
+    """同目的地的重复 navigate 动作只保留一个（防御多意图重复导航）。"""
+    agg = Aggregator(_fake_llm)
+    dup = {"type": "navigate",
+           "payload": {"destination": "V东滨店", "lat": 22.499, "lng": 113.938},
+           "require_confirm": False}
+    a = StepResult(step_id="s1", status=StepStatus.OK, speech="路线A", actions=[dict(dup)])
+    b = StepResult(step_id="s2", status=StepStatus.OK, speech="路线B", actions=[dict(dup)])
+    out = asyncio.run(agg.compose("导航去V东滨店", [a, b]))
+    navs = [x for x in out["actions"] if x["type"] == "navigate"]
+    assert len(navs) == 1
+
+
+def test_multiple_info_cards_grouped_for_same_screen():
+    """股票卡+新闻卡（纯信息、无交互）→ 合成 card_group 同屏并存，不再丢其一。"""
+    agg = Aggregator(_fake_llm)
+    stock = StepResult(step_id="s1", status=StepStatus.OK, speech="英伟达208.65",
+                       ui_card={"type": "stock_quote", "symbol": "NVDA"})
+    news = StepResult(step_id="s2", status=StepStatus.OK, speech="新闻",
+                      ui_card={"type": "news_brief", "items": []})
+    out = asyncio.run(agg.compose("查英伟达股价和新闻", [stock, news]))
+    assert out["ui_card"]["type"] == "card_group"
+    types = [c["type"] for c in out["ui_card"]["items"]]
+    assert "stock_quote" in types and "news_brief" in types
+
+
+def test_interactive_card_shown_alone_not_grouped():
+    """有交互卡（充电路线/候选选择）时单独展示，不与信息卡混排（避免干扰选择）。"""
+    agg = Aggregator(_fake_llm)
+    stock = StepResult(step_id="s1", status=StepStatus.OK, speech="x",
+                       ui_card={"type": "stock_quote"})
+    charge = StepResult(step_id="s2", status=StepStatus.OK, speech="y",
+                        ui_card={"type": "charging_route", "display_priority": 0, "stops": []})
+    out = asyncio.run(agg.compose("q", [stock, charge]))
+    assert out["ui_card"]["type"] == "charging_route"
+
+
+def test_aggregate_honors_user_count_format_request():
+    """用户要求『三条结论』→ 聚合提示词带上该意图，system 指示按分点输出（不再压成一段）。"""
+    captured = {}
+
+    async def _capture_llm(messages, **kwargs):
+        captured["system"], captured["user"] = messages[0]["content"], messages[1]["content"]
+        return "1. 结论一 2. 结论二 3. 结论三"
+
+    agg = Aggregator(_capture_llm)
+    r1 = StepResult(step_id="s1", status=StepStatus.OK, speech="英伟达新闻……")
+    r2 = StepResult(step_id="s2", status=StepStatus.OK, speech="股价208.65美元")
+    out = asyncio.run(agg.compose("查英伟达消息股价，对智能座舱影响给我三条结论", [r1, r2]))
+
+    assert "三条结论" in captured["user"]                       # 用户原话进了 prompt
+    assert ("分点" in captured["system"]) or ("条数" in captured["system"])  # system 指示分点
+    assert "1." in out["speech"]
+
+
+def test_refused_step_speech_survives_aggregation_exactly_once():
+    """`_refused` 步的拒绝句是系统事实（demo-3ukshz 二轮探针：打烊拒绝被聚合 LLM
+    整句丢掉——诚实约束已在 system prompt 里仍然丢）。处置＝恰好一次：不进聚合
+    材料、确定性附加；follow_up 优先取拒绝步的恢复指引。"""
+    from orchestrator.cloud.models import StepResult, StepStatus
+
+    seen_prompts: list[str] = []
+
+    async def llm(messages, **kwargs):
+        seen_prompts.append(messages[-1]["content"])
+        return "附近找到 1 家瑞幸，就是科技园文化广场店。"
+
+    agg = Aggregator(llm)
+    nearby = StepResult(step_id="s1", status=StepStatus.OK,
+                        speech="为您找到 1 家瑞幸", follow_up="说看详情",
+                        ui_card={"type": "place_list", "items": [{"name": "x"}],
+                                 "display_priority": 1})
+    # 第二个有话的步：让这一轮真的走聚合 LLM（只有一步有话时直出，见 test_a_resumed_plan_…）
+    menu = StepResult(step_id="s3", status=StepStatus.OK, speech="这家店的招牌是生椰拿铁。")
+    refused = StepResult(step_id="s2", status=StepStatus.OK,
+                         speech="找到的瑞幸门店已打烊，请换一家或稍后再试。",
+                         follow_up="可以问「附近哪家瑞幸还营业」。",
+                         data={"_refused": True})
+    out = asyncio.run(agg.compose("附近的瑞幸点一杯", [nearby, menu, refused]))
+
+    assert out["speech"].count("已打烊") == 1
+    assert out["speech"].endswith("找到的瑞幸门店已打烊，请换一家或稍后再试。")
+    assert "已打烊" not in seen_prompts[0], "拒绝句不进 LLM 材料——恰好一次的另一半"
+    assert out["follow_up"] == "可以问「附近哪家瑞幸还营业」。"
+
+    # 只剩一步有话 + 拒绝步 ⇒ 零 LLM：那一步原样 + 拒绝句确定性附加，仍恰好一次
+    out = asyncio.run(agg.compose("附近的瑞幸点一杯", [nearby, refused]))
+    assert len(seen_prompts) == 1
+    assert out["speech"] == "为您找到 1 家瑞幸。找到的瑞幸门店已打烊，请换一家或稍后再试。"
+    assert out["follow_up"] == "可以问「附近哪家瑞幸还营业」。"
+
+
+def test_llm_material_says_the_refused_demand_is_answered_elsewhere():
+    """批 7（真栈 RS13）：拒绝步不进材料之后，LLM 看见用户原话里有一部分诉求没有结果，会替它编一段
+    「没拿到设置结果，建议你再确认一下有没有成功开启」——紧跟系统附加的「做不到」，一段自相矛盾。
+    有拒绝步被拿掉时，提示里必须说明那部分已由系统另行作答、不许提及；没有拒绝步时一个字不多。"""
+    from orchestrator.cloud.models import StepResult, StepStatus
+
+    seen_prompts: list[str] = []
+
+    async def llm(messages, **kwargs):
+        seen_prompts.append(messages[-1]["content"])
+        return "到宝安机场约 24 公里，预计 44 分钟，沿途基本畅通。"
+
+    agg = Aggregator(llm)
+    traffic = StepResult(step_id="s1", status=StepStatus.OK,
+                         speech="从当前位置到深圳宝安国际机场全程约24.2公里、预计44分钟，沿途基本畅通。")
+    weather = StepResult(step_id="s2", status=StepStatus.OK, speech="深圳今天多云 30℃。")
+    refused = StepResult(step_id="r1", status=StepStatus.OK,
+                         speech="我只能按时间或地点提醒，还做不到盯着「有堵车」这类变化再来通知你。",
+                         data={"_refused": "unsupported"})
+    # 两步有话才走聚合 LLM（只有一步有话时直出、根本没有模型可以替那部分诉求编话）
+    out = asyncio.run(agg.compose("先看看去宝安机场的路况和天气，要是堵的话，之后只要有堵车就提醒我",
+                                  [traffic, weather, refused]))
+    assert "已由系统另行直接作答" in seen_prompts[0] and "不要建议用户去确认" in seen_prompts[0]
+    assert "做不到" not in seen_prompts[0], "拒绝句本身仍不进材料"
+    assert out["speech"].endswith("我只能按时间或地点提醒，还做不到盯着「有堵车」这类变化再来通知你。")
+
+    asyncio.run(agg.compose("查路况和天气", [traffic, weather]))
+    assert "另行直接作答" not in seen_prompts[1], "没有拒绝步时提示一个字不多"
+
+
+def test_a_resumed_plan_whose_seeds_carry_no_speech_is_not_rewritten():
+    """评审四轮 R4-07（真栈 `f535c654` RS39）：续接轮恢复出来的种子不带话术（上一轮已经播过），多步里只剩一步有话——
+    没有东西要合并，与单步同样直出。修前照样交给聚合 LLM 改写：补槽那一轮多花 ~1.9 s，确定性的偏好口径
+    「记得您平时不走高速，已按此规划」被改成「好嘞，已按您平时不走高速的习惯规划路线」。"""
+    from orchestrator.cloud.models import StepResult, StepStatus
+
+    calls: list = []
+
+    async def llm(messages, **kwargs):
+        calls.append(messages)
+        return "好嘞，已按您平时不走高速的习惯规划路线。"
+
+    agg = Aggregator(llm)
+    seed = StepResult(step_id="s1", status=StepStatus.OK, data={"name": "深圳湾公园"})   # 种子：只有依赖投影
+    nav = StepResult(step_id="s2", status=StepStatus.OK,
+                     speech="记得您平时不走高速，已按此规划。为您导航到深圳湾公园（滨海大道）。",
+                     actions=[{"type": "navigate", "payload": {"destination": "深圳湾公园"}}],
+                     ui_card={"type": "route_plan", "destination": "深圳湾公园"},
+                     follow_up="可以说「取消导航」")
+    out = asyncio.run(agg.compose("深圳湾公园", [seed, nav]))
+    assert not calls
+    assert out["speech"] == nav.speech
+    assert out["actions"] == nav.actions and out["ui_card"] == nav.ui_card
+    assert out["follow_up"] == "可以说「取消导航」"
+
+    # 对照：两步都有话 ⇒ 仍由 LLM 组织；有一步失败 ⇒ 仍交 LLM 如实转述那一步
+    weather = StepResult(step_id="s3", status=StepStatus.OK, speech="深圳今天多云 30℃。")
+    asyncio.run(agg.compose("导航去深圳湾公园，顺便看看天气", [nav, weather]))
+    failed = StepResult(step_id="s4", status=StepStatus.FAILED, error="step_timeout")
+    asyncio.run(agg.compose("导航去深圳湾公园，顺便看看天气", [nav, failed]))
+    assert len(calls) == 2
+
+
+def test_all_refused_multi_step_skips_llm_and_dedupes():
+    """全员被拒（78b635db：两步同一句拒绝）：零 LLM、逐字去重后原样输出。"""
+    from orchestrator.cloud.models import StepResult, StepStatus
+
+    async def llm(messages, **kwargs):
+        raise AssertionError("全员被拒不该调聚合 LLM")
+
+    agg = Aggregator(llm)
+    line = "我还不知道你想去哪家瑞幸门店。"
+    results = [
+        StepResult(step_id="s1", status=StepStatus.OK, speech=line,
+                   data={"_refused": True}),
+        StepResult(step_id="s2", status=StepStatus.OK, speech=line,
+                   data={"_refused": True}),
+    ]
+    out = asyncio.run(agg.compose("选择瑞幸门店：X", results))
+
+    assert out["speech"] == line
+    assert out["speech"].count("瑞幸门店") == 1

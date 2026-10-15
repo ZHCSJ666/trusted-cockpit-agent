@@ -1,0 +1,235 @@
+syntax = "proto3";
+
+package cockpit.orchestrator.v1;
+
+import "google/protobuf/struct.proto";
+import "cockpit/common/v1/common.proto";
+
+// 云端 Planner 对 Cloud Gateway 暴露的入口。流式返回话术/动作/终态。
+service CloudPlanner {
+  rpc Handle (HandleRequest) returns (stream HandleEvent);
+  // AR05 §6.1：云侧能力目录与授权事实的只读查询（端侧经 EdgeCloudChannel 转发）。
+  rpc DescribeSession (SessionInfoRequest) returns (SessionInfoResponse);
+}
+
+// 端侧编排器对 Edge Gateway 暴露的入口。快意图本地秒回，慢意图转发云端。
+// 复用 HandleRequest/HandleEvent，保证端云链路同构。
+service EdgeOrchestrator {
+  rpc Handle (HandleRequest) returns (stream HandleEvent);
+  // AR05 §6.1：会话身份与能力摘要的**只读**查询。零业务副作用、不调 LLM、
+  // 不写会话历史；网关据此回 `GET /api/session`，不在 Go 侧重实现权限判据。
+  rpc DescribeSession (SessionInfoRequest) returns (SessionInfoResponse);
+}
+
+message HandleRequest {
+  string request_id = 1;
+  string session_id = 2;
+  string text = 3;                  // 用户话术（已 ASR）
+  cockpit.common.v1.ContextRef context = 4;
+  repeated cockpit.common.v1.ModalityRef modalities = 5;
+  map<string, string> meta = 6;
+  bool is_confirmation = 7;         // 是否为多轮确认/补槽回复
+  // Runner 签发的短时记忆抽取能力。仅 signed E2E 链路可携带；它不是业务
+  // session，也不得塞入 meta 或下发 Agent。
+  string e2e_memory_capability = 8;
+  // 本轮确认/取消**指向哪一个挂起操作**（QA 卡 Q1-B）。由 FinalResult 下发、
+  // HMI 原样回传。空 = 语音兜底/旧客户端，编排按「最近一条挂起」寻址；
+  // 非空但对不上任何挂起 = 诚实拒绝，**绝不静默打给当前挂起**
+  // （I-013：全局确认命中旧请求）。它不是授权凭据，只是寻址键。
+  string operation_id = 9;
+}
+
+message HandleEvent {
+  oneof event {
+    string speech_delta = 1;        // 流式话术增量
+    cockpit.common.v1.AgentAction action = 2;
+    FinalResult final = 3;
+    ProcessUpdate progress = 4;     // 复杂任务过程区：脱敏进度（步骤+思考摘要），非 final
+  }
+}
+
+// 复杂任务「过程区」增量。仅复杂任务（is_complex）发；普通车控/闲聊不发。
+// 内容由编排层按步骤语义/结果合成，**绝不**携带 prompt / 模型 raw reasoning / 内部参数。
+message ProcessUpdate {
+  string phase = 1;     // analyze | execute | synthesize
+  string label = 2;     // 步骤标签（脱敏短语，如「规划路线」）
+  string summary = 3;   // 思考摘要（后端按步骤结果合成，脱敏，如「3 个景点 + 1 个充电站」）
+  string status = 4;    // start | done
+  string step_id = 5;
+  bool   driving = 6;   // 由 Edge 按 VAL 实时车速/档位标注，供 HMI 行车/泊车双态门控
+}
+
+message FinalResult {
+  string speech = 1;
+  google.protobuf.Struct ui_card = 2;
+  repeated cockpit.common.v1.AgentAction actions = 3;
+  string follow_up = 4;
+  bool need_confirm = 5;
+  // M2 记忆图谱 P2（子 RFC §2.3）：**会话级**情绪信号，供 HMI 选 TTS 情感参数。
+  // 刻意不进记忆层——短 TTL + 不入画像的东西是会话态不是记忆；而 M1b 已就绪的
+  // 情感 TTS 参数面缺的正是「当前这轮」的情绪。空串 = neutral（fail-open）。
+  string emotion = 6;   // neutral | happy | tired | urgent | frustrated
+  // 本条 final 挂起的操作 id（QA 卡 Q1-B）。仅 need_confirm/待补槽时非空。
+  // HMI 把它挂在确认条上，用户点确认/取消时原样回传——多条挂起并存
+  // （Q1-C 小容量挂起表）时，这是唯一能把「这一下」定位到某条挂起的东西。
+  string operation_id = 7;
+  // 本轮**关掉**了哪几条挂起（完成/取消/LRU 淘汰）。HMI 据此撤掉对应确认条。
+  // 由服务端权威给出：HMI 自己猜「这一轮是不是把某条挂起消费掉了」必然猜错，
+  // 而猜错的后果是一条已经作废的确认条继续挂在屏幕上等人点（I-017 同族）。
+  repeated string closed_operation_ids = 8;
+  // B5 缺陷 C：终态也标行车态（与 ProcessUpdate.driving 同一裁决点 server.py::_is_driving）。
+  // process 帧只有复杂轮才有，简单轮从不带标 ⇒ 客户端「Edge 标 false 起 30s 退出」那条 false
+  // 可能永远不到（B4 真机实测行车档 3h12m 退不出）。final 每轮都有，所以也标；Edge 在
+  // Handle 出口盖，云端填的值无权威。缺省 false = 泊车。
+  bool driving = 9;
+  // ── AR05 结构化契约（字段表：docs/design/2026-09-09-ar05-…-plan.md §11）──
+  // 三者都是**增量**：旧客户端读不到它们时行为逐字不变（仍按 speech/need_confirm/
+  // operation_id/closed_operation_ids 走既有确认流程）。新客户端不得反过来用正则去
+  // 猜「这是拒绝还是补槽」——结构化字段在，就以结构化字段为准。
+  ConfirmPolicy confirm_policy = 10;   // 仅 need_confirm 轮非空
+  SlotRequest slot_request = 11;       // 仅待补槽轮非空
+  repeated Issue issues = 12;          // 本轮发生的问题（可与已执行动作并存）
+  // 用户换了话题、但**这些挂起仍然有效**（服务端保留了它们）。客户端据此把对应条目
+  // 标成"已搁置"：撤下当前追问、不再抢占这一问，但它还在待处理列表里可以被选回来。
+  // **必须由服务端说**——客户端猜"用户是不是换话题了"必然猜错，而猜错的两个方向都很贵：
+  // 猜早了把还在进行的追问撤了，猜晚了让一条旧追问一直抢占屏幕（方案 §4.3）。
+  repeated string held_operation_ids = 13;
+  // CA2-04: immutable per-task result snapshots. Actions/confirmation authorization
+  // remain in the existing fields; these snapshots must never execute anything.
+  repeated ResultBundle result_bundles = 14;
+}
+
+message GoalReference {
+  string goal_id = 1;
+  string origin_exchange_id = 2;
+  string source_sha256 = 3;
+  uint32 start = 4;                    // Unicode codepoint offset, not UTF-16
+  uint32 end = 5;
+  string coverage = 6;                 // unknown; a source reference is not coverage proof
+}
+
+message ResultEntry {
+  string step_id = 1;
+  repeated string goal_ids = 2;
+  string intent = 3;
+  string status = 4;                   // ok/failed/unknown/need_confirm/need_slot/not_run/cancelled
+  string answer = 5;                   // full public answer, independently of short TTS
+  string card_ref = 6;                 // final:<items path> or bundle:<resource key>
+  string operation_id = 7;             // addressing only; never authorization
+  string answer_state = 8;             // inline/reference/unavailable
+  string result_ref = 9;
+  string verification = 10;            // unknown/sat/unsat; OK alone is not verification
+  bool pending_edge = 11;              // presentation provenance only, never an execution flag
+  VerificationEvidence evidence = 12;  // CA2-10; absent = no state verification declared
+}
+
+// CA2-10: what is known about one step's effect. The facts are deliberately separate:
+// an acknowledgement is not an effect, and a satisfied state is not proof that this step
+// caused it. Fixed vocabulary in runtime/effect_evidence.py; never authorization.
+message VerificationEvidence {
+  string ack = 1;                      // acknowledged | unknown
+  string state = 2;                    // satisfied | unsatisfied | unknown (latest good, fresh observation)
+  string observed = 3;                 // attributed | unchanged | missing | unattributed
+  bool verified = 4;                   // state satisfied by observations attributed to this step
+  repeated string reasons = 5;         // fixed codes explaining unknown / unsatisfied / unverified
+  string source_kind = 6;              // simulated | sandbox | vehicle; simulated is never a real vehicle
+  bool authenticated = 7;              // every relied-on observation came from a signed source
+}
+
+message ResultBundle {
+  uint32 version = 1;                  // 1; old clients can ignore the entire field
+  string task_id = 2;
+  uint32 revision = 3;
+  repeated GoalReference goals = 4;
+  repeated ResultEntry results = 5;
+  string coverage_status = 6;          // unknown in CA2-03/04
+  string display_text = 7;             // full pending-turn text; speech remains short TTS
+  // Cards already in FinalResult.ui_card are referenced instead of duplicating image bytes.
+  map<string, google.protobuf.Struct> cards = 8;
+}
+
+// 确认策略（AR05 R10）。用户必须能明确知道**正在确认什么、到什么时候、用什么方式答**。
+// 权威全部来自服务端：受控 capability 声明、VAL 受控知识、已保存的挂起记录。
+// LLM goal / 用户 meta / 补槽短句**无权**产生或放宽这里的任何一项。
+message ConfirmPolicy {
+  string operation_id = 1;             // 恒等于 FinalResult.operation_id
+  string risk = 2;                     // low | medium | high；空或未知枚举=客户端停止该确认并提示，不默认允许
+  repeated string allowed_channels = 3; // touch | text | voice；只说明"怎么回"，不代表设备可信或账号有权限
+  string action_summary = 4;           // 「打开后备箱」——取已验证的挂起步骤对象/槽值
+  string object_summary = 5;           // 「后备箱」
+  string reason_code = 6;              // require_confirm | safety_gate | payment | destructive
+  int64 expires_at_ms = 7;             // SessionStore 落盘后的绝对截止时刻（epoch ms, UTC）。0=未知→客户端回落既有 TTL，且**不得自行续期**
+  int64 server_now_ms = 8;             // 服务端此刻，供客户端算钟差
+  string summary_source = 9;           // capability（缺省）| user_utterance：摘要出处，缺结构化摘要时诚实说明
+  // 挂起步骤的 intent（服务端事实）。端侧出口据此用 VAL 受控知识收窄 allowed_channels
+  // （如对象声明 voice_forbidden 时去掉 voice）——那份危险知识只住在端侧 commands.yaml，
+  // 云侧不许抄第二份。客户端不解释它，只显示 action_summary/object_summary。
+  string target_intent = 10;
+}
+
+// 补槽请求（AR05 R10）。保留 Agent 既有 missing_slots，这里补的是"够不够显示与回复"。
+message SlotRequest {
+  string operation_id = 1;
+  string slot = 2;                     // 槽位机器名
+  string display_name = 3;             // 中文名（能力声明提供）；空=显示 slot
+  string shape = 4;                    // slot_shapes 声明的形状名；空=自由文本
+  repeated string suggestions = 5;     // **只能来自本次真实 Agent 结果/候选集**；空=只给文字/语音输入，不造假选项
+  string state = 6;                    // active（缺省）| held：换题后原任务仍有效但不再抢占当前问题
+  repeated string remaining_slots = 7; // 本操作还缺哪些（含本条）
+  string prompt = 8;                   // 服务端追问话术；空=沿用 follow_up
+  int64 expires_at_ms = 9;
+  int64 server_now_ms = 10;
+}
+
+// 结构化问题（AR05 R10）。一轮里可以既有成功动作又有失败问题——issue 必须保留
+// 步骤/操作归属，**不得把已执行的部分改写成"未执行"**。
+message Issue {
+  string code = 1;                     // 受控枚举，见 §11.3。未知 code：客户端显示 message、不猜语义
+  string message = 2;                  // 用户可读文案。服务端问题由服务端产，设备问题由客户端按实际设备结果产
+  string severity = 3;                 // info | warning | error（缺省 warning）
+  string scope = 4;                    // request（缺省）| operation | session | capability
+  string request_id = 5;
+  string operation_id = 6;
+  repeated string affected_capabilities = 7;
+  repeated RecoveryAction recovery = 8;
+}
+
+// 恢复动作。**只用受控 kind**：客户端只实现自己已支持的固定动作，
+// 绝不执行服务端下发的任意 URL、脚本或命令。
+message RecoveryAction {
+  string kind = 1;   // open_voice_settings | open_capability_settings | reconfigure_connection | retry_request | replay_audio | dismiss
+  string label = 2;
+}
+
+// 会话身份与能力摘要的只读查询（AR05 §6.1）。**不含也不回传 token**。
+message SessionInfoRequest {
+  map<string, string> meta = 1;        // trace_id / granted_scopes 等，由网关按已认证会话注入
+  cockpit.common.v1.ContextRef context = 2;
+}
+
+message CapabilityStatus {
+  string id = 1;
+  string display_name = 2;
+  // available：已授权且服务端认为可用；unauthorized：当前账号缺 scope；
+  // unavailable：已注册但通道/服务不在线；unknown：依赖不可核实——**不宣称可用**。
+  string status = 3;
+  string reason_code = 4;              // scope_missing | offline | query_failed | ...
+}
+
+message SessionInfoResponse {
+  string contract_version = 1;         // 客户端据此判断服务端支持到哪一版契约
+  bool authenticated = 2;
+  string user_id = 3;
+  string vehicle_id = 4;               // 服务端**关联**车辆，不等同于所有权或硬件绑定完成
+  string authorization_source = 5;     // token | poc_default | fail_closed（PoC 默认放行与明确授权不是一回事）
+  repeated string granted_scopes = 6;
+  repeated CapabilityStatus capabilities = 7;
+  int64 generated_at_ms = 8;
+  int64 expires_at_ms = 9;             // 摘要有效期；过期后客户端标未知/待刷新，不得用缓存授权执行
+  // 摘要完整性。complete=能力面已覆盖端云全部注册目录；partial=有一段依赖没取到。
+  // **没有这一位就没法区分「云端此刻查不到」和「你没有这些能力」**——两者在客户端
+  // 看来一模一样，而正确处置完全相反（前者该说未知/待刷新，后者该去要授权）。
+  // 空 = 旧服务端，客户端按 complete 处理（逐字回落到本字段诞生前）。
+  string summary_status = 10;          // complete | partial
+  string summary_reason = 11;          // query_failed | cloud_unreachable | ...
+}

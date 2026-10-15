@@ -1,0 +1,420 @@
+// mobile/src/core/presence/presence.ts
+// 在场模型（UX v2.1 §4）：`derivePresence()` 是一个**纯函数**——输入是既有状态机各自的事实
+// （SessionCore store / 免唤醒 FSM / PTT / 设置 / 播报 / 视觉 / 时钟），输出是
+// `PresenceSnapshot`：六个正交轴（transport / capture / agent / commitment / privacy / degradation）
+// + **唯一的视觉主态** `primary`。
+//
+// 不是第四台状态机：voiceLoop / PTT / 轮态一字不改，这里只回答「此刻该让用户看到什么」。
+// 输出是多轴不是单枚举（外部评审 P0-1，采纳）：待确认时断网，`offline` 不许盖掉那条确认——
+// Dock 读 `commitment[]`，永远不被别的轴覆盖；光球与胶囊只读 `primary` / `capsule`。
+//
+// B2 T2 判据修正（B1 落地评审 D2–D5，一组）：
+//  · armed 胶囊只在进入待机后 ARMED_CAPSULE_MS 内显示（方案 §4.2「3s 后隐藏」）。输入是
+//    「FSM 什么时候变的」这个**事实**（收集器登记），「显示多久」这个判据只在这里；
+//  · errorLive 提到 armed 之前——免唤醒开着时 error 胶囊原来永远出不来；
+//  · 麦克风隐私档从三档改四档 `MicState`；`MIC_LABEL` 是所有出口（隐私栏行 / 采集点 / 读屏 label）
+//    的唯一文案与颜色表——「同一个值有几个出口，就在入口处判一次」。
+//
+// 零 RN import；jest 直接跑（test/presence.test.ts）。
+import { PENDING_TTL_MS } from '@shared/pendingOps.mjs'
+
+import { sortCommitments, type DockItem } from './commitment'
+import { sheetResident } from './drivingMode'
+
+import type { TurnSource } from '../session/store'
+
+/** 语音层要的三个事实（B2 T3）。全部来自记录与 UI 的既有状态，收集器只搬运：
+ *  turnSource=最近一轮的发起方（turnMeta）；override=用户对这一轮的显式操作（点胶囊 / 下拉）；
+ *  answer/card=当前轮助手气泡有没有字、有没有卡。没有这个入参 = 文字世界（层只在收音时升）。 */
+export interface VoiceFacts {
+  turnSource: TurnSource
+  override: 'open' | 'dismissed' | null
+  answer: boolean
+  card: boolean
+  /** 本轮 final 到达时刻（`turnMeta[id].finalAt`）；行车档 +3s 回落读它。0 / 缺省 = 还没答完 */
+  answeredAt?: number
+  /** 当前轮的用户气泡就是转写草稿（`SessionState.draftUserId`）——收音中它一出现就是新一轮开始了（2026-09-17）。
+   *  缺省 false = 旧调用方 / 文字世界 */
+  draft?: boolean
+}
+
+/** 自适应 detent（方案 §5.2 规则 3）：只录音 / 有回答 / 有主卡或长任务 */
+export type SheetDetent = 0.4 | 0.62 | 0.78
+
+export type OrbState =
+  | 'idle'
+  | 'thinking'
+  | 'speaking'
+  | 'armed'
+  | 'listening'
+  | 'attention'
+  | 'looking'
+  | 'muted'
+
+export type Degradation =
+  | { kind: 'recoverable_error'; text: string; at: number }
+  | { kind: 'transport_unknown'; messageIds: string[] }
+  | { kind: 'permission_denied'; what: 'mic' | 'camera' | 'location'; text: string }
+  | { kind: 'service_degraded'; text: string }
+  | { kind: 'safety_blocked'; text: string }
+  | { kind: 'audio_echo_degraded'; reason: string }
+  | { kind: 'fatal'; text: string }
+
+export type Identity = 'handheld' | 'mount' | 'trusted-tablet'
+
+/** 麦克风隐私档（四档）。B1 的 `edge` 并了「唤醒词待机（端侧 KWS，一个字节不出机）」与
+ *  「正在录音（音频上传给服务端 ASR，识别完只留文字）」两件事——App 的 PTT 与免唤醒三段式
+ *  都连 `ws://…/api/asr/stream`，音频是上传的；合成一句「转文字后只上传文字」在录音那一刻
+ *  就是假话，而隐私栏存在的全部理由是它说的是真的。 */
+export type MicState = 'off' | 'edge' | 'cloudAsr' | 'cloudAudio'
+
+/** 四档的文案与颜色——**唯一的一份**。short 给采集点 / 读屏 label，long 给隐私栏那一行；
+ *  tone=amber 只给两个「音频离机」的档（评审 D5：「关」与「待机」不许涂琥珀，警示色贬值）。 */
+export const MIC_LABEL: Record<MicState, { short: string; long: string; tone: 'plain' | 'amber' }> = {
+  off: { short: '关', long: '关', tone: 'plain' },
+  edge: { short: '麦克风开启，仅在本机处理', long: '本机采集处理中，音频未上传', tone: 'plain' },
+  cloudAsr: {
+    short: '音频上传做识别',
+    long: '音频上传到语音识别服务（识别完只留文字）',
+    tone: 'amber',
+  },
+  cloudAudio: { short: '正在上传原始音频', long: '原始音频上传中（端到端对话）', tone: 'amber' },
+}
+
+/** 采集事实的一行文案与色调——**唯一的一份**：对话页顶栏采集点与支持页浮动采集点共用
+ *  （AR04 形态修正前支持页另抄过一份，分隔符与摄像头文案都不同）。null = 此刻什么都没在采，
+ *  出口不渲染（方案 §5.10「没在采集就不渲染」）。并发采集逐项告知；视觉不覆盖麦克风事实，
+ *  上传与设备开启分开。 */
+export function captureSummary(
+  privacy: PresenceSnapshot['privacy'],
+): { text: string; tone: 'amber' | 'camera' | 'mic' } | null {
+  const parts = [
+    privacy.micActive ? '麦克风开启' : '',
+    privacy.mic !== 'off' ? MIC_LABEL[privacy.mic].short : '',
+    privacy.camera === 'singleFrame' ? '摄像头开启 · 单帧采集' : '',
+    privacy.visionUploading ? '单帧画面上传中' : '',
+  ].filter(Boolean)
+  if (!parts.length) return null
+  const tone =
+    MIC_LABEL[privacy.mic].tone === 'amber' || privacy.visionUploading ? 'amber' : privacy.camera === 'singleFrame' ? 'camera' : 'mic'
+  return { text: parts.join('；'), tone }
+}
+
+export interface PresenceInput {
+  now: number
+  connStatus: 'connecting' | 'open' | 'closed'
+  /** 上次 connStatus 变化的时刻（reconnecting 3s 延迟用） */
+  connChangedAt: number
+  hfEnabled: boolean
+  hfUsable: boolean
+  hfFsm: 'IDLE' | 'ARMED' | 'LISTENING' | 'THINKING' | 'SPEAKING' | 'FOLLOWUP' | string
+  /** 上次 hfFsm 变化的时刻（armed 胶囊 3s 隐藏的基准，评审 D2）。收集器登记事实，判据在这里 */
+  hfFsmChangedAt: number
+  ptt: 'idle' | 'recording' | 'finalizing'
+  partial: string
+  turn: {
+    pending: boolean
+    streaming: boolean
+    processActive: boolean
+    processLabel: string
+    /** process 首帧到达时刻；0=无 */
+    processSince: number
+  }
+  /** 播报控制器：首片音频已起播且未结束 */
+  speaking: boolean
+  /** 承诺台账的投影。`risk`/`expiresAt`/`slot` 来自服务端 AR05 契约；
+   *  缺省 = 旧服务端，逐字回落「一律 high + 本地 TTL」的既有行为 */
+  pendingOps: {
+    id: string
+    ts: number
+    summary: string
+    risk?: 'low' | 'high'
+    expiresAt?: number
+    windowMs?: number
+    policyBroken?: boolean
+    slot?: { missing: string; state: 'active' | 'held'; expiresAt: number; suggestions: string[] }
+  }[]
+  pendingLocation: boolean
+  voicePipeline: 'classic' | 's2s'
+  visionCapturing: boolean
+  /** Physical and transport facts, never inferred from FSM/pipeline selection. */
+  audioCapture?: { micActive: boolean; asrUploading: boolean; s2sUploading: boolean }
+  visionCameraActive?: boolean
+  visionUploading?: boolean
+  queued: number
+  lastError: { text: string; at: number } | null
+  degradations: Degradation[]
+  driving: boolean
+  identity: Identity
+  user: string
+  /** 语音层的三个事实（B2 T3）；缺省=文字世界，层只在收音时升 */
+  voice?: VoiceFacts
+  /** 建议开行车档（§6 触发③三条件由收集器算：drivingMode.ts::drivingSuggested）；**只建议不切** */
+  drivingSuggest?: boolean
+  /** 2s 短提示（取消 / 回声）；判据 NOTICE_SHOW_MS 在这里 */
+  notice?: { text: string; at: number } | null
+  /** 此刻在支持页（设置 / 车辆 / 地图）而不是对话页。**只影响常驻**：行车档 B/C 的「语音层常驻」是对话页
+   *  的形态——在支持页上它会压住用户来这一页要用的东西（打磨批 A 未达项①：设置页下 40% 被层盖住、
+   *  行车档开关够不到）；支持页闲置只有浮动光球（AR04 形态修正），层只在收音 / 语音轮在飞 / 点开时升。
+   *  缺省 false = 对话页（旧调用方与 fixtures 逐字不变） */
+  supportRoute?: boolean
+  /** 折叠屏半开、铰链水平（桌面姿态，foldPosture = 'tabletop'）。与 supportRoute 一起决定「对话页桌面姿态」：
+   *  那时上半舞台里的大球是这一屏唯一的球（Figma 07 页 A-4「桌面态的大球在舞台里，输入区退成无球」），层不升。
+   *  取姿态事实而不是布局模式：布局读 snapshot.driving，反过来读布局会成环。缺省 false */
+  tabletop?: boolean
+}
+
+export interface PresenceSnapshot {
+  /** 输入的 `now` 原样带下来。**Dock 的倒计时只许读它**——组件自己起秒表就是第二个不同步的
+   *  1s 时钟，而生产路径上 `derivePresence` 每秒现造新的 `DockItem`，那份秒表会被每秒
+   *  cleanup 重建、本地 now 冻在挂载那一刻（第 2 批坑⑤，取证屏与生产路径输入形态相反）。 */
+  now: number
+  transport: 'online' | 'reconnecting' | 'offline'
+  capture: 'off' | 'armed' | 'listening' | 'recognizing' | 'looking'
+  agent: 'idle' | 'thinking' | 'processing' | 'speaking' | 'followup'
+  commitment: DockItem[]
+  privacy: { mic: MicState; micActive: boolean; camera: 'off' | 'singleFrame'; visionUploading: boolean; user: string }
+  degradation: Degradation[]
+  identity: Identity
+  driving: boolean
+  primary: OrbState
+  /** reconnecting 期间光球 ×0.6 亮度（不是新态） */
+  dim: boolean
+  /** 胶囊点按做什么：缺省 open-sheet（ChatScreen 的既有行为，不写在这里）；
+   *  建议胶囊是唯一的另一种。判据在下面的胶囊链，不在组件里。 */
+  capsule?: {
+    text: string
+    tone: 'neutral' | 'accent' | 'amber' | 'red'
+    live?: boolean
+    action?: 'open-sheet' | 'enable-driving'
+    /** 这条胶囊说的是「承诺面上那件事」（等你确认 / 还差一个信息）：Dock 在场时它就是重复，
+     *  `capsuleVisible` 据此收掉。其余胶囊说的都是「此刻」，不带这个标记 */
+    about?: 'commitment'
+  }
+  input: 'voice-sheet' | 'composer' | 'none'
+  /** 语音层高度档（input==='voice-sheet' 时有意义） */
+  sheetDetent: SheetDetent
+  /** 语音层内容区画不画「当前这一轮」（2026-09-17）：
+   *  `turn` = 画当前轮；
+   *  `empty` = 收音中而本轮草稿还没出现（第一段 partial 之前）：上一轮的回答 / 卡片不该亮在「在听…」下面，
+   *    但层高仍按 0.4 档预留转写两行——字一到就落在那块空白里，层不再二次长高（真机 A1：224 → 318 的弹簧过冲被截到）；
+   *  `settled` = 行车档答后回落（§5.2 规则 3 行车条款：detent 已回 0.4 且此刻不忙）：只剩头区，层高下限主体 0 */
+  sheetBody: 'turn' | 'empty' | 'settled'
+  /** 最近一轮的发起方（S2S 告知条读它；没有轮 = text） */
+  turnSource: TurnSource
+}
+
+/** reconnecting 胶囊延迟（沿用 ChatScreen 弱网横幅那条 3s：重连是常态，每次都弹会让真断网没人看） */
+export const RECONNECTING_GRACE_MS = 3000
+/** error 胶囊短显 */
+export const ERROR_SHOW_MS = 4000
+/** process 持续多久才算「长任务」进 Dock */
+export const LONG_TASK_MS = 8000
+/** armed 胶囊「说「小舟小舟」」只在进入待机后短显（方案 §4.2，评审 D2）；光球的 armed 青环不受它影响 */
+export const ARMED_CAPSULE_MS = 3000
+
+/** 2s 短提示（取消 / 回声）的显示时长（方案 §5.1.1 / §5.2 规则 5） */
+export const NOTICE_SHOW_MS = 2000
+
+/** 行车档答完多久内容回落（§5.2 规则 3 行车条款「TTS 结束后 +3s 自动收起」）。
+ *  「收起」= 内容回落到只球 + 胶囊（detent 0.4）；**层本身常驻不消失**（§5 第 15 条的合并写法）。 */
+export const DRIVING_SHEET_SETTLE_MS = 3000
+
+/** 层外的状态胶囊此刻画不画——**唯一的一份**（打磨批 A，评审 P05 / P28）：对话页与支持页的
+ *  浮动在场都读它。「一屏只出现一份状态」：
+ *   · 语音层升起 ⇒ 不画（层内已经有同一条）；
+ *   · 承诺面在场且胶囊说的就是承诺面上那件事（等你确认 / 还差一个信息）⇒ 不画（Dock 已在说）。
+ *  `dockVisible` 是宿主的事实（承诺面此刻有没有真的画出来，判据 FocusDock::focusDockVisible），
+ *  不在这里重算。 */
+export function capsuleVisible(snapshot: PresenceSnapshot, dockVisible: boolean): boolean {
+  if (!snapshot.capsule) return false
+  if (snapshot.input === 'voice-sheet') return false
+  if (dockVisible && snapshot.capsule.about === 'commitment') return false
+  return true
+}
+
+/** 层内胶囊文案——**唯一的一份**（2026-09-17，设计 §5）：识别中层外胶囊要靠 partial 本身告诉用户识别到了什么，
+ *  层内转写区已经用 20pt 显示同一段 partial，头区胶囊再复读一遍就是两份（partial 长了还会换行把头区撑高）。
+ *  识别中 ⇒ 固定「识别中…」；其余与层外一字不差。没有胶囊 ⇒ null。层外 `PresenceCapsule` 不读它。 */
+export function sheetCapsuleText(s: Pick<PresenceSnapshot, 'capsule' | 'capture'>): string | null {
+  if (!s.capsule) return null
+  return s.capture === 'recognizing' ? '识别中…' : s.capsule.text
+}
+
+export function derivePresence(i: PresenceInput): PresenceSnapshot {
+  // ── transport ──
+  const transport: PresenceSnapshot['transport'] =
+    i.connStatus === 'open' ? 'online' : i.connStatus === 'connecting' ? 'reconnecting' : 'offline'
+  const reconnectingShown = transport === 'reconnecting' && i.now - i.connChangedAt >= RECONNECTING_GRACE_MS
+
+  // ── capture ──
+  const hfOn = i.hfEnabled && i.hfUsable
+  const capture: PresenceSnapshot['capture'] = i.visionCapturing
+    ? 'looking'
+    : i.ptt === 'recording' || (hfOn && i.hfFsm === 'LISTENING')
+      ? i.partial
+        ? 'recognizing'
+        : 'listening'
+      : i.ptt === 'finalizing'
+        ? 'recognizing'
+        : hfOn && (i.hfFsm === 'ARMED' || i.hfFsm === 'FOLLOWUP')
+          ? 'armed'
+          : 'off'
+
+  // ── agent ──
+  const agent: PresenceSnapshot['agent'] = i.speaking
+    ? 'speaking'
+    : i.turn.processActive
+      ? 'processing'
+      : i.turn.pending || i.turn.streaming || (hfOn && i.hfFsm === 'THINKING')
+        ? 'thinking'
+        : hfOn && i.hfFsm === 'FOLLOWUP'
+          ? 'followup'
+          : 'idle'
+
+  // ── commitment ──
+  // AR05：风险档与截止时刻取**服务端事实**。缺省仍是 high + 本地 TTL——B1 时协议里
+  // 两样都没有，一律按最高档处理是当时唯一诚实的做法；现在有了就不该继续一刀切，
+  // 但**没给的时候不许猜低**（未知风险按高处理，误伤代价远小于漏挡）。
+  const items: DockItem[] = i.pendingOps.map((op) =>
+    op.slot
+      ? ({
+          kind: 'slot',
+          id: op.id,
+          missing: op.slot.missing,
+          state: op.slot.state,
+          expiresAt: op.slot.expiresAt,
+          suggestions: op.slot.suggestions,
+        } as DockItem)
+      : ({
+          kind: 'confirm',
+          id: op.id,
+          summary: op.summary,
+          risk: op.risk ?? 'high',
+          expiresAt: op.expiresAt && op.expiresAt > 0 ? op.expiresAt : op.ts + PENDING_TTL_MS,
+          ...(op.windowMs && op.windowMs > 0 ? { windowMs: op.windowMs } : {}),
+          ...(op.policyBroken ? { policyBroken: true } : {}),
+        } as DockItem),
+  )
+  if (i.pendingLocation) {
+    items.push({
+      kind: 'confirm',
+      id: '__location__',
+      summary: '使用当前位置',
+      risk: 'low',
+      expiresAt: Number.MAX_SAFE_INTEGER,
+      subkind: 'location',
+    })
+  }
+  if (i.turn.processActive && i.turn.processSince > 0 && i.now - i.turn.processSince > LONG_TASK_MS) {
+    items.push({ kind: 'task', id: '__task__', label: i.turn.processLabel || '处理中', startedAt: i.turn.processSince })
+  }
+  if (i.queued > 0) items.push({ kind: 'queue', id: '__queue__', count: i.queued })
+  const commitment = sortCommitments(items)
+  const hasAttention = commitment.some((c) => c.kind === 'confirm' || c.kind === 'slot')
+
+  // ── privacy ──
+  const audio = i.audioCapture
+  const mic: MicState = audio?.s2sUploading ? 'cloudAudio' : audio?.asrUploading ? 'cloudAsr' : audio?.micActive ? 'edge' : 'off'
+  const privacy: PresenceSnapshot['privacy'] = {
+    mic,
+    micActive: audio?.micActive === true,
+    camera: i.visionCameraActive ? 'singleFrame' : 'off',
+    visionUploading: i.visionUploading === true,
+    user: i.user,
+  }
+
+  // ── primary（固定顺序，写进测试）──
+  const errorLive = !!i.lastError && i.now - i.lastError.at < ERROR_SHOW_MS && agent === 'idle'
+  let primary: OrbState
+  if (transport === 'offline') primary = 'muted'
+  else if (hasAttention) primary = 'attention'
+  else if (capture === 'looking') primary = 'looking'
+  else if (capture === 'listening' || capture === 'recognizing') primary = 'listening'
+  else if (agent === 'speaking') primary = 'speaking'
+  else if (agent === 'thinking' || agent === 'processing') primary = 'thinking'
+  else if (agent === 'followup') primary = 'listening'
+  else if (capture === 'armed') primary = 'armed'
+  else primary = 'idle'
+
+  // ── capsule（一次一条；胶囊说「此刻」，Dock 说「欠着」）──
+  const armedCapsule = capture === 'armed' && i.now - i.hfFsmChangedAt < ARMED_CAPSULE_MS
+  let capsule: PresenceSnapshot['capsule']
+  if (transport === 'offline') capsule = { text: '已断开 · 消息会排队', tone: 'red' }
+  else if (reconnectingShown) capsule = { text: '正在重连…', tone: 'amber' }
+  else if (hasAttention) {
+    const first = commitment.find((c) => c.kind === 'confirm' || c.kind === 'slot')
+    capsule = { text: first?.kind === 'slot' ? '还差一个信息' : '等你确认', tone: 'amber', about: 'commitment' }
+  } else if (capture === 'looking') capsule = { text: '看一眼…', tone: 'accent' }
+  else if (capture === 'recognizing') capsule = { text: i.partial || '识别中…', tone: 'accent', live: true }
+  else if (capture === 'listening') capsule = { text: '在听…', tone: 'accent', live: true }
+  else if (agent === 'speaking') capsule = { text: '播报中', tone: 'accent' }
+  else if (agent === 'processing') capsule = { text: `${i.turn.processLabel || '处理中'}…`, tone: 'neutral' }
+  else if (agent === 'thinking') capsule = { text: '正在思考…', tone: 'neutral' }
+  // 2s 短提示（取消 / 回声）：压过 followup 与 armed 这两个「常态提示」，但让位给收音 / 播报 / 思考
+  else if (!!i.notice && i.now - i.notice.at < NOTICE_SHOW_MS) capsule = { text: i.notice.text, tone: 'neutral' }
+  else if (agent === 'followup') capsule = { text: '可以接着说', tone: 'accent', live: true }
+  // error 在 armed 之前（评审 D3）：免唤醒开着时 capture 恒 armed，排后面就永远出不来
+  else if (errorLive) capsule = { text: i.lastError!.text, tone: 'red' }
+  // 建议开行车档（§6 触发③）：常态提示 ⇒ 让位给收音 / 播报 / 思考 / 错误，只压过 armed 那句。
+  // **只建议不切**——自动切会误伤副驾用平板（§6.0：横屏不决定你是驾驶员）
+  else if (i.drivingSuggest) capsule = { text: '切到行车档？点一下开启', tone: 'accent', action: 'enable-driving' }
+  else if (armedCapsule) capsule = { text: '说「小舟小舟」', tone: 'neutral' }
+
+  // ── 语音层开合（方案 §5.2 规则 1/3/4、§4.3）──
+  // 收音中一律升（三入口共用）；语音发起的轮在飞 / 播报 / 追问窗 / 等确认时保持升起；
+  // 用户下拉过这一轮就不再自动升（再开口另算）；点胶囊 = 显式打开（哪怕是文字轮）。
+  // PTT 轮没有追问窗：播报结束、agent 回 idle 即收（方案只给免唤醒定义了 8s 窗）。
+  const voice = i.voice
+  const capturing = capture === 'listening' || capture === 'recognizing'
+  const voiceTurnLive = !!voice && voice.turnSource !== 'text' && (agent !== 'idle' || hasAttention)
+  // 行车档 B/C：层**常驻**（§6「语音层常驻」）——没有在飞轮也开着。A（手持）不常驻：
+  // 可能是乘客在打字。常驻**不是不可收**：用户下拉过这一轮（override='dismissed'）仍然收得起来。
+  // 常驻只在对话页：支持页（设置 / 车辆 / 地图）上闲置的层只会盖住用户来这一页要用的东西（见 supportRoute）。
+  const resident = sheetResident(i.identity, i.driving) && !i.supportRoute
+  // 对话页桌面姿态：层不升（它会带出第二颗球）。转写本来就是记录里的草稿气泡、回答在记录里，状态交给层外胶囊；
+  // 支持页不受影响——那里没有舞台，层是唯一的语音反馈
+  const tabletopChat = !!i.tabletop && !i.supportRoute
+  const sheetOpen =
+    !tabletopChat &&
+    (capturing || voice?.override === 'open' || (voice?.override !== 'dismissed' && (voiceTurnLive || resident)))
+  const input: PresenceSnapshot['input'] = sheetOpen ? 'voice-sheet' : 'composer'
+  // 行车档答后回落（§5.2 规则 3 行车条款）：答完、没在播报、过了 3s ⇒ 内容回落到只球 + 胶囊。
+  // 有卡 / 长任务那一档压过它（一屏一卡要看得见）。非行车不受影响——这是行车条款。
+  const settled =
+    i.driving && !!voice?.answeredAt && agent !== 'speaking' && i.now - voice.answeredAt >= DRIVING_SHEET_SETTLE_MS
+  // 收音中而本轮草稿还没出现（第一段 partial 之前）：`currentTurn` 此刻仍是**上一轮**，它的回答 / 卡片不该
+  // 亮在「在听…」下面、也不该把层撑到 0.62 / 0.78（2026-09-17 真机：按住说话那一瞬「在听…」下挂着上一轮的路线卡）。
+  // 草稿一出现就是新一轮，照常。文字世界（没有 voice）不涉及。
+  const fresh = capturing && !!voice && !voice.draft
+  const answer = !!voice?.answer && !fresh
+  const card = !!voice?.card && !fresh
+  const sheetDetent: SheetDetent =
+    commitment.some((c) => c.kind === 'task') || card ? 0.78 : answer && !settled ? 0.62 : 0.4
+  // 内容区画不画：收音初始 empty（预留转写空间）；行车档回落（detent 已回 0.4 且此刻不忙）settled（只剩头区）——
+  // **层不消失**（常驻，§6），消失的是内容
+  const sheetBody: PresenceSnapshot['sheetBody'] = fresh
+    ? 'empty'
+    : i.driving && sheetDetent === 0.4 && agent === 'idle' && !capturing
+      ? 'settled'
+      : 'turn'
+
+  return {
+    now: i.now,
+    transport,
+    capture,
+    agent,
+    commitment,
+    privacy,
+    degradation: i.degradations,
+    identity: i.identity,
+    driving: i.driving,
+    primary,
+    dim: transport === 'reconnecting',
+    ...(capsule ? { capsule } : {}),
+    input,
+    sheetDetent,
+    sheetBody,
+    turnSource: voice?.turnSource ?? 'text',
+  }
+}

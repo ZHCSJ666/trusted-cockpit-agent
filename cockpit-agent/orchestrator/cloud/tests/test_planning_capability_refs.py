@@ -1,0 +1,674 @@
+"""Request-local capability reference contract for the cloud planner.
+
+These tests intentionally describe the target wire before its implementation.  Keep
+the fixtures small: the existing planning suite owns legacy behaviour coverage.
+"""
+from __future__ import annotations
+
+import asyncio
+import inspect
+import json
+import re
+from dataclasses import FrozenInstanceError
+from types import MappingProxyType, SimpleNamespace
+
+import pytest
+
+from orchestrator.cloud import context, exemplars, planning, skills
+from orchestrator.cloud.context import WorkingSet
+from orchestrator.cloud.models import Plan, PlanContext, Step
+
+
+def _agent(agent_id: str, *intents: str, description: str = "",
+           protected: bool = False, permissions: tuple[str, ...] = ()):
+    caps = [SimpleNamespace(intent=intent, slots=[], description=description,
+                            examples=[], heavy=False, require_confirm=False,
+                            verification=None)
+            for intent in intents]
+    manifest = SimpleNamespace(
+        agent_id=agent_id,
+        capabilities=caps,
+        latency_budget_ms=5000,
+        kind="edge_fast" if protected else "agent",
+        deployment="edge" if protected else "cloud",
+        requires_permissions=list(permissions),
+        trust_level="first_party",
+        context_scopes=[],
+        route_hints=[],
+        category="core" if protected else "",
+    )
+    return SimpleNamespace(manifest=manifest, endpoint=f"{agent_id}:50051")
+
+
+def _ref_api():
+    """Resolve planned APIs at test time so missing symbols are test failures, not
+    collection errors.
+    """
+    catalog_type = getattr(planning, "PlannerCapabilityCatalog", None)
+    assemble = getattr(planning, "_assemble_capability_catalog", None)
+    if catalog_type is None or assemble is None:
+        pytest.fail(
+            "missing referential planner API: "
+            "PlannerCapabilityCatalog/_assemble_capability_catalog",
+            pytrace=False,
+        )
+    return catalog_type, assemble
+
+
+def _pairs(catalog) -> set[tuple[str, str]]:
+    return set(catalog.ref_to_pair.values())
+
+
+def _step_schema(tool_spec: dict) -> dict:
+    return (tool_spec["tools"][0]["function"]["parameters"]["properties"]
+            ["steps"]["items"])
+
+
+_LEGACY_SHAPE_TOKEN = re.compile(
+    r"(?P<open>\{)|(?P<close>\})|"
+    r"(?P<key>(?:[\"'](?:agent_id|intent)[\"']|agent_id|intent))\s*:"
+)
+
+
+def _legacy_step_shape(text: str) -> bool:
+    """Whether one object contains both legacy planner identity keys.
+
+    Tracking brace depth avoids treating prose or two unrelated objects that mention
+    one key each as an old LLM step shape.  Quotes are optional because the asset
+    scanner must also reject YAML-ish/unquoted examples.
+    """
+    object_keys: list[set[str]] = []
+    for match in _LEGACY_SHAPE_TOKEN.finditer(text):
+        if match.group("open"):
+            object_keys.append(set())
+        elif match.group("close"):
+            if object_keys and {"agent_id", "intent"} <= object_keys.pop():
+                return True
+        elif object_keys:
+            object_keys[-1].add(match.group("key").strip("\"'"))
+    return any({"agent_id", "intent"} <= keys for keys in object_keys)
+
+
+def test_legacy_step_shape_scanner_requires_both_keys_in_one_object():
+    assert _legacy_step_shape('{"id":"s1","agent_id":"a","intent":"a.one"}')
+    assert _legacy_step_shape("{'agent_id':'a','intent':'a.one'}")
+    assert _legacy_step_shape("{agent_id: a, intent: a.one}")
+    assert not _legacy_step_shape('prose says "agent_id": then "intent":')
+    assert not _legacy_step_shape('{"agent_id":"a"} {"intent":"a.one"}')
+    assert not _legacy_step_shape('{"agent_id":"a","slots":{"intent":"note"}}')
+
+
+def test_request_catalog_is_opaque_immutable_and_budgeted_as_rendered_text(monkeypatch):
+    catalog_type, assemble = _ref_api()
+    beta = _agent("beta", "beta.two", description="B" * 80)
+    alpha = _agent("alpha", "alpha.one", "alpha.extra", "alpha.one",
+                   description="A" * 80)
+    agents = [beta, alpha]
+    monkeypatch.setattr(context, "_CATALOG_BUDGET", 100_000)
+
+    first = assemble(agents)
+    second = assemble(list(reversed(agents)))
+
+    assert isinstance(first, catalog_type)
+    assert first is not second and first.ref_to_pair is not second.ref_to_pair
+    # Each request applies the same sort/dedupe construction rule.  This does not
+    # promise that refs are externally stable or reusable across requests.
+    for built, candidates in ((first, agents), (second, list(reversed(agents)))):
+        expected = sorted({
+            (agent.manifest.agent_id, cap.intent)
+            for agent in candidates for cap in agent.manifest.capabilities
+        })
+        assert list(built.ref_to_pair.values()) == expected
+        assert list(built.ref_to_pair) == [
+            f"cap_{index:04d}" for index in range(1, len(expected) + 1)
+        ]
+    assert all(re.fullmatch(r"cap_\d{4}", ref) for ref in first.ref_to_pair)
+    assert all(not any(token in ref for token in ("alpha", "beta", "one", "two"))
+               for ref in first.ref_to_pair)
+    assert dict(first.pair_to_ref) == {pair: ref for ref, pair in first.ref_to_pair.items()}
+    with pytest.raises((FrozenInstanceError, AttributeError, TypeError)):
+        first.semantic_mapping_text = "changed"
+    with pytest.raises((AttributeError, TypeError)):
+        first.ref_to_pair["cap_9999"] = ("x", "x.y")
+
+    full_chars = len(first.semantic_mapping_text)
+    beta_only = assemble([beta])
+    budget = len(beta_only.semantic_mapping_text)
+    assert budget < full_chars
+    monkeypatch.setattr(context, "_CATALOG_BUDGET", budget)
+    cropped = assemble(agents)
+    assert set(cropped.catalog_stats) == {"chars_full", "chars_final", "dropped"}
+    assert cropped.catalog_stats["chars_full"] == full_chars
+    assert cropped.catalog_stats["chars_final"] == len(cropped.semantic_mapping_text)
+    assert cropped.catalog_stats["chars_final"] <= budget < full_chars
+    assert cropped.catalog_stats["dropped"] == ["alpha"]
+    visible_ids = {a.manifest.agent_id for a in cropped.visible_agents}
+    expected_pairs = {
+        (a.manifest.agent_id, cap.intent)
+        for a in cropped.visible_agents for cap in a.manifest.capabilities
+    }
+    assert visible_ids == {"beta"}
+    assert expected_pairs == {("beta", "beta.two")}
+    assert _pairs(cropped) == expected_pairs
+    assert set(cropped.agent_map) == visible_ids
+    assert set(cropped.pair_to_ref) == expected_pairs
+    assert all(aid in visible_ids for aid, _ in _pairs(cropped))
+
+    # Existing stop semantics remain fail-open for availability: protected-only
+    # and a single oversized non-protected catalog are never truncated to empty.
+    monkeypatch.setattr(context, "_CATALOG_BUDGET", 1)
+    protected = assemble([
+        _agent("protected-a", "a.one", description="x" * 100, protected=True),
+        _agent("protected-b", "b.one", description="y" * 100, protected=True),
+    ])
+    singleton = assemble([_agent("last", "last.one", description="z" * 100)])
+    assert len(protected.visible_agents) == 2
+    assert len(singleton.visible_agents) == 1
+    assert protected.catalog_stats["chars_final"] > 1
+    assert singleton.catalog_stats["chars_final"] > 1
+    assert protected.catalog_stats["dropped"] == []
+    assert singleton.catalog_stats["dropped"] == []
+
+
+def test_duplicate_agent_identity_fails_closed_before_refs_diverge():
+    _, assemble = _ref_api()
+    first = _agent("duplicate", "duplicate.one")
+    second = _agent("duplicate", "duplicate.two")
+
+    with pytest.raises(ValueError, match="duplicate planner agent_id: duplicate"):
+        assemble([first, second])
+
+
+def test_mapping_object_keys_are_the_only_copyable_refs(monkeypatch):
+    _, assemble = _ref_api()
+    monkeypatch.setattr(context, "_CATALOG_BUDGET", 100_000)
+    edge = _agent("edge-example", "example.edge", protected=True)
+    cloud = _agent("cloud-example", "example.semantic", description="abstract meaning")
+    catalog = assemble([edge, cloud])
+    groups = {
+        row["service"]: row
+        for row in (
+            json.loads(line) for line in catalog.semantic_mapping_text.splitlines()[1:]
+        )
+    }
+
+    edge_ref = catalog.pair_to_ref[("edge-example", "example.edge")]
+    cloud_ref = catalog.pair_to_ref[("cloud-example", "example.semantic")]
+    assert groups["edge-example"]["capabilities"] == {
+        edge_ref: ["example.edge"],
+    }
+    assert groups["cloud-example"]["capabilities"] == {
+        cloud_ref: ["example.semantic", [], "abstract meaning"],
+    }
+    group_lines = catalog.semantic_mapping_text.splitlines()[1:]
+    assert all('"meaning":' not in line for line in group_lines)
+    assert all('"capability_ref":' not in line for line in group_lines)
+    assert {
+        ref
+        for group in groups.values()
+        for ref in group["capabilities"]
+    } == set(catalog.ref_to_pair)
+    assert [
+        ref
+        for group in groups.values()
+        for ref in group["capabilities"]
+    ] == list(catalog.ref_to_pair)
+
+
+def test_ref_only_schema_static_prompts_and_user_message_tail(monkeypatch):
+    _, assemble = _ref_api()
+    monkeypatch.setattr(context, "_CATALOG_BUDGET", 100_000)
+    catalog = assemble([_agent("alpha", "alpha.one"), _agent("beta", "beta.two")])
+
+    item = _step_schema(planning._submit_plan_tools(catalog))
+    expected_step_fields = {
+        "id", "capability_ref", "slots", "depends_on", "slot_refs",
+    }
+    assert {
+        # W12：`covers` 是可选的诉求账本注记，不是能力身份通道；required 与封闭性不变
+        "properties": set(item["properties"]) - {"covers"},
+        "required": set(item["required"]),
+        "additionalProperties": item.get("additionalProperties"),
+    } == {
+        "properties": expected_step_fields,
+        "required": expected_step_fields,
+        "additionalProperties": False,
+    }
+    assert item["properties"]["capability_ref"]["enum"] == list(catalog.ref_to_pair)
+    ref_description = item["properties"]["capability_ref"]["description"]
+    assert "capabilities 对象的 key" in ref_description
+    assert "数组值" in ref_description and "禁止" in ref_description
+    assert not _legacy_step_shape(json.dumps(item, ensure_ascii=False))
+    empty_steps = (planning._submit_plan_tools(assemble([]))["tools"][0]["function"]
+                   ["parameters"]["properties"]["steps"])
+    assert empty_steps["maxItems"] == 0
+
+    for static_prompt in (
+        planning._PLANNER_BASE,
+        planning._CATALOG_ALLOWLIST_SECTION,
+        planning._REPLAN_SYSTEM,
+        planning._planner_system(),
+        planning._planner_system(toolcall=True),
+    ):
+        assert not _legacy_step_shape(static_prompt)
+    assert "capability_ref" in planning._PLANNER_BASE
+    assert "capability_ref" in planning._REPLAN_SYSTEM
+    assert "capabilities 对象的 key 才是 capability_ref" in \
+        planning._CAPABILITY_MAPPING_HEAD
+    for abstract_rule in (
+        "capabilities 的 object key 才是 capability_ref",
+        "数组值只读解释，禁止放入 step 或当作 capability_ref",
+        '{"cap_0042":["example.semantic",["argument"],"abstract description"]}',
+        '正确：step.capability_ref="cap_0042"',
+        '错误：step.capability_ref="example.semantic"',
+        "每个 step 只能包含 id、capability_ref、slots、depends_on、slot_refs 五个字段",
+    ):
+        assert abstract_rule in planning._CATALOG_ALLOWLIST_SECTION
+
+    ws = WorkingSet(history=[{"role": "user", "text": "history-marker"}])
+    message = planning.PlanBuilder._planner_user_msg(
+        "utterance-marker", catalog, ws,
+        skills_block="skill-marker", exemplars_block="exemplar-marker",
+    )
+    assert message.count(catalog.semantic_mapping_text) == 1
+    positions = [message.index(marker) for marker in (
+        "skill-marker", "exemplar-marker", "history-marker",
+        catalog.semantic_mapping_text, "utterance-marker",
+    )]
+    assert positions == sorted(positions)
+    assert message.rstrip().endswith("utterance-marker")
+    assert _pairs(catalog) == set(catalog.pair_to_ref) == {
+        (aid, cap.intent)
+        for aid, agent in catalog.agent_map.items()
+        for cap in agent.manifest.capabilities
+    }
+
+
+def test_catalog_prompt_requires_a_pre_submit_ref_self_check():
+    prompt = planning._CATALOG_ALLOWLIST_SECTION
+    for clause in (
+        "提交前逐个复核",
+        "当前映射的 key",
+        "不存在就删除该 step",
+        "不得先编造再依赖重试",
+    ):
+        assert clause in prompt
+
+
+def test_replan_prompt_consumes_completed_observations_instead_of_repeating_them():
+    """An OK observation is evidence for the remaining branch, not a retry request."""
+    prompt = planning._REPLAN_SYSTEM
+    for clause in (
+        "status=ok",
+        "已经完成",
+        # W04（2026-09-19）：判重键是 (capability, 参数)，prompt 的措辞随之——
+        # 「不得以相同参数重复」+「参数不同是新的查询」
+        "相同参数",
+        "重复 observation.intent",
+        "参数不同",
+        "条件分支",
+        "retry_same_intent=true",
+        "observation.intent",
+        "条件后件",
+        "条件参数",
+    ):
+        assert clause in prompt
+
+
+def test_bare_object_clarification_cannot_degrade_into_empty_no_action():
+    """Bare names need a question; an empty answer is interpreted as no action."""
+    prompt = planning._CLARIFY_SECTION
+    for clause in (
+        "只有一个名词",
+        "不得输出 addressed=true、steps=[]",
+        "不得当作闲聊复述",
+    ):
+        assert clause in prompt
+    assert "云岚国际中心" in prompt, "裸对象澄清需要结构化、非对抗原句的示范"
+    assert '"steps":[],"clarify"' in prompt
+    assert "请规划到云岚国际中心的路线" in prompt
+    assert "请介绍云岚国际中心的地点信息" in prompt
+
+
+def test_cyclic_wire_plan_is_rejected_before_it_reaches_the_executor():
+    """The planner seam must fail closed on a graph the executor cannot schedule."""
+    _, assemble = _ref_api()
+    catalog = assemble([_agent("nearby", "nearby.search", "nearby.detail")])
+    search_ref = catalog.pair_to_ref[("nearby", "nearby.search")]
+    detail_ref = catalog.pair_to_ref[("nearby", "nearby.detail")]
+    builder = planning.PlanBuilder(None, None)
+
+    cyclic = {
+        "addressed": True,
+        "steps": [
+            {"id": "s1", "capability_ref": search_ref, "slots": {},
+             "depends_on": ["s2"], "slot_refs": {}},
+            {"id": "s2", "capability_ref": detail_ref, "slots": {},
+             "depends_on": ["s1"], "slot_refs": {}},
+        ],
+    }
+    assert builder._parse_and_validate_data(cyclic, catalog, "query") is None
+
+    acyclic = json.loads(json.dumps(cyclic))
+    acyclic["steps"][0]["depends_on"] = []
+    assert builder._parse_and_validate_data(acyclic, catalog, "query") is not None
+
+
+def test_missing_container_step_fields_are_normalized_not_dropped():
+    """缺席容器键（slots/depends_on/slot_refs）按空值补齐——含义唯一，不是猜测。
+
+    demo-mkemhn 三轮实证（f868a7ce/3650e2b5/cffc84fd）：MiniMax 漏写 `slot_refs`/
+    `depends_on` 时整份计划被丢，两轮重试打光后退成 chitchat 兜底，
+    兜底又凭历史编造「已找到 10 家门店，请选择其中一家」——没有列表也没有卡片。
+    """
+    _, assemble = _ref_api()
+    catalog = assemble([_agent("nearby", "nearby.search")])
+    ref = catalog.pair_to_ref[("nearby", "nearby.search")]
+    builder = planning.PlanBuilder(None, None)
+
+    plan = builder._parse_and_validate_data({
+        "addressed": True,
+        "steps": [{"id": "s1", "capability_ref": ref,
+                   "slots": {"keyword": "瑞幸咖啡"}}],
+    }, catalog, "查询附近的瑞幸咖啡")
+
+    assert plan is not None
+    assert plan.steps[0].intent == "nearby.search"
+    assert plan.steps[0].slots == {"keyword": "瑞幸咖啡"}
+    assert plan.steps[0].depends_on == []
+    assert plan.steps[0].slot_refs == {}
+
+    # 连 slots 都漏了也一样：空槽计划由既有的 NEED_SLOT/校验机制接手。
+    bare = builder._parse_and_validate_data({
+        "addressed": True,
+        "steps": [{"id": "s1", "capability_ref": ref}],
+    }, catalog, "q")
+    assert bare is not None and bare.steps[0].slots == {}
+
+
+def test_store_hint_step_gains_an_edge_behind_in_plan_nearby():
+    """demo-3ukshz 二轮旅程探针第二跳：模型排了 nearby.search + mcd.menu 两步但
+    refs/depends_on 双缺 → 同层并行 → 菜单步解析时门店结果未回，`store_hint`
+    补全踩空退回默认店。声明了 store_hint 未填且计划含 nearby.search → 补依赖边。"""
+    _, assemble = _ref_api()
+    nearby = _agent("nearby", "nearby.search")
+    bridge = _agent("mcp-bridge", "mcd.menu")
+    bridge.manifest.capabilities[0].slots = ["store_hint", "city", "item_query"]
+    catalog = assemble([nearby, bridge])
+    builder = planning.PlanBuilder(None, None)
+
+    plan = builder._parse_and_validate_data({
+        "addressed": True,
+        "steps": [
+            {"id": "s1", "capability_ref":
+                catalog.pair_to_ref[("nearby", "nearby.search")],
+             "slots": {"keyword": "麦当劳"}, "depends_on": [], "slot_refs": {}},
+            {"id": "s2", "capability_ref":
+                catalog.pair_to_ref[("mcp-bridge", "mcd.menu")],
+             "slots": {}, "depends_on": [], "slot_refs": {}},
+        ],
+    }, catalog, "附近的麦当劳有什么菜单")
+
+    assert plan is not None
+    menu = next(s for s in plan.steps if s.intent == "mcd.menu")
+    assert menu.depends_on == ["s1"]
+
+    # 用户点名了门店（store_hint 已填）→ 不补边，保持可并行
+    named = builder._parse_and_validate_data({
+        "addressed": True,
+        "steps": [
+            {"id": "s1", "capability_ref":
+                catalog.pair_to_ref[("nearby", "nearby.search")],
+             "slots": {"keyword": "麦当劳"}, "depends_on": [], "slot_refs": {}},
+            {"id": "s2", "capability_ref":
+                catalog.pair_to_ref[("mcp-bridge", "mcd.menu")],
+             "slots": {"store_hint": "国贸店"}, "depends_on": [],
+             "slot_refs": {}},
+        ],
+    }, catalog, "q")
+    named_menu = next(s for s in named.steps if s.intent == "mcd.menu")
+    assert named_menu.depends_on == []
+
+
+def test_displaced_step_fields_at_wire_top_level_still_reject_the_plan():
+    """位移不是缺席：容器键出现在 wire 顶层=真值被放错了层，归一会让计划带空槽
+    静默执行——整份拒绝交给重试（对抗语料 required-step-fields-displaced-to-top-level
+    钉的就是这形态，本用例是它在单测层的同位角）。"""
+    _, assemble = _ref_api()
+    catalog = assemble([_agent("nearby", "nearby.search")])
+    ref = catalog.pair_to_ref[("nearby", "nearby.search")]
+    builder = planning.PlanBuilder(None, None)
+
+    displaced = builder._parse_and_validate_data({
+        "addressed": True,
+        "slots": {"keyword": "瑞幸咖啡"},
+        "steps": [{"id": "s1", "capability_ref": ref}],
+    }, catalog, "q")
+    assert displaced is None
+
+
+def test_unknown_step_fields_and_missing_identity_still_reject_the_plan():
+    """归一只救缺席的容器键：多出的未知键是模型自造语法（真值可能放错字段名，
+    接受等于静默错执行）；id/capability_ref 缺席是身份缺失，都整份拒绝。"""
+    _, assemble = _ref_api()
+    catalog = assemble([_agent("nearby", "nearby.search")])
+    ref = catalog.pair_to_ref[("nearby", "nearby.search")]
+    builder = planning.PlanBuilder(None, None)
+
+    extra_key = builder._parse_and_validate_data({
+        "addressed": True,
+        "steps": [{"id": "s1", "capability_ref": ref, "slots": {},
+                   "parameters": {"keyword": "瑞幸"}}],
+    }, catalog, "q")
+    assert extra_key is None
+
+    no_identity = builder._parse_and_validate_data({
+        "addressed": True,
+        "steps": [{"slots": {"keyword": "瑞幸"}}],
+    }, catalog, "q")
+    assert no_identity is None
+
+
+def test_build_retry_and_replan_use_one_catalog_and_one_parse_seam(monkeypatch):
+    _, assemble = _ref_api()
+    alpha = _agent("alpha", "alpha.one")
+    denied = _agent("denied", "denied.one", permissions=("secret.use",))
+    agents = [alpha, denied]
+    catalog = assemble([alpha])
+    assembled: list[object] = []
+
+    def assemble_spy(candidates):
+        assembled.append(tuple(candidates))
+        return catalog
+
+    monkeypatch.setattr(planning, "_assemble_capability_catalog", assemble_spy)
+
+    async def no_skills(_text, *, capability_refs):
+        assert capability_refs is catalog.pair_to_ref
+        return "off", [], ""
+
+    async def no_exemplars(_text, *, capability_refs):
+        assert capability_refs is catalog.pair_to_ref
+        return "off", [], ""
+
+    monkeypatch.setattr(skills, "plan_skills", no_skills)
+    monkeypatch.setattr(exemplars, "plan_exemplars", no_exemplars)
+    monkeypatch.setenv("PLANNER_TOOLCALL", "on")
+    repaired: list[list[tuple[str, str]]] = []
+
+    def repair_spy(plan, _text, _names):
+        repaired.append([(step.agent_id, step.intent) for step in plan.steps])
+        return ["ref-contract-repair"]
+
+    monkeypatch.setattr(skills, "apply_plan_repairs", repair_spy)
+    valid_wire = {
+        "addressed": True,
+        "steps": [{"id": "s1", "capability_ref": "cap_0001", "slots": {},
+                   "depends_on": [], "slot_refs": {}}],
+    }
+
+    async def llm(_messages):
+        return json.dumps(valid_wire)
+
+    tool_rounds: list[int] = []
+
+    async def llm_tools(_messages, _tools):
+        # First round refuses the tool. Its text is salvaged through the seam,
+        # then the second round uses the same catalog object.
+        #
+        # ⚠ 2026-08-10：掉档且模型仍吐了文本时，第 2 轮会被**强制重试工具通道**
+        # （`PLANNER_TOOLCALL_SALVAGE_RETRY`），不再退 JSON。本测试守的是
+        # 「两轮共用同一个 catalog、走同一条 parse 缝」，与第 2 轮走哪条通道无关——
+        # 所以这里跟着改的是**制造两轮的手段**，不是它断言的性质。
+        tool_rounds.append(1)
+        if len(tool_rounds) == 1:
+            return json.dumps({"addressed": True,
+                               "steps": [{"id": "bad",
+                                          "capability_ref": "missing"}]}), []
+        return "", [{"id": "c1", "name": planning._SUBMIT_PLAN_NAME,
+                     "arguments": valid_wire}]
+
+    async def resolve(_query, top_k=1):
+        return []
+
+    builder = planning.PlanBuilder(llm, resolve, llm_tools)
+    seen: list[object] = []
+
+    def parse_spy(wire, seen_catalog, fallback_text):
+        seen.append(seen_catalog)
+        if wire == valid_wire:
+            return Plan(steps=[Step(id="s1", agent_id="alpha",
+                                    endpoint="alpha:50051", intent="alpha.one")],
+                        raw_text=fallback_text)
+        return None
+
+    builder._parse_and_validate_data = parse_spy
+    plan = asyncio.run(builder.build(
+        "do alpha", WorkingSet(catalog=agents), PlanContext(session_id="s"),
+        granted_permissions=[]))
+    assert len(assembled) == 1
+    assert [a.manifest.agent_id for a in assembled[0]] == ["alpha"]
+    assert seen == [catalog, catalog]
+    assert plan.steps[0].intent == "alpha.one"
+    assert repaired == [[("alpha", "alpha.one")]]
+    assert plan.skill_effects == ["ref-contract-repair"]
+
+    # Replan owns a fresh request catalog and even done=true/empty steps passes
+    # through the same seam before the decision is returned.
+    assembled.clear()
+    seen.clear()
+
+    async def done_llm(_messages):
+        return '{"done":true,"steps":[]}'
+
+    builder._llm = done_llm
+    decision = asyncio.run(builder.replan(
+        "done", [], agents, PlanContext(session_id="s"), working_set=WorkingSet()))
+    assert decision.done is True
+    assert len(assembled) == 1
+    assert seen == [catalog]
+
+    signature = inspect.signature(planning.PlanBuilder._parse_and_validate_data)
+    assert list(signature.parameters)[:4] == ["self", "wire", "catalog", "fallback_text"]
+
+
+def test_dynamic_skill_and_exemplar_render_refs_and_drop_partial_dags(monkeypatch):
+    _, assemble = _ref_api()
+    catalog = assemble([_agent("alpha", "alpha.one"), _agent("beta", "beta.two")])
+    refs = catalog.pair_to_ref
+    two_steps = [
+        {"id": "s1", "agent_id": "alpha", "intent": "alpha.one", "slots": {}},
+        {"id": "s2", "agent_id": "beta", "intent": "beta.two", "slots": {},
+         "depends_on": ["s1"], "slot_refs": {"value": "s1.data.value"}},
+    ]
+    skill = skills.SkillDoc(
+        name="ref-contract", type="guide", description="test", knowledge="knowledge",
+        body="knowledge", few_shots=({"user": "skill-example", "plan": {"steps": two_steps}},),
+    )
+    exemplar_steps = tuple(exemplars.ExemplarStore._parse_plan([
+        {"id": "s1", "agent": "alpha", "intent": "alpha.one", "slots": {},
+         "depends_on": [], "slot_refs": {}},
+        {"id": "s2", "agent": "beta", "intent": "beta.two", "slots": {},
+         "depends_on": ["s1"], "slot_refs": {"value": "s1.data.value"}},
+    ]))
+    assert all(set(step) == {
+        "id", "agent", "intent", "slots", "depends_on", "slot_refs",
+    }
+               for step in exemplar_steps)
+    assert exemplar_steps[1]["depends_on"] == ["s1"]
+    assert exemplar_steps[1]["slot_refs"] == {"value": "s1.data.value"}
+    exemplar = exemplars.Exemplar(
+        eid="test#1", domain="test", text="exemplar-example",
+        plan=exemplar_steps, source="manual",
+    )
+
+    skill_block, _, _ = skills.render_skills_block(
+        [], [skill], capability_refs=refs, budget=10_000)
+    exemplar_block, _, _ = exemplars.render_block(
+        [exemplar], capability_refs=refs, budget=10_000)
+    for block in (skill_block, exemplar_block):
+        assert "cap_0001" in block and "cap_0002" in block
+        assert not _legacy_step_shape(block)
+
+    expected_fields = {
+        "id", "capability_ref", "slots", "depends_on", "slot_refs",
+    }
+    resolved_skill = skills._resolve_few_shot_plan(
+        {"steps": two_steps}, refs)
+    assert resolved_skill is not None
+    assert all(set(step) == expected_fields for step in resolved_skill["steps"])
+    rendered_exemplar = exemplars._render_one(exemplar, refs)
+    assert rendered_exemplar is not None
+    rendered_steps = json.loads(rendered_exemplar.split("→ ", 1)[1])
+    assert all(set(step) == expected_fields for step in rendered_steps)
+    for rendered in (resolved_skill["steps"], rendered_steps):
+        assert [step["id"] for step in rendered] == ["s1", "s2"]
+        assert rendered[1]["depends_on"] == ["s1"]
+        assert rendered[1]["slot_refs"] == {"value": "s1.data.value"}
+
+    only_alpha = MappingProxyType({("alpha", "alpha.one"): "cap_0001"})
+    partial_skill, _, _ = skills.render_skills_block(
+        [], [skill], capability_refs=only_alpha, budget=10_000)
+    partial_exemplar, injected, _ = exemplars.render_block(
+        [exemplar], capability_refs=only_alpha, budget=10_000)
+    assert "skill-example" not in partial_skill
+    assert "cap_0001" not in partial_skill
+    assert partial_exemplar == ""
+    assert exemplars._render_one(exemplar, only_alpha) is None
+    assert injected == []
+
+    monkeypatch.setattr(skills, "default_store", lambda: SimpleNamespace(load=lambda: [skill]))
+    monkeypatch.setattr(exemplars, "default_store",
+                        lambda: SimpleNamespace(load=lambda: [exemplar]))
+    assert "cap_0001" in skills.render_for_names(
+        ["full:ref-contract@lex:10"], capability_refs=refs)
+    assert "cap_0001" in exemplars.render_for_names(
+        ["full:test#1@lex:1.00"], capability_refs=refs)
+
+
+def test_skill_knowledge_uses_current_refs_or_is_capability_blocked():
+    skill = skills.SkillDoc(
+        name="aware", type="guide", description="test",
+        knowledge="先 alpha.one，再 beta.two。", body="先 alpha.one，再 beta.two。",
+        capability_dependencies=("alpha.one", "beta.two"),
+    )
+    refs = MappingProxyType({
+        ("alpha", "alpha.one"): "cap_0001",
+        ("beta", "beta.two"): "cap_0002",
+    })
+    block, injected, clipped = skills.render_skills_block(
+        [], [skill], capability_refs=refs, budget=10_000)
+    assert injected == [skill] and clipped == []
+    assert "cap_0001" in block and "cap_0002" in block
+    assert "alpha.one" not in block and "beta.two" not in block
+
+    partial = MappingProxyType({("alpha", "alpha.one"): "cap_0001"})
+    block, injected, clipped = skills.render_skills_block(
+        [], [skill], capability_refs=partial, budget=10_000)
+    assert injected == [] and clipped == []
+    assert "先 alpha.one" not in block and "beta.two" not in block
+
+    block, injected, clipped = skills.render_skills_block(
+        [], [skill], capability_refs=None, budget=10_000)
+    assert injected == [] and clipped == []
+    assert "alpha.one" not in block and "beta.two" not in block

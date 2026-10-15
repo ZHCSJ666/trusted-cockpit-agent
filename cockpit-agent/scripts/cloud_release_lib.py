@@ -1,0 +1,2038 @@
+from __future__ import annotations
+
+import ast
+import base64
+import hashlib
+import io
+import json
+import os
+import re
+import secrets
+import shutil
+import signal
+import subprocess
+import tarfile
+import tempfile
+import tokenize
+import unicodedata
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from pathlib import PurePosixPath
+from typing import BinaryIO, Callable, Mapping, Protocol, Sequence
+
+
+FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+SSH_HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]*$")
+SSH_USER_RE = re.compile(r"^[a-z_][a-z0-9_-]*[$]?$")
+SSH_KEX_RE = re.compile(r"^[A-Za-z0-9@._+,-]+$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+RELEASE_SELECTOR_RE = re.compile(r"^[0-9a-f]{7,40}$")
+UPLOAD_NONCE_RE = re.compile(r"^[0-9a-f]{32}$")
+RUNTIME_PROJECT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+DDL_RE = re.compile(
+    r"\b(?:CREATE|ALTER|DROP|TRUNCATE)\s+"
+    r"(?:TABLE|INDEX|TYPE|SCHEMA)\b",
+    re.IGNORECASE,
+)
+PRIVATE_KEY_BLOCK_RE = re.compile(
+    r"-----BEGIN (?P<kind>(?:RSA |EC |OPENSSH )?PRIVATE KEY)-----\s+"
+    r"[A-Za-z0-9+/=\r\n]{32,}\s+"
+    r"-----END (?P=kind)-----",
+)
+CREDENTIAL_ASSIGNMENT_RE = re.compile(
+    r"(?im)^\s*(?:API[_-]?KEY|ACCESS[_-]?TOKEN|TOKEN|PASSWORD|SECRET)"
+    r"\s*=\s*['\"]?(?P<value>[^\s#'\"]{16,})"
+)
+CREDENTIAL_NAME_RE = re.compile(
+    r"^(?:API_?KEY|ACCESS_?TOKEN|TOKEN|PASSWORD|SECRET)$",
+    re.IGNORECASE,
+)
+STRICT_PLACEHOLDER_RE = re.compile(
+    r"^(?:"
+    r"example|placeholder|changeme|mock|test|"
+    r"your[_-][A-Za-z0-9_-]+|"
+    r"\$\{[A-Za-z_][A-Za-z0-9_]*\}"
+    r")$",
+    re.IGNORECASE,
+)
+SYNTHETIC_CREDENTIAL_FIXTURE_MARKER = "# release-secret-fixture"
+# compose 文件单列一类、按一次性摘要批准（2026-10-07）：它们随发布由 docker compose 读取，不装到主机，
+# 基础设施批准锚绑不住它们——此前归在 infrastructure 下，而锚的摘要只算 deploy/cloud/**，
+# 只改 compose 时目标摘要等于已批准摘要，闸直接放行（环境变量透传、端口、挂载都在这里改）。
+CONTROLLED_EXACT = {
+    "compose.yaml": "compose",
+    "deploy/docker-compose.yaml": "compose",
+    ".env.example": "runtime_config_contract",
+    "memory/schema.sql": "database_schema",
+    "registry/postgres_schema.sql": "database_schema",
+    "proactive/schema.sql": "database_schema",
+}
+SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
+CI_CD_TREE_PREFIX = ".github/workflows"
+REGULAR_GIT_TREE_MODES = frozenset({"100644", "100755"})
+
+
+class ReleaseError(RuntimeError):
+    """A safe, user-facing cloud release error with a fixed machine category."""
+
+    def __init__(self, message: str, *, category: str = "runtime") -> None:
+        super().__init__(message)
+        if category not in {"configuration", "safety", "runtime"}:
+            raise ValueError("invalid release error category")
+        self.category = category
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    argv: tuple[str, ...]
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+@dataclass(frozen=True, order=True)
+class ControlledChange:
+    path: str
+    category: str
+
+
+@dataclass(frozen=True)
+class ReleasePlan:
+    deployed_sha: str
+    target_sha: str
+    changed_paths: tuple[str, ...]
+    blocking_changes: tuple[ControlledChange, ...]
+    status: str
+    target_infrastructure_digest: str | None = None
+    approved_infrastructure_digest: str | None = None
+    target_ci_cd_digest: str | None = None
+    approved_ci_cd_digest: str | None = None
+    target_database_schema_digest: str | None = None
+    approved_database_schema_digest: str | None = None
+    target_compose_digest: str | None = None
+    approved_compose_digest: str | None = None
+
+
+@dataclass(frozen=True)
+class ReleaseArtifact:
+    directory: Path
+    source_tar: Path
+    manifest: Path
+    checksums: Path
+    transport_tar: Path
+
+
+@dataclass(frozen=True)
+class RemoteState:
+    current_release: str
+    current_path: str
+    runtime_project_name: str
+    #: 运行中的 `car-agent-release/*` 容器实际使用的镜像 tag（去重、有序）。
+    #: 与 `current_release` **不是同一件事**：软链记录的是「该跑哪个」，这里是「真在跑哪个」。
+    running_release_tags: tuple[str, ...]
+    approved_infrastructure_digest: str | None
+    disk_available_bytes: int
+    memory_available_bytes: int
+    release_lock_available: bool
+    runtime_project_ready: bool
+    shared_scripts_ready: bool
+    shared_models_ready: bool
+
+
+@dataclass(frozen=True)
+class BootstrapCandidate:
+    path: str
+    source: str
+    sha256: str | None
+    mode: str
+    owner: str = "root:root"
+
+
+@dataclass(frozen=True)
+class BootstrapReport:
+    status: str
+    source_release: str
+    candidates: tuple[str, ...]
+    details: tuple[BootstrapCandidate, ...]
+
+
+@dataclass(frozen=True)
+class ReleaseRequest:
+    repo: Path
+    revision: str
+    artifact_root: Path
+    ssh: SshConfig
+    approved_ci_cd_digest: str | None = None
+    approved_database_schema_digest: str | None = None
+    approved_compose_digest: str | None = None
+
+
+@dataclass(frozen=True)
+class CloudReleaseResult:
+    status: str
+    plan: ReleasePlan
+    artifact: ReleaseArtifact | None
+    remote_state: RemoteState
+
+
+class CommandRunner(Protocol):
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path,
+        env: Mapping[str, str] | None = None,
+        stdin: BinaryIO | None = None,
+        check: bool = True,
+        timeout_s: float | None = None,
+        attached: bool = False,
+    ) -> CommandResult:
+        pass
+
+
+class SubprocessRunner:
+    def __init__(self, redactions: set[str] | None = None) -> None:
+        self._redactions = {value for value in redactions or set() if value}
+
+    def _redact(self, value: str) -> str:
+        for secret in sorted(self._redactions, key=len, reverse=True):
+            value = value.replace(secret, "[REDACTED]")
+        return value
+
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path,
+        env: Mapping[str, str] | None = None,
+        stdin: BinaryIO | None = None,
+        check: bool = True,
+        timeout_s: float | None = None,
+        attached: bool = False,
+    ) -> CommandResult:
+        if not argv:
+            raise ReleaseError("cannot run an empty command")
+        try:
+            process = subprocess.Popen(
+                list(argv),
+                cwd=cwd,
+                env=dict(env) if env is not None else None,
+                stdin=stdin,
+                stdout=None if attached else subprocess.PIPE,
+                stderr=None if attached else subprocess.PIPE,
+                creationflags=(
+                    subprocess.CREATE_NEW_PROCESS_GROUP
+                    if os.name == "nt" and not attached
+                    else 0
+                ),
+                start_new_session=os.name != "nt" and not attached,
+            )
+        except OSError as exc:
+            raise ReleaseError(
+                f"could not run {argv[0]}: {type(exc).__name__}"
+            ) from exc
+        if attached:
+            # Interactive foreground children (a Vite dev server) own the console:
+            # their output must reach the operator while they run, and Ctrl-C must
+            # reach them instead of orphaning them on a private process group.
+            try:
+                returncode = process.wait(timeout=timeout_s)
+            except subprocess.TimeoutExpired as exc:
+                _terminate_process_tree(process)
+                process.wait()
+                raise ReleaseError(
+                    f"command timed out: {argv[0]}", category="runtime"
+                ) from exc
+            except KeyboardInterrupt:
+                process.wait()
+                raise
+            result = CommandResult(tuple(argv), returncode, "", "")
+            if check and result.returncode != 0:
+                raise ReleaseError(
+                    f"command failed ({result.returncode}): {argv[0]}: no output"
+                )
+            return result
+        try:
+            stdout_bytes, stderr_bytes = process.communicate(timeout=timeout_s)
+        except subprocess.TimeoutExpired as exc:
+            _terminate_process_tree(process)
+            process.communicate()
+            raise ReleaseError(f"command timed out: {argv[0]}", category="runtime") from exc
+
+        stdout = stdout_bytes.decode("utf-8", errors="replace")
+        stderr = stderr_bytes.decode("utf-8", errors="replace")
+        result = CommandResult(
+            tuple(argv),
+            process.returncode,
+            self._redact(stdout),
+            self._redact(stderr),
+        )
+        if check and result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or "no output"
+            raise ReleaseError(
+                f"command failed ({result.returncode}): {argv[0]}: {detail}"
+            )
+        return result
+
+
+def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
+    """Terminate the exact command process tree after a bounded stage timeout."""
+    if os.name == "nt":
+        _terminate_windows_process_tree(process.pid)
+        return
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def _terminate_windows_process_tree(root_pid: int) -> None:
+    """Terminate descendants before their parent using the Win32 process snapshot."""
+    import ctypes
+    from ctypes import wintypes
+
+    class ProcessEntry32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.Process32FirstW.argtypes = (wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W))
+    kernel32.Process32FirstW.restype = wintypes.BOOL
+    kernel32.Process32NextW.argtypes = (wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W))
+    kernel32.Process32NextW.restype = wintypes.BOOL
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.TerminateProcess.argtypes = (wintypes.HANDLE, wintypes.UINT)
+    kernel32.TerminateProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+    if snapshot == wintypes.HANDLE(-1).value:
+        return
+    children: dict[int, list[int]] = {}
+    try:
+        entry = ProcessEntry32W()
+        entry.dwSize = ctypes.sizeof(entry)
+        ok = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while ok:
+            children.setdefault(int(entry.th32ParentProcessID), []).append(
+                int(entry.th32ProcessID)
+            )
+            ok = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+
+    ordered: list[int] = []
+
+    def append_descendants(pid: int) -> None:
+        for child_pid in children.get(pid, ()):
+            append_descendants(child_pid)
+            ordered.append(child_pid)
+
+    append_descendants(root_pid)
+    ordered.append(root_pid)
+    for pid in ordered:
+        handle = kernel32.OpenProcess(0x0001, False, pid)
+        if handle:
+            try:
+                kernel32.TerminateProcess(handle, 1)
+            finally:
+                kernel32.CloseHandle(handle)
+
+
+@dataclass(frozen=True)
+class SshConfig:
+    host: str
+    user: str
+    identity: Path
+    kex_algorithms: str | None = None
+
+    def __post_init__(self) -> None:
+        if not SSH_HOST_RE.fullmatch(self.host):
+            raise ReleaseError("invalid SSH host", category="configuration")
+        if not SSH_USER_RE.fullmatch(self.user):
+            raise ReleaseError("invalid SSH user", category="configuration")
+        if self.kex_algorithms and not SSH_KEX_RE.fullmatch(self.kex_algorithms):
+            raise ReleaseError("invalid SSH kex algorithms", category="configuration")
+
+    def _common_options(self) -> list[str]:
+        options = [
+            "-i",
+            str(self.identity),
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "IdentitiesOnly=yes",
+            "-o",
+            "ConnectTimeout=15",
+            "-o",
+            "ServerAliveInterval=15",
+            "-o",
+            "ServerAliveCountMax=240",
+        ]
+        if self.kex_algorithms:
+            options.extend(["-o", f"KexAlgorithms={self.kex_algorithms}"])
+        return options
+
+    @property
+    def target(self) -> str:
+        return f"{self.user}@{self.host}"
+
+    def ssh_argv(self, remote_command: str) -> list[str]:
+        if not remote_command or "\x00" in remote_command:
+            raise ReleaseError("invalid SSH remote command")
+        return ["ssh", *self._common_options(), self.target, remote_command]
+
+    def scp_argv(self, source: Path, remote_path: str) -> list[str]:
+        if (
+            not remote_path.startswith("/opt/car-agent/")
+            or "\x00" in remote_path
+            or "\n" in remote_path
+            or "\r" in remote_path
+            or ".." in PurePosixPath(remote_path).parts
+        ):
+            raise ReleaseError("invalid SCP remote path")
+        return [
+            "scp",
+            *self._common_options(),
+            str(source),
+            f"{self.target}:{remote_path}",
+        ]
+
+
+def validate_ssh_identity(identity: Path) -> None:
+    if not identity.exists() or not identity.is_file():
+        raise ReleaseError(
+            "SSH identity must be an existing regular file",
+            category="configuration",
+        )
+
+
+def _git(
+    repo: Path, *args: str, check: bool = True, raw: bool = False
+) -> CommandResult:
+    if raw:
+        try:
+            completed = subprocess.run(
+                ["git", *args],
+                cwd=repo,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        except OSError as exc:
+            raise ReleaseError(
+                f"could not run git: {type(exc).__name__}"
+            ) from exc
+        stdout = completed.stdout.decode("utf-8", errors="surrogateescape")
+        stderr = completed.stderr.decode("utf-8", errors="replace")
+        result = CommandResult(
+            tuple(["git", *args]), completed.returncode, stdout, stderr
+        )
+        if check and result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or "no output"
+            raise ReleaseError(
+                f"command failed ({result.returncode}): git: {detail}"
+            )
+        return result
+    return SubprocessRunner().run(["git", *args], cwd=repo, check=check)
+
+
+def require_clean_main_commit(repo: Path, revision: str) -> str:
+    dirty = _git(
+        repo,
+        "status",
+        "--porcelain",
+        "--untracked-files=normal",
+    ).stdout
+    if dirty:
+        raise ReleaseError("worktree is not clean", category="safety")
+
+    resolved = _git(
+        repo,
+        "rev-parse",
+        "--verify",
+        f"{revision}^{{commit}}",
+        check=False,
+    )
+    sha = resolved.stdout.strip()
+    if resolved.returncode != 0 or not FULL_SHA_RE.fullmatch(sha):
+        raise ReleaseError(
+            "could not resolve requested revision", category="configuration"
+        )
+
+    reachable = _git(
+        repo,
+        "merge-base",
+        "--is-ancestor",
+        sha,
+        "refs/heads/main",
+        check=False,
+    )
+    if reachable.returncode != 0:
+        raise ReleaseError(f"commit {sha} is not reachable from main", category="safety")
+    return sha
+
+
+def classify_changed_path(path: str) -> str:
+    normalized = path.replace("\\", "/")
+    name = normalized.rsplit("/", 1)[-1]
+    if (
+        normalized == ".env"
+        or (name.startswith(".env.") and name != ".env.example")
+        or name.endswith(SECRET_SUFFIXES)
+    ):
+        return "secret_material"
+    if normalized in CONTROLLED_EXACT or normalized.endswith(".sql"):
+        return CONTROLLED_EXACT.get(normalized, "database_schema")
+    if normalized.startswith(".github/workflows/"):
+        return "ci_cd"
+    if (
+        normalized.startswith("deploy/cloud/")
+        and normalized != "deploy/cloud/README.md"
+    ):
+        return "infrastructure"
+    return CONTROLLED_EXACT.get(normalized, "application")
+
+
+def _is_nonproduction_path(path: str) -> bool:
+    normalized = path.replace("\\", "/")
+    return (
+        normalized.startswith(("docs/", "test/", "scripts/tests/"))
+        or "/tests/" in normalized
+        or normalized.endswith("_test.py")
+        or normalized.startswith("test_")
+    )
+
+
+def diff_contains_schema_change(path: str, diff: str) -> bool:
+    normalized = path.replace("\\", "/")
+    if _is_nonproduction_path(normalized):
+        return False
+    if not normalized.endswith((".py", ".sql")):
+        return False
+    for line in diff.splitlines():
+        if not line.startswith("+") or line.startswith("+++"):
+            continue
+        added = line[1:].strip()
+        if not added or added.startswith(("#", "--", "/*", "*")):
+            continue
+        if DDL_RE.search(added):
+            return True
+    return False
+
+
+def database_schema_paths(
+    changed_paths: Sequence[str], diff_by_path: Mapping[str, str]
+) -> tuple[str, ...]:
+    """Every changed path the gate treats as a schema change: `.sql` or production DDL."""
+    paths: set[str] = set()
+    for path in changed_paths:
+        normalized = path.replace("\\", "/")
+        category = classify_changed_path(normalized)
+        if category == "database_schema" or (
+            category == "application"
+            and diff_contains_schema_change(normalized, diff_by_path.get(path, ""))
+        ):
+            paths.add(normalized)
+    return tuple(sorted(paths))
+
+
+def compose_paths(changed_paths: Sequence[str]) -> tuple[str, ...]:
+    """变更里由 docker compose 读取的编排文件（`compose` 类）。"""
+    normalized = (path.replace("\\", "/") for path in changed_paths)
+    return tuple(sorted({path for path in normalized if classify_changed_path(path) == "compose"}))
+
+
+def make_release_plan(
+    *,
+    deployed_sha: str,
+    target_sha: str,
+    changed_paths: Sequence[str],
+    diff_by_path: Mapping[str, str],
+    target_infrastructure_digest: str | None = None,
+    approved_infrastructure_digest: str | None = None,
+    target_ci_cd_digest: str | None = None,
+    approved_ci_cd_digest: str | None = None,
+    target_database_schema_digest: str | None = None,
+    approved_database_schema_digest: str | None = None,
+    target_compose_digest: str | None = None,
+    approved_compose_digest: str | None = None,
+) -> ReleasePlan:
+    if not FULL_SHA_RE.fullmatch(target_sha):
+        raise ReleaseError("target SHA must be a full commit SHA", category="configuration")
+    for digest, label in (
+        (target_database_schema_digest, "target database schema digest"),
+        (approved_database_schema_digest, "approved database schema digest"),
+        (target_compose_digest, "target compose digest"),
+        (approved_compose_digest, "approved compose digest"),
+    ):
+        if digest is not None and not SHA256_RE.fullmatch(digest):
+            raise ReleaseError(f"{label} is invalid", category="configuration")
+    if (
+        target_infrastructure_digest is not None
+        and not SHA256_RE.fullmatch(target_infrastructure_digest)
+    ):
+        raise ReleaseError("target infrastructure digest is invalid")
+    if target_ci_cd_digest is not None and not SHA256_RE.fullmatch(
+        target_ci_cd_digest
+    ):
+        raise ReleaseError(
+            "target CI/CD digest is invalid",
+            category="configuration",
+        )
+    if approved_ci_cd_digest is not None and not SHA256_RE.fullmatch(
+        approved_ci_cd_digest
+    ):
+        raise ReleaseError(
+            "approved CI/CD digest is invalid",
+            category="configuration",
+        )
+
+    normalized_paths = tuple(path.replace("\\", "/") for path in changed_paths)
+    has_ci_cd_changes = any(
+        classify_changed_path(path) == "ci_cd" for path in normalized_paths
+    )
+    if approved_ci_cd_digest is not None and not has_ci_cd_changes:
+        raise ReleaseError(
+            "CI/CD digest approval was provided without CI/CD changes",
+            category="configuration",
+        )
+
+    infrastructure_approved = (
+        target_infrastructure_digest is not None
+        and approved_infrastructure_digest is not None
+        and SHA256_RE.fullmatch(approved_infrastructure_digest) is not None
+        and target_infrastructure_digest == approved_infrastructure_digest
+    )
+    ci_cd_approved = (
+        has_ci_cd_changes
+        and target_ci_cd_digest is not None
+        and approved_ci_cd_digest is not None
+        and target_ci_cd_digest == approved_ci_cd_digest
+    )
+    # One-time database_schema approval (CA2-08): the digest binds every schema path's
+    # deployed and target blobs, so it releases exactly the reviewed transition.
+    has_schema_changes = bool(database_schema_paths(changed_paths, diff_by_path))
+    if approved_database_schema_digest is not None and not has_schema_changes:
+        raise ReleaseError(
+            "database schema digest approval was provided without database schema changes",
+            category="configuration",
+        )
+    schema_approved = (
+        has_schema_changes
+        and target_database_schema_digest is not None
+        and approved_database_schema_digest is not None
+        and target_database_schema_digest == approved_database_schema_digest
+    )
+    # 一次性 compose 批准：摘要绑定每个 compose 文件已部署与目标两侧的内容，只放行审过的这一次变更。
+    has_compose_changes = bool(compose_paths(normalized_paths))
+    if approved_compose_digest is not None and not has_compose_changes:
+        raise ReleaseError(
+            "compose digest approval was provided without compose changes",
+            category="configuration",
+        )
+    compose_approved = (
+        has_compose_changes
+        and target_compose_digest is not None
+        and approved_compose_digest is not None
+        and target_compose_digest == approved_compose_digest
+    )
+    blocking: set[ControlledChange] = set()
+    for path in normalized_paths:
+        category = classify_changed_path(path)
+        if category == "ci_cd" and ci_cd_approved:
+            continue
+        if category == "compose" and compose_approved:
+            continue
+        if category == "infrastructure" and infrastructure_approved:
+            continue
+        if category == "database_schema" and schema_approved:
+            continue
+        if category != "application":
+            blocking.add(ControlledChange(path, category))
+            continue
+        if diff_contains_schema_change(path, diff_by_path.get(path, "")) and not schema_approved:
+            blocking.add(ControlledChange(path, "database_schema"))
+
+    ordered_blocking = tuple(sorted(blocking))
+    if not ordered_blocking:
+        status = "ready"
+    elif all(item.category == "infrastructure" for item in ordered_blocking):
+        status = "bootstrap_required"
+    else:
+        status = "plan_rejected"
+    return ReleasePlan(
+        deployed_sha=deployed_sha,
+        target_sha=target_sha,
+        changed_paths=normalized_paths,
+        blocking_changes=ordered_blocking,
+        status=status,
+        target_infrastructure_digest=target_infrastructure_digest,
+        approved_infrastructure_digest=approved_infrastructure_digest,
+        target_ci_cd_digest=target_ci_cd_digest,
+        approved_ci_cd_digest=approved_ci_cd_digest,
+        target_database_schema_digest=target_database_schema_digest,
+        approved_database_schema_digest=approved_database_schema_digest,
+        target_compose_digest=target_compose_digest,
+        approved_compose_digest=approved_compose_digest,
+    )
+
+
+def git_changes(
+    repo: Path,
+    base: str,
+    target: str,
+) -> tuple[list[str], dict[str, str]]:
+    raw_paths = _git(
+        repo,
+        "diff",
+        "--name-only",
+        "-z",
+        "--no-renames",
+        "--diff-filter=ACDMRTUXB",
+        base,
+        target,
+        raw=True,
+    ).stdout
+    if raw_paths and not raw_paths.endswith("\0"):
+        raise ReleaseError("git changed path record is malformed", category="safety")
+
+    changed: list[str] = []
+    seen: set[str] = set()
+    for path in raw_paths.split("\0")[:-1]:
+        parts = path.split("/")
+        posix_path = PurePosixPath(path)
+        if (
+            not path
+            or "\\" in path
+            or any(
+                unicodedata.category(character) == "Cc"
+                or "\udc80" <= character <= "\udcff"
+                for character in path
+            )
+            or posix_path.is_absolute()
+            or re.match(r"^[A-Za-z]:/", path) is not None
+            or any(part in {"", ".", ".."} for part in parts)
+            or posix_path.as_posix() != path
+            or path in seen
+        ):
+            raise ReleaseError("git changed path is unsafe", category="safety")
+        seen.add(path)
+        changed.append(path)
+
+    diffs = {
+        path: _git(
+            repo,
+            "--literal-pathspecs",
+            "diff",
+            "--unified=0",
+            "--no-ext-diff",
+            "--no-renames",
+            base,
+            target,
+            "--",
+            path,
+        ).stdout
+        for path in changed
+    }
+    return changed, diffs
+
+
+def _git_blob(repo: Path, revision: str, path: str) -> bytes:
+    try:
+        completed = subprocess.run(
+            ["git", "show", f"{revision}:{path}"],
+            cwd=repo,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except OSError as exc:
+        raise ReleaseError(
+            f"could not read committed controlled source: {type(exc).__name__}"
+        ) from exc
+    if completed.returncode != 0:
+        raise ReleaseError(
+            f"could not read committed controlled source path: {path}"
+        )
+    return completed.stdout
+
+
+def compute_infrastructure_digest(repo: Path, target_sha: str) -> str:
+    if not FULL_SHA_RE.fullmatch(target_sha):
+        raise ReleaseError("target SHA must be a full commit SHA", category="configuration")
+    listing = _git(
+        repo,
+        "ls-tree",
+        "-r",
+        "--name-only",
+        target_sha,
+        "--",
+        "deploy/cloud",
+    ).stdout.splitlines()
+    paths = sorted(
+        path
+        for path in listing
+        if path and path != "deploy/cloud/README.md"
+    )
+    per_file = {
+        path: hashlib.sha256(_git_blob(repo, target_sha, path)).hexdigest()
+        for path in paths
+    }
+    canonical = json.dumps(
+        per_file,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _committed_regular_tree_paths(
+    repo: Path, target_sha: str, prefix: str
+) -> tuple[str, ...]:
+    raw_listing = _git(
+        repo,
+        "ls-tree",
+        "-r",
+        "-z",
+        target_sha,
+        "--",
+        prefix,
+        raw=True,
+    ).stdout
+    if raw_listing and not raw_listing.endswith("\0"):
+        raise ReleaseError("committed controlled tree record is malformed", category="safety")
+
+    paths: set[str] = set()
+    for record in raw_listing.split("\0")[:-1]:
+        header, separator, path = record.partition("\t")
+        fields = header.split(" ")
+        if (
+            not separator
+            or len(fields) != 3
+            or fields[0] not in REGULAR_GIT_TREE_MODES
+            or fields[1] != "blob"
+            or not re.fullmatch(r"[0-9a-f]{40}", fields[2])
+        ):
+            raise ReleaseError("committed controlled tree entry is unsafe", category="safety")
+        if (
+            "\\" in path
+            or any(
+                unicodedata.category(character) == "Cc"
+                or "\udc80" <= character <= "\udcff"
+                for character in path
+            )
+            or not path.startswith(f"{prefix}/")
+        ):
+            raise ReleaseError("committed controlled tree path is unsafe", category="safety")
+        parts = path.split("/")
+        if (
+            any(part in {"", ".", ".."} for part in parts)
+            or PurePosixPath(path).as_posix() != path
+            or path in paths
+        ):
+            raise ReleaseError("committed controlled tree path is unsafe", category="safety")
+        paths.add(path)
+    return tuple(sorted(paths))
+
+
+def compute_ci_cd_digest(repo: Path, target_sha: str) -> str | None:
+    if not FULL_SHA_RE.fullmatch(target_sha):
+        raise ReleaseError("target SHA must be a full commit SHA", category="configuration")
+    paths = _committed_regular_tree_paths(repo, target_sha, CI_CD_TREE_PREFIX)
+    if not paths:
+        return None
+    per_file = {
+        path: hashlib.sha256(_git_blob(repo, target_sha, path)).hexdigest()
+        for path in paths
+    }
+    canonical = json.dumps(
+        per_file,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _committed_blob_digest(repo: Path, revision: str, path: str) -> str | None:
+    if _git(repo, "cat-file", "-e", f"{revision}:{path}", check=False).returncode != 0:
+        return None
+    return hashlib.sha256(_git_blob(repo, revision, path)).hexdigest()
+
+
+def compute_database_schema_digest(
+    repo: Path, deployed_sha: str, target_sha: str, schema_paths: Sequence[str]
+) -> str | None:
+    """Digest of the exact schema transition: each path's deployed and target blob.
+
+    None when nothing schema-bearing changed. Unrelated commits keep the digest;
+    any edit to a schema-bearing file (or a different deployed baseline for it)
+    changes it, so an approval can never cover a revision nobody reviewed.
+    """
+    for sha in (deployed_sha, target_sha):
+        if not FULL_SHA_RE.fullmatch(sha):
+            raise ReleaseError("database schema digest needs full commit SHAs", category="configuration")
+    if not schema_paths:
+        return None
+    transitions = {
+        path: [
+            _committed_blob_digest(repo, deployed_sha, path),
+            _committed_blob_digest(repo, target_sha, path),
+        ]
+        for path in sorted(set(schema_paths))
+    }
+    canonical = json.dumps(
+        {"schema_version": 1, "transitions": transitions},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def compute_compose_digest(
+    repo: Path, deployed_sha: str, target_sha: str, paths: Sequence[str]
+) -> str | None:
+    """这一次 compose 变更的摘要：每个文件已部署与目标两侧的 blob。没改 compose ⇒ None。
+
+    与数据库 schema 的一次性批准同一种绑定：无关提交不改变摘要；compose 文件再改一字、
+    或已部署基线不同，摘要都会变，批准不能覆盖没人看过的版本。
+    """
+    for sha in (deployed_sha, target_sha):
+        if not FULL_SHA_RE.fullmatch(sha):
+            raise ReleaseError("compose digest needs full commit SHAs", category="configuration")
+    if not paths:
+        return None
+    transitions = {
+        path: [
+            _committed_blob_digest(repo, deployed_sha, path),
+            _committed_blob_digest(repo, target_sha, path),
+        ]
+        for path in sorted(set(paths))
+    }
+    canonical = json.dumps(
+        {"schema_version": 1, "kind": "compose", "transitions": transitions},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def validate_archive_member_names(names: Sequence[str]) -> None:
+    for raw_name in names:
+        normalized = raw_name.replace("\\", "/")
+        path = PurePosixPath(normalized)
+        basename = path.name
+        forbidden = (
+            not normalized
+            or normalized.startswith("/")
+            or path.is_absolute()
+            or ".." in path.parts
+            or ".artifacts" in path.parts
+            or basename == ".env"
+            or (
+                basename.startswith(".env.")
+                and basename != ".env.example"
+            )
+            or basename.endswith(SECRET_SUFFIXES)
+        )
+        if forbidden:
+            raise ReleaseError(f"forbidden archive member: {raw_name}", category="safety")
+
+
+def _is_strict_placeholder(value: str) -> bool:
+    return STRICT_PLACEHOLDER_RE.fullmatch(value) is not None
+
+
+def _validate_credential_assignment_text(text: str) -> None:
+    for match in CREDENTIAL_ASSIGNMENT_RE.finditer(text):
+        value = match.group("value")
+        if _is_strict_placeholder(value):
+            continue
+        raise ReleaseError("credential-like assignment found in release source", category="safety")
+
+
+def _credential_target_name(target: ast.expr) -> str | None:
+    if isinstance(target, ast.Name):
+        return target.id
+    if isinstance(target, ast.Attribute):
+        return target.attr
+    return None
+
+
+def _literal_string(value: ast.expr) -> str | None:
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        return value.value
+    if isinstance(value, ast.JoinedStr) and all(
+        isinstance(item, ast.Constant) and isinstance(item.value, str)
+        for item in value.values
+    ):
+        return "".join(str(item.value) for item in value.values)
+    return None
+
+
+def _validate_python_credential_literals(
+    text: str,
+    *,
+    allow_fixture_markers: bool,
+) -> None:
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        _validate_credential_assignment_text(text)
+        return
+
+    fixture_lines: set[int] = set()
+    if allow_fixture_markers:
+        try:
+            fixture_lines = {
+                token.start[0]
+                for token in tokenize.generate_tokens(io.StringIO(text).readline)
+                if token.type == tokenize.COMMENT
+                and token.string.strip()
+                == SYNTHETIC_CREDENTIAL_FIXTURE_MARKER
+            }
+        except (IndentationError, tokenize.TokenError):
+            fixture_lines = set()
+
+    for node in ast.walk(tree):
+        targets: tuple[ast.expr, ...] = ()
+        value: ast.expr | None = None
+        if isinstance(node, ast.Assign):
+            targets = tuple(node.targets)
+            value = node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets = (node.target,)
+            value = node.value
+        elif isinstance(node, ast.NamedExpr):
+            targets = (node.target,)
+            value = node.value
+
+        literal = _literal_string(value) if value is not None else None
+        if literal is not None and len(literal) >= 16:
+            if any(
+                (name := _credential_target_name(target)) is not None
+                and CREDENTIAL_NAME_RE.fullmatch(name)
+                for target in targets
+            ) and not _is_strict_placeholder(literal) and (
+                node.lineno not in fixture_lines
+            ):
+                raise ReleaseError(
+                    "credential-like assignment found in release source",
+                    category="safety",
+                )
+
+
+def validate_text_payload(
+    text: str,
+    *,
+    source_path: str | None = None,
+) -> None:
+    if PRIVATE_KEY_BLOCK_RE.search(text):
+        raise ReleaseError("private key material found in release source", category="safety")
+    source = PurePosixPath((source_path or "").replace("\\", "/"))
+    if source.suffix == ".py":
+        is_test_source = any(
+            part in {"test", "tests"}
+            for part in source.parts[:-1]
+        )
+        _validate_python_credential_literals(
+            text,
+            allow_fixture_markers=is_test_source,
+        )
+        return
+    _validate_credential_assignment_text(text)
+
+
+def _validate_source_tar(path: Path) -> None:
+    try:
+        with tarfile.open(path, mode="r:") as archive:
+            members = archive.getmembers()
+            validate_archive_member_names([member.name for member in members])
+            for member in members:
+                if member.isdir():
+                    continue
+                if not member.isfile():
+                    raise ReleaseError(
+                        f"forbidden archive member type: {member.name}",
+                        category="safety",
+                    )
+                if member.size > 2 * 1024 * 1024:
+                    continue
+                extracted = archive.extractfile(member)
+                if extracted is None:
+                    raise ReleaseError(
+                        f"could not inspect archive member: {member.name}"
+                    )
+                payload = extracted.read()
+                if b"\x00" in payload:
+                    continue
+                try:
+                    text = payload.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+                validate_text_payload(text, source_path=member.name)
+    except (tarfile.TarError, OSError) as exc:
+        raise ReleaseError("source archive validation failed") from exc
+
+
+def _canonical_json_bytes(payload: object) -> bytes:
+    return (
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _write_transport_tar(path: Path, files: Sequence[Path]) -> None:
+    with tarfile.open(path, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+        for source in files:
+            payload = source.read_bytes()
+            info = tarfile.TarInfo(source.name)
+            info.size = len(payload)
+            info.mode = 0o600
+            info.uid = 0
+            info.gid = 0
+            info.uname = "root"
+            info.gname = "root"
+            info.mtime = 0
+            archive.addfile(info, io.BytesIO(payload))
+
+
+def _generate_proto_into_source_tar(
+    source_tar: Path,
+    *,
+    runner: CommandRunner,
+    executable: str | None = None,
+) -> None:
+    with tarfile.open(source_tar, mode="r:") as archive:
+        members = archive.getmembers()
+        names = {member.name for member in members}
+        if not {"buf.gen.yaml", "proto/buf.yaml"}.issubset(names):
+            return
+        if any(name == "gen" or name.startswith("gen/") for name in names):
+            raise ReleaseError("committed source unexpectedly contains gen output")
+        resolved_executable = executable or shutil.which("buf")
+        if not resolved_executable:
+            raise ReleaseError("buf is required to build the release artifact")
+
+        with tempfile.TemporaryDirectory(prefix="car-agent-codegen-") as raw:
+            source_root = Path(raw)
+            for member in members:
+                target = source_root.joinpath(*PurePosixPath(member.name).parts)
+                if member.isdir():
+                    target.mkdir(mode=0o755, parents=True, exist_ok=True)
+                    continue
+                if not member.isfile():
+                    raise ReleaseError(
+                        f"forbidden archive member type: {member.name}",
+                        category="safety",
+                    )
+                target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+                extracted = archive.extractfile(member)
+                if extracted is None:
+                    raise ReleaseError(
+                        f"could not inspect archive member: {member.name}"
+                    )
+                target.write_bytes(extracted.read())
+
+            runner.run(
+                [resolved_executable, "generate", "proto"],
+                cwd=source_root,
+            )
+            generated_root = source_root / "gen"
+            python_root = generated_root / "python"
+            if (
+                not python_root.is_dir()
+                or not any(python_root.rglob("*_pb2.py"))
+                or not any(python_root.rglob("*_pb2_grpc.py"))
+            ):
+                raise ReleaseError("buf did not produce Python protobuf output")
+
+            generated = sorted(
+                generated_root.rglob("*"),
+                key=lambda item: item.relative_to(source_root).as_posix(),
+            )
+            with tarfile.open(source_tar, mode="a") as output:
+                for path in generated:
+                    if path.is_symlink() or not (path.is_dir() or path.is_file()):
+                        raise ReleaseError("buf produced an unsupported output type")
+                    name = path.relative_to(source_root).as_posix()
+                    info = tarfile.TarInfo(name)
+                    info.mode = 0o755 if path.is_dir() else 0o644
+                    info.uid = 0
+                    info.gid = 0
+                    info.uname = "root"
+                    info.gname = "root"
+                    info.mtime = 0
+                    if path.is_dir():
+                        info.type = tarfile.DIRTYPE
+                        output.addfile(info)
+                        continue
+                    payload = path.read_bytes()
+                    info.size = len(payload)
+                    output.addfile(info, io.BytesIO(payload))
+
+
+def _artifact_paths(directory: Path) -> ReleaseArtifact:
+    return ReleaseArtifact(
+        directory=directory,
+        source_tar=directory / "source.tar",
+        manifest=directory / "manifest.json",
+        checksums=directory / "checksums.sha256",
+        transport_tar=directory / "transport.tar",
+    )
+
+
+def _expected_manifest(
+    plan: ReleasePlan,
+    *,
+    services_digest: str,
+    models_digest: str,
+    source_digest: str,
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "deployed_sha": plan.deployed_sha,
+        "target_sha": plan.target_sha,
+        "short_sha": plan.target_sha[:12],
+        "changed_paths": list(plan.changed_paths),
+        "blocking_changes": [
+            {"path": item.path, "category": item.category}
+            for item in plan.blocking_changes
+        ],
+        "plan_status": plan.status,
+        "source_sha256": source_digest,
+        "release_services_sha256": services_digest,
+        "runtime_models_sha256": models_digest,
+        "target_infrastructure_sha256": plan.target_infrastructure_digest,
+        "approved_infrastructure_sha256": plan.approved_infrastructure_digest,
+        "target_ci_cd_sha256": plan.target_ci_cd_digest,
+        "approved_ci_cd_sha256": plan.approved_ci_cd_digest,
+        "target_database_schema_sha256": plan.target_database_schema_digest,
+        "approved_database_schema_sha256": plan.approved_database_schema_digest,
+        "target_compose_sha256": plan.target_compose_digest,
+        "approved_compose_sha256": plan.approved_compose_digest,
+    }
+
+
+def _parse_checksums(path: Path) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        digest, separator, name = line.partition("  ")
+        if (
+            not separator
+            or not SHA256_RE.fullmatch(digest)
+            or name not in {"source.tar", "manifest.json"}
+            or name in parsed
+        ):
+            raise ReleaseError("artifact exists but does not match")
+        parsed[name] = digest
+    if set(parsed) != {"source.tar", "manifest.json"}:
+        raise ReleaseError("artifact exists but does not match")
+    return parsed
+
+
+def _validate_existing_artifact(
+    artifact: ReleaseArtifact,
+    *,
+    plan: ReleasePlan,
+    services_digest: str,
+    models_digest: str,
+) -> ReleaseArtifact:
+    try:
+        if not all(
+            path.is_file()
+            for path in (
+                artifact.source_tar,
+                artifact.manifest,
+                artifact.checksums,
+                artifact.transport_tar,
+            )
+        ):
+            raise ReleaseError("artifact exists but does not match")
+        checksums = _parse_checksums(artifact.checksums)
+        if checksums["source.tar"] != sha256_file(artifact.source_tar):
+            raise ReleaseError("artifact exists but does not match")
+        if checksums["manifest.json"] != sha256_file(artifact.manifest):
+            raise ReleaseError("artifact exists but does not match")
+        manifest = json.loads(artifact.manifest.read_text(encoding="utf-8"))
+        expected = _expected_manifest(
+            plan,
+            services_digest=services_digest,
+            models_digest=models_digest,
+            source_digest=checksums["source.tar"],
+        )
+        if manifest != expected:
+            raise ReleaseError("artifact exists but does not match")
+        _validate_source_tar(artifact.source_tar)
+        with tarfile.open(artifact.transport_tar, mode="r:") as archive:
+            if archive.getnames() != [
+                "source.tar",
+                "manifest.json",
+                "checksums.sha256",
+            ]:
+                raise ReleaseError("artifact exists but does not match")
+            for source in (
+                artifact.source_tar,
+                artifact.manifest,
+                artifact.checksums,
+            ):
+                extracted = archive.extractfile(source.name)
+                if extracted is None or extracted.read() != source.read_bytes():
+                    raise ReleaseError("artifact exists but does not match")
+    except (OSError, ValueError, json.JSONDecodeError, tarfile.TarError) as exc:
+        raise ReleaseError("artifact exists but does not match") from exc
+    return artifact
+
+
+def build_release_artifact(
+    *,
+    repo: Path,
+    output_root: Path,
+    plan: ReleasePlan,
+    services_digest: str,
+    models_digest: str,
+    codegen_runner: CommandRunner | None = None,
+    codegen_executable: str | None = None,
+) -> ReleaseArtifact:
+    if plan.status != "ready" or plan.blocking_changes:
+        raise ReleaseError("cannot build artifact for a blocked release plan")
+    if not FULL_SHA_RE.fullmatch(plan.target_sha):
+        raise ReleaseError("target SHA must be a full commit SHA", category="configuration")
+    if not SHA256_RE.fullmatch(services_digest):
+        raise ReleaseError("release services digest is invalid")
+    if not SHA256_RE.fullmatch(models_digest):
+        raise ReleaseError("runtime models digest is invalid")
+
+    output_root.mkdir(parents=True, exist_ok=True)
+    directory = output_root / plan.target_sha
+    artifact = _artifact_paths(directory)
+    if directory.exists():
+        return _validate_existing_artifact(
+            artifact,
+            plan=plan,
+            services_digest=services_digest,
+            models_digest=models_digest,
+        )
+
+    staging = output_root / f".{plan.target_sha}.{uuid.uuid4().hex}.staging"
+    staging.mkdir(mode=0o700)
+    staged = _artifact_paths(staging)
+    SubprocessRunner().run(
+        [
+            "git",
+            "archive",
+            "--format=tar",
+            "--output",
+            str(staged.source_tar),
+            plan.target_sha,
+        ],
+        cwd=repo,
+    )
+    _generate_proto_into_source_tar(
+        staged.source_tar,
+        runner=codegen_runner or SubprocessRunner(),
+        executable=codegen_executable,
+    )
+    _validate_source_tar(staged.source_tar)
+    source_digest = sha256_file(staged.source_tar)
+    manifest_payload = _expected_manifest(
+        plan,
+        services_digest=services_digest,
+        models_digest=models_digest,
+        source_digest=source_digest,
+    )
+    staged.manifest.write_bytes(_canonical_json_bytes(manifest_payload))
+    manifest_digest = sha256_file(staged.manifest)
+    staged.checksums.write_text(
+        f"{source_digest}  source.tar\n"
+        f"{manifest_digest}  manifest.json\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    _write_transport_tar(
+        staged.transport_tar,
+        (staged.source_tar, staged.manifest, staged.checksums),
+    )
+    try:
+        staging.replace(directory)
+    except OSError as exc:
+        if directory.exists():
+            return _validate_existing_artifact(
+                artifact,
+                plan=plan,
+                services_digest=services_digest,
+                models_digest=models_digest,
+            )
+        raise ReleaseError("could not publish local release artifact") from exc
+    return _artifact_paths(directory)
+
+
+REMOTE_STATE_FIELDS = {
+    "current_release",
+    "current_path",
+    "runtime_project_name",
+    "running_release_tags",
+    "approved_infrastructure_digest",
+    "disk_available_bytes",
+    "memory_available_bytes",
+    "release_lock_available",
+    "runtime_project_ready",
+    "shared_scripts_ready",
+    "shared_models_ready",
+}
+
+MODEL_BOOTSTRAP_FILES = (
+    (
+        "models/nlu/edge_nlu.onnx",
+        "cda6914c715d7e48f7b1f2ef2e2e9a64843e53ec58165737b41ec4e186080cf8",
+        None,
+    ),
+    (
+        "models/nlu/labels.json",
+        "11720e1620a6aefafb719ac151052600a8272906762aeff83c9132b6fc5f17d5",
+        None,
+    ),
+    (
+        "models/nlu/vocab.json",
+        "43ad94d3586ba0c3ddafdf0f989833f730aa6a2cc0b88d10ea6ac7eba85d56b5",
+        None,
+    ),
+    (
+        "models/voiceprint/campplus_zh-cn_16k-common.onnx",
+        "f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11",
+        None,
+    ),
+    (
+        "models/manual_rag/xiaomi-su7-2024.v2.mrag",
+        "648cdf3d1d5001f199fce12e3983f3d016d929f772d0eb8aa058512dcd4400ed",
+        "approved local asset:models/manual_rag/xiaomi-su7-2024.v2.mrag",
+    ),
+    (
+        "models/hmi/public/models/silero_vad.onnx",
+        "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
+        "approved local asset:hmi/public/models/silero_vad.onnx",
+    ),
+    (
+        "models/hmi/public/kws/sherpa-onnx-kws.js",
+        "d2113885f82cf307f52906ddf2a8786315db86fca53209c2d1e54c7fff8c6c76",
+        "approved local asset:hmi/public/kws/sherpa-onnx-kws.js",
+    ),
+    (
+        "models/hmi/public/kws/sherpa-onnx-wasm-kws-main.data",
+        "b91b148aa19d386fe27624867c21111c6a6bfa739a619538bb705408a8eb7165",
+        "approved local asset:hmi/public/kws/sherpa-onnx-wasm-kws-main.data",
+    ),
+    (
+        "models/hmi/public/kws/sherpa-onnx-wasm-kws-main.js",
+        "93899d72cbb9a8e2ba7e71cc1143fdc7639098107e771860070bd507d8edfd87",
+        "approved local asset:hmi/public/kws/sherpa-onnx-wasm-kws-main.js",
+    ),
+    (
+        "models/hmi/public/kws/sherpa-onnx-wasm-kws-main.wasm",
+        "ca2a000807ab83b20a37b512ff4613872528471a227f738dd30d07efaf563492",
+        "approved local asset:hmi/public/kws/sherpa-onnx-wasm-kws-main.wasm",
+    ),
+)
+
+SHARED_SCRIPT_NAMES = (
+    "transaction-lock.sh",
+    "remote-e2e-lock.sh",
+    "remote-data-migration.sh",
+    "backup.sh",
+    "remote-release.sh",
+    "remote-build.sh",
+    "activate-release.sh",
+    "verify-release.sh",
+    "redis_volume_prepare.py",
+    "collector_volume_replace.py",
+    "retention.py",
+)
+
+
+def make_bootstrap_report(state: RemoteState) -> BootstrapReport:
+    source_release = state.current_path
+    details: list[BootstrapCandidate] = []
+    if not state.runtime_project_ready:
+        details.append(
+            BootstrapCandidate(
+                path="/opt/car-agent/shared/runtime-project-name",
+                source="docker:com.docker.compose.project",
+                sha256=None,
+                mode="0644",
+            )
+        )
+    if state.approved_infrastructure_digest is None:
+        details.append(
+            BootstrapCandidate(
+                path="/opt/car-agent/shared/release-infrastructure.json",
+                source="approved target commit deploy/cloud manifest",
+                sha256=None,
+                mode="0600",
+            )
+        )
+    if not state.shared_scripts_ready:
+        for name in SHARED_SCRIPT_NAMES:
+            details.append(
+                BootstrapCandidate(
+                    path=f"/opt/car-agent/shared/bin/{name}",
+                    source=f"approved target commit:deploy/cloud/{name}",
+                    sha256=None,
+                    mode="0755",
+                )
+            )
+    if not state.shared_models_ready:
+        for relative, digest, approved_source in MODEL_BOOTSTRAP_FILES:
+            shared_relative = relative.removeprefix("models/")
+            details.append(
+                BootstrapCandidate(
+                    path=f"/opt/car-agent/shared/models/{shared_relative}",
+                    source=approved_source or f"{source_release}/{relative}",
+                    sha256=digest,
+                    mode="0644",
+                )
+            )
+    return BootstrapReport(
+        status="bootstrap_required" if details else "ready",
+        source_release=source_release,
+        candidates=tuple(item.path for item in details),
+        details=tuple(details),
+    )
+
+
+REMOTE_PREFLIGHT_SOURCE = r'''from collections import Counter
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+
+ROOT = Path("/opt/car-agent")
+SHARED = ROOT / "shared"
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
+PROJECT = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+#: release 选择子的形状，与客户端 `RELEASE_SELECTOR_RE` 同一口径（两侧都得认才算数）
+RELEASE_TAG = re.compile(r"^[0-9a-f]{7,40}$")
+SCRIPTS = (
+    SHARED / "bin/transaction-lock.sh",
+    SHARED / "bin/remote-e2e-lock.sh",
+    SHARED / "bin/remote-data-migration.sh",
+    SHARED / "bin/backup.sh",
+    SHARED / "bin/remote-release.sh",
+    SHARED / "bin/remote-build.sh",
+    SHARED / "bin/activate-release.sh",
+    SHARED / "bin/verify-release.sh",
+    SHARED / "bin/redis_volume_prepare.py",
+    SHARED / "bin/collector_volume_replace.py",
+    SHARED / "bin/retention.py",
+)
+MODELS = {
+    SHARED / "models/nlu/edge_nlu.onnx": "cda6914c715d7e48f7b1f2ef2e2e9a64843e53ec58165737b41ec4e186080cf8",
+    SHARED / "models/nlu/labels.json": "11720e1620a6aefafb719ac151052600a8272906762aeff83c9132b6fc5f17d5",
+    SHARED / "models/nlu/vocab.json": "43ad94d3586ba0c3ddafdf0f989833f730aa6a2cc0b88d10ea6ac7eba85d56b5",
+    SHARED / "models/voiceprint/campplus_zh-cn_16k-common.onnx": "f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11",
+    SHARED / "models/manual_rag/xiaomi-su7-2024.v2.mrag": "648cdf3d1d5001f199fce12e3983f3d016d929f772d0eb8aa058512dcd4400ed",
+    SHARED / "models/hmi/public/models/silero_vad.onnx": "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
+    SHARED / "models/hmi/public/kws/sherpa-onnx-kws.js": "d2113885f82cf307f52906ddf2a8786315db86fca53209c2d1e54c7fff8c6c76",
+    SHARED / "models/hmi/public/kws/sherpa-onnx-wasm-kws-main.data": "b91b148aa19d386fe27624867c21111c6a6bfa739a619538bb705408a8eb7165",
+    SHARED / "models/hmi/public/kws/sherpa-onnx-wasm-kws-main.js": "93899d72cbb9a8e2ba7e71cc1143fdc7639098107e771860070bd507d8edfd87",
+    SHARED / "models/hmi/public/kws/sherpa-onnx-wasm-kws-main.wasm": "ca2a000807ab83b20a37b512ff4613872528471a227f738dd30d07efaf563492",
+}
+REQUIRED_INSTALLED = {
+    "deploy/cloud/transaction-lock.sh": "/opt/car-agent/shared/bin/transaction-lock.sh",
+    "deploy/cloud/remote-e2e-lock.sh": "/opt/car-agent/shared/bin/remote-e2e-lock.sh",
+    "deploy/cloud/remote-data-migration.sh": "/opt/car-agent/shared/bin/remote-data-migration.sh",
+    "deploy/cloud/backup.sh": "/opt/car-agent/shared/bin/backup.sh",
+    "deploy/cloud/remote-release.sh": "/opt/car-agent/shared/bin/remote-release.sh",
+    "deploy/cloud/remote-build.sh": "/opt/car-agent/shared/bin/remote-build.sh",
+    "deploy/cloud/activate-release.sh": "/opt/car-agent/shared/bin/activate-release.sh",
+    "deploy/cloud/verify-release.sh": "/opt/car-agent/shared/bin/verify-release.sh",
+    "deploy/cloud/redis_volume_prepare.py": "/opt/car-agent/shared/bin/redis_volume_prepare.py",
+    "deploy/cloud/collector_volume_replace.py": "/opt/car-agent/shared/bin/collector_volume_replace.py",
+    "deploy/cloud/retention.py": "/opt/car-agent/shared/bin/retention.py",
+    "deploy/cloud/retention-policy.json": "/opt/car-agent/shared/retention-policy.json",
+    "deploy/cloud/compose.cloud.yaml": "/opt/car-agent/shared/compose.cloud.yaml",
+    "deploy/cloud/vite.hmi.cloud.config.mjs": "/opt/car-agent/shared/vite.hmi.cloud.config.mjs",
+    "deploy/cloud/systemd/car-agent-backup.service": "/etc/systemd/system/car-agent-backup.service",
+    "deploy/cloud/systemd/car-agent-backup.timer": "/etc/systemd/system/car-agent-backup.timer",
+}
+
+
+def run(argv):
+    completed = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True)
+    return completed.stdout.decode("utf-8", errors="strict").strip()
+
+
+def secure_regular(path):
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return False
+    return bool(
+        stat.S_ISREG(metadata.st_mode)
+        and not path.is_symlink()
+        and metadata.st_uid == 0
+        and metadata.st_gid == 0
+        and metadata.st_mode & 0o022 == 0
+    )
+
+
+def digest(path):
+    value = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            value.update(block)
+    return value.hexdigest()
+
+
+def running_state():
+    """运行中的容器：compose project 标签 + `car-agent-release/*` 镜像用的 tag 集合。
+
+    tag 必须单独报出来，因为「记录的 release」和「真正在跑的镜像」是两件事：
+    2026-09-10 一次手工 compose 漏设 RELEASE_SHA，compose 从 `.env` 取到一个月前的值，
+    edge-gateway 被换成八月的镜像跑了几分钟——而 `current` 软链、五个健康端点全程
+    没有任何异常，`status` 报的是 5/5 healthy、零 warning。
+    **只查「记录的是什么」的验证面，查不出「跑的是什么」。**
+    """
+    ids = [item for item in run(["docker", "ps", "--format", "{{.ID}}"]).splitlines() if item]
+    if not ids:
+        raise RuntimeError("no running containers")
+    containers = json.loads(run(["docker", "inspect", *ids]))
+    projects = Counter(
+        str(item.get("Config", {}).get("Labels", {}).get("com.docker.compose.project", ""))
+        for item in containers
+    )
+    projects.pop("", None)
+    if not projects:
+        raise RuntimeError("compose project label unavailable")
+    project, _ = projects.most_common(1)[0]
+    if not PROJECT.fullmatch(project):
+        raise RuntimeError("invalid compose project label")
+    tags = set()
+    for item in containers:
+        image = str(item.get("Config", {}).get("Image", ""))
+        if not image.startswith("car-agent-release/") or ":" not in image:
+            continue
+        tag = image.rsplit(":", 1)[1]
+        # 只收**认得出**的 release 选择子。认不出的（例如按摘要 `…@sha256:` 引用）一律跳过，
+        # 于是最坏情况是这一列变空、客户端报「读不到」——而不是让整个 preflight 的严格校验
+        # 判非法、把一次正常部署报成「远端不可用」。**一条读不出的镜像不该淹掉其余九条读数。**
+        if RELEASE_TAG.fullmatch(tag):
+            tags.add(tag)
+    return project, sorted(tags)
+
+
+def lock_available():
+    path = SHARED / "locks/release.lock"
+    if not secure_regular(path):
+        return False
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        return True
+    except BlockingIOError:
+        return False
+    finally:
+        os.close(descriptor)
+
+
+def project_file_ready(project):
+    path = SHARED / "runtime-project-name"
+    if not secure_regular(path):
+        return False
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return False
+    return lines == [project]
+
+
+def scripts_ready():
+    # 语法自检要按**文件类型**走。2026-08-17 `49b0788` 把 redis_volume_prepare.py 与
+    # collector_volume_replace.py 加进 SCRIPTS 之后，这里仍对每个文件跑 `bash -n`
+    # ——Python 源在 bash 眼里是语法错 ⇒ 本函数**恒为 False** ⇒ `shared_scripts_ready`
+    # 永远假、`cloud_release.py plan/deploy` 永远报 bootstrap_required。
+    # 那之后没人发过版，所以这个恒假闸一直没被发现（数据迁移走的是另一条工具链）。
+    # > 判据：**一个永远不可能满足的前置条件，和没有这个前置条件一样糟**——
+    # > 它不是把关，是把路堵死，而且堵在没人会看的地方。
+    for path in SCRIPTS:
+        if not secure_regular(path):
+            return False
+        if path.suffix == ".py":
+            try:
+                compile(path.read_text(encoding="utf-8"), str(path), "exec")
+            except (OSError, UnicodeError, SyntaxError, ValueError):
+                return False
+        elif subprocess.run(["bash", "-n", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+            return False
+    return True
+
+
+def models_ready():
+    return all(secure_regular(path) and digest(path) == expected for path, expected in MODELS.items())
+
+
+def approved_infrastructure_digest():
+    path = SHARED / "release-infrastructure.json"
+    if not secure_regular(path):
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if set(payload) != {"schema_version", "infrastructure_sha256", "source_files", "installed_files"}:
+            return None
+        if payload["schema_version"] != 1:
+            return None
+        aggregate = payload["infrastructure_sha256"]
+        source_files = payload["source_files"]
+        installed_files = payload["installed_files"]
+        if not isinstance(aggregate, str) or not SHA256.fullmatch(aggregate):
+            return None
+        if not isinstance(source_files, dict) or not source_files:
+            return None
+        if any(
+            not isinstance(name, str)
+            or not name.startswith("deploy/cloud/")
+            or name == "deploy/cloud/README.md"
+            or not isinstance(value, str)
+            or not SHA256.fullmatch(value)
+            for name, value in source_files.items()
+        ):
+            return None
+        canonical = json.dumps(source_files, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        if hashlib.sha256(canonical).hexdigest() != aggregate:
+            return None
+        if not isinstance(installed_files, list) or not installed_files:
+            return None
+        installed = {}
+        for item in installed_files:
+            if not isinstance(item, dict) or set(item) != {"source_path", "target_path", "sha256"}:
+                return None
+            source = item["source_path"]
+            target = item["target_path"]
+            expected = item["sha256"]
+            if (
+                source in installed
+                or source_files.get(source) != expected
+                or not isinstance(target, str)
+                or not isinstance(expected, str)
+                or not SHA256.fullmatch(expected)
+            ):
+                return None
+            target_path = Path(target)
+            if not secure_regular(target_path) or digest(target_path) != expected:
+                return None
+            installed[source] = target
+        if installed != REQUIRED_INSTALLED:
+            return None
+        return aggregate
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return None
+
+
+current_path = run(["readlink", "-f", "/opt/car-agent/current"])
+current_release = Path(current_path).name
+if current_path != f"/opt/car-agent/releases/{current_release}":
+    raise RuntimeError("invalid current release path")
+project, running_release_tags = running_state()
+disk_lines = run(["df", "--output=avail", "-B1", "/opt/car-agent"]).splitlines()
+disk_available = int(disk_lines[-1].strip())
+memory_available = 0
+with Path("/proc/meminfo").open("r", encoding="ascii") as handle:
+    for line in handle:
+        if line.startswith("MemAvailable:"):
+            memory_available = int(line.split()[1]) * 1024
+            break
+if memory_available <= 0:
+    raise RuntimeError("MemAvailable is unavailable")
+result = {
+    "current_release": current_release,
+    "current_path": current_path,
+    "runtime_project_name": project,
+    "running_release_tags": running_release_tags,
+    "approved_infrastructure_digest": approved_infrastructure_digest(),
+    "disk_available_bytes": disk_available,
+    "memory_available_bytes": memory_available,
+    "release_lock_available": lock_available(),
+    "runtime_project_ready": project_file_ready(project),
+    "shared_scripts_ready": scripts_ready(),
+    "shared_models_ready": models_ready(),
+}
+print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+'''
+
+REMOTE_PREFLIGHT_COMMAND = (
+    "sudo python3 -c \"import base64;exec(base64.b64decode('"
+    + base64.b64encode(REMOTE_PREFLIGHT_SOURCE.encode("utf-8")).decode("ascii")
+    + "'))\""
+)
+
+
+def parse_remote_state(payload: str) -> RemoteState:
+    try:
+        raw = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise ReleaseError("remote preflight returned invalid JSON") from exc
+    if not isinstance(raw, dict) or set(raw) != REMOTE_STATE_FIELDS:
+        raise ReleaseError("remote preflight returned an invalid field set")
+
+    selector = raw["current_release"]
+    current_path = raw["current_path"]
+    runtime_project = raw["runtime_project_name"]
+    approved_digest = raw["approved_infrastructure_digest"]
+    if not isinstance(selector, str) or not RELEASE_SELECTOR_RE.fullmatch(selector):
+        raise ReleaseError("remote preflight returned an invalid release")
+    if current_path != f"/opt/car-agent/releases/{selector}":
+        raise ReleaseError("remote preflight returned an invalid current path")
+    if (
+        not isinstance(runtime_project, str)
+        or not RUNTIME_PROJECT_RE.fullmatch(runtime_project)
+    ):
+        raise ReleaseError("remote preflight returned an invalid runtime project")
+    if approved_digest is not None and (
+        not isinstance(approved_digest, str)
+        or not SHA256_RE.fullmatch(approved_digest)
+    ):
+        raise ReleaseError(
+            "remote preflight returned an invalid infrastructure digest"
+        )
+
+    running_tags = raw["running_release_tags"]
+    if not isinstance(running_tags, list) or any(
+        not isinstance(tag, str) or not RELEASE_SELECTOR_RE.fullmatch(tag)
+        for tag in running_tags
+    ):
+        raise ReleaseError("remote preflight returned invalid running release tags")
+
+    integer_fields = ("disk_available_bytes", "memory_available_bytes")
+    for field in integer_fields:
+        value = raw[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ReleaseError(
+                f"remote preflight returned an invalid {field}"
+            )
+    boolean_fields = (
+        "release_lock_available",
+        "runtime_project_ready",
+        "shared_scripts_ready",
+        "shared_models_ready",
+    )
+    if any(type(raw[field]) is not bool for field in boolean_fields):
+        raise ReleaseError("remote preflight returned an invalid boolean field")
+
+    return RemoteState(
+        current_release=selector,
+        current_path=current_path,
+        runtime_project_name=runtime_project,
+        running_release_tags=tuple(running_tags),
+        approved_infrastructure_digest=approved_digest,
+        disk_available_bytes=raw["disk_available_bytes"],
+        memory_available_bytes=raw["memory_available_bytes"],
+        release_lock_available=raw["release_lock_available"],
+        runtime_project_ready=raw["runtime_project_ready"],
+        shared_scripts_ready=raw["shared_scripts_ready"],
+        shared_models_ready=raw["shared_models_ready"],
+    )
+
+
+def discover_remote_state(
+    request: ReleaseRequest,
+    *,
+    runner: CommandRunner,
+) -> RemoteState:
+    result = runner.run(
+        request.ssh.ssh_argv(REMOTE_PREFLIGHT_COMMAND),
+        cwd=request.repo,
+    )
+    return parse_remote_state(result.stdout)
+
+
+def _resolve_commit(repo: Path, revision: str) -> str:
+    resolved = _git(
+        repo,
+        "rev-parse",
+        "--verify",
+        f"{revision}^{{commit}}",
+        check=False,
+    )
+    sha = resolved.stdout.strip()
+    if resolved.returncode != 0 or not FULL_SHA_RE.fullmatch(sha):
+        raise ReleaseError(
+            "could not resolve requested revision", category="configuration"
+        )
+    return sha
+
+
+def _committed_file_digest(repo: Path, target_sha: str, path: str) -> str:
+    return hashlib.sha256(_git_blob(repo, target_sha, path)).hexdigest()
+
+
+def execute_deploy(
+    request: ReleaseRequest,
+    *,
+    apply: bool,
+    runner: CommandRunner,
+    nonce_factory: Callable[[], str] | None = None,
+) -> CloudReleaseResult:
+    validate_ssh_identity(request.ssh.identity)
+
+    target_sha = require_clean_main_commit(request.repo, request.revision)
+    remote_state = discover_remote_state(request, runner=runner)
+    deployed_sha = _resolve_commit(request.repo, remote_state.current_release)
+    changed_paths, diff_by_path = git_changes(
+        request.repo,
+        deployed_sha,
+        target_sha,
+    )
+    infrastructure_digest = compute_infrastructure_digest(
+        request.repo,
+        target_sha,
+    )
+    ci_cd_digest = compute_ci_cd_digest(request.repo, target_sha)
+    schema_digest = compute_database_schema_digest(
+        request.repo,
+        deployed_sha,
+        target_sha,
+        database_schema_paths(changed_paths, diff_by_path),
+    )
+    compose_digest = compute_compose_digest(
+        request.repo, deployed_sha, target_sha, compose_paths(changed_paths))
+    plan = make_release_plan(
+        deployed_sha=deployed_sha,
+        target_sha=target_sha,
+        changed_paths=changed_paths,
+        diff_by_path=diff_by_path,
+        target_infrastructure_digest=infrastructure_digest,
+        approved_infrastructure_digest=(
+            remote_state.approved_infrastructure_digest
+        ),
+        target_ci_cd_digest=ci_cd_digest,
+        approved_ci_cd_digest=request.approved_ci_cd_digest,
+        target_database_schema_digest=schema_digest,
+        approved_database_schema_digest=request.approved_database_schema_digest,
+        target_compose_digest=compose_digest,
+        approved_compose_digest=request.approved_compose_digest,
+    )
+    if plan.status == "plan_rejected":
+        return CloudReleaseResult(
+            status=plan.status,
+            plan=plan,
+            artifact=None,
+            remote_state=remote_state,
+        )
+    if make_bootstrap_report(remote_state).status != "ready":
+        return CloudReleaseResult(
+            status="bootstrap_required",
+            plan=plan,
+            artifact=None,
+            remote_state=remote_state,
+        )
+    if plan.status != "ready":
+        return CloudReleaseResult(
+            status=plan.status,
+            plan=plan,
+            artifact=None,
+            remote_state=remote_state,
+        )
+
+    artifact = build_release_artifact(
+        repo=request.repo,
+        output_root=request.artifact_root,
+        plan=plan,
+        services_digest=_committed_file_digest(
+            request.repo,
+            target_sha,
+            "deploy/cloud/release-services.json",
+        ),
+        models_digest=_committed_file_digest(
+            request.repo,
+            target_sha,
+            "deploy/cloud/runtime-models.json",
+        ),
+    )
+    if not apply:
+        return CloudReleaseResult(
+            status="dry_run",
+            plan=plan,
+            artifact=artifact,
+            remote_state=remote_state,
+        )
+
+    nonce = (nonce_factory or (lambda: secrets.token_hex(16)))()
+    if not UPLOAD_NONCE_RE.fullmatch(nonce):
+        raise ReleaseError("upload nonce must be 32 lowercase hex characters")
+    upload_id = f"{target_sha}-{nonce}"
+    prepare_command = (
+        "sudo /opt/car-agent/shared/bin/remote-release.sh prepare-upload "
+        f"--sha {target_sha} --upload-id {upload_id}"
+    )
+    prepared = runner.run(
+        request.ssh.ssh_argv(prepare_command),
+        cwd=request.repo,
+    )
+    expected_directory = f"/opt/car-agent/incoming/releases/{upload_id}"
+    if prepared.stdout.strip() != expected_directory:
+        raise ReleaseError("unexpected upload directory returned by server")
+
+    runner.run(
+        request.ssh.scp_argv(
+            artifact.transport_tar,
+            f"{expected_directory}/transport.tar",
+        ),
+        cwd=request.repo,
+    )
+    runner.run(
+        request.ssh.ssh_argv(
+            f"chmod 0600 -- {expected_directory}/transport.tar"
+        ),
+        cwd=request.repo,
+    )
+    deploy_command = (
+        "sudo /opt/car-agent/shared/bin/remote-release.sh deploy "
+        f"--sha {target_sha} --upload-id {upload_id} "
+        f"--expected-current {plan.deployed_sha}"
+    )
+    runner.run(
+        request.ssh.ssh_argv(deploy_command),
+        cwd=request.repo,
+    )
+    return CloudReleaseResult(
+        status="submitted",
+        plan=plan,
+        artifact=artifact,
+        remote_state=remote_state,
+    )

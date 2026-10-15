@@ -1,0 +1,277 @@
+{
+  "generated": "2026-08-03T16:52:50.368560+00:00",
+  "base_model": "iic/nlp_structbert_backbone_tiny_std",
+  "corpus_rows": 8579,
+  "rule_hit": 6503,
+  "hyper": {
+    "epochs": 4,
+    "batch_size": 32,
+    "lr": 5e-05,
+    "max_len": 32,
+    "seed": 20260730
+  },
+  "lanes": [
+    {
+      "lane": "transfer",
+      "train": 6503,
+      "test": 2076,
+      "domain_acc": 0.8709,
+      "object_acc": 0.5578,
+      "both_acc": 0.5438,
+      "unseen_object_classes": [
+        "个人中心",
+        "交互",
+        "设置"
+      ],
+      "unseen_rows_in_test": 41,
+      "theta_scan": {
+        "0.5": {
+          "kept": 565,
+          "kept_frac": 0.2722,
+          "precision": 0.908
+        },
+        "0.6": {
+          "kept": 417,
+          "kept_frac": 0.2009,
+          "precision": 0.9257
+        },
+        "0.7": {
+          "kept": 214,
+          "kept_frac": 0.1031,
+          "precision": 0.9206
+        },
+        "0.8": {
+          "kept": 57,
+          "kept_frac": 0.0275,
+          "precision": 0.807
+        },
+        "0.9": {
+          "kept": 0,
+          "kept_frac": 0.0,
+          "precision": 0.0
+        },
+        "0.95": {
+          "kept": 0,
+          "kept_frac": 0.0,
+          "precision": 0.0
+        }
+      },
+      "worst_objects": [
+        {
+          "object": "车外灯",
+          "n": 11,
+          "ok": 0,
+          "unseen": false,
+          "acc": 0.0
+        },
+        {
+          "object": "车辆模式",
+          "n": 43,
+          "ok": 0,
+          "unseen": false,
+          "acc": 0.0
+        },
+        {
+          "object": "情景模式",
+          "n": 24,
+          "ok": 0,
+          "unseen": false,
+          "acc": 0.0
+        },
+        {
+          "object": "后视镜",
+          "n": 42,
+          "ok": 0,
+          "unseen": false,
+          "acc": 0.0
+        },
+        {
+          "object": "个人热点",
+          "n": 10,
+          "ok": 0,
+          "unseen": false,
+          "acc": 0.0
+        },
+        {
+          "object": "媒体控制",
+          "n": 38,
+          "ok": 0,
+          "unseen": false,
+          "acc": 0.0
+        },
+        {
+          "object": "工具",
+          "n": 15,
+          "ok": 0,
+          "unseen": false,
+          "acc": 0.0
+        },
+        {
+          "object": "车内灯",
+          "n": 20,
+          "ok": 0,
+          "unseen": false,
+          "acc": 0.0
+        },
+        {
+          "object": "个人中心",
+          "n": 12,
+          "ok": 0,
+          "unseen": true,
+          "acc": 0.0
+        },
+        {
+          "object": "车门",
+          "n": 12,
+          "ok": 0,
+          "unseen": false,
+          "acc": 0.0
+        },
+        {
+          "object": "地图",
+          "n": 23,
+          "ok": 0,
+          "unseen": false,
+          "acc": 0.0
+        },
+        {
+          "object": "气象",
+          "n": 23,
+          "ok": 0,
+          "unseen": false,
+          "acc": 0.0
+        }
+      ],
+      "train_seconds": 358.8
+    },
+    {
+      "lane": "holdout",
+      "train": 7339,
+      "test": 1240,
+      "domain_acc": 0.9782,
+      "object_acc": 0.8685,
+      "both_acc": 0.8589,
+      "unseen_object_classes": [],
+      "unseen_rows_in_test": 0,
+      "theta_scan": {
+        "0.5": {
+          "kept": 833,
+          "kept_frac": 0.6718,
+          "precision": 0.9892
+        },
+        "0.6": {
+          "kept": 746,
+          "kept_frac": 0.6016,
+          "precision": 0.9946
+        },
+        "0.7": {
+          "kept": 659,
+          "kept_frac": 0.5315,
+          "precision": 0.9985
+        },
+        "0.8": {
+          "kept": 535,
+          "kept_frac": 0.4315,
+          "precision": 1.0
+        },
+        "0.9": {
+          "kept": 109,
+          "kept_frac": 0.0879,
+          "precision": 1.0
+        },
+        "0.95": {
+          "kept": 0,
+          "kept_frac": 0.0,
+          "precision": 0.0
+        }
+      },
+      "worst_objects": [
+        {
+          "object": "均衡器",
+          "n": 11,
+          "ok": 0,
+          "unseen": false,
+          "acc": 0.0
+        },
+        {
+          "object": "后视镜",
+          "n": 9,
+          "ok": 3,
+          "unseen": false,
+          "acc": 0.333
+        },
+        {
+          "object": "广播点播",
+          "n": 12,
+          "ok": 7,
+          "unseen": false,
+          "acc": 0.583
+        },
+        {
+          "object": "音乐点播",
+          "n": 17,
+          "ok": 10,
+          "unseen": false,
+          "acc": 0.588
+        },
+        {
+          "object": "情景模式",
+          "n": 8,
+          "ok": 5,
+          "unseen": false,
+          "acc": 0.625
+        },
+        {
+          "object": "媒体控制",
+          "n": 9,
+          "ok": 6,
+          "unseen": false,
+          "acc": 0.667
+        },
+        {
+          "object": "车辆模式",
+          "n": 10,
+          "ok": 7,
+          "unseen": false,
+          "acc": 0.7
+        },
+        {
+          "object": "系统",
+          "n": 14,
+          "ok": 10,
+          "unseen": false,
+          "acc": 0.714
+        },
+        {
+          "object": "车窗",
+          "n": 14,
+          "ok": 10,
+          "unseen": false,
+          "acc": 0.714
+        },
+        {
+          "object": "地图",
+          "n": 15,
+          "ok": 12,
+          "unseen": false,
+          "acc": 0.8
+        },
+        {
+          "object": "广播控制",
+          "n": 16,
+          "ok": 13,
+          "unseen": false,
+          "acc": 0.812
+        },
+        {
+          "object": "界面",
+          "n": 22,
+          "ok": 18,
+          "unseen": false,
+          "acc": 0.818
+        }
+      ],
+      "train_seconds": 393.6
+    }
+  ]
+}

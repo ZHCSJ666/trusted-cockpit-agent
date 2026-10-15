@@ -1,0 +1,289 @@
+// 输入区（M1-3 + M2-2 PTT，Aurora Glass 复刻轮重皮）+ B2 T6 手势契约（方案 §5.1.1）：
+//  · 轻点光球：开始录音（与免唤醒开关无关）/ 录音中 = 结束并提交 / 播报中 = 先停 TTS 再录 / 思考中 = 展开语音层
+//  · 长按光球 / 空输入框 ≥300ms：按住说话；**按住时上滑 ≥60dp 取消**（微信惯例，Q13）；松手发送
+//  · 长按识别前允许移动 12dp（列表纵向滚动与 chips 横滑不得误触）
+//  · 输入框有字时长按走原生选择，**只有光球仍可 PTT**
+//  · TalkBack：轻点切换开始 / 停止，label 随状态；热区 56dp（≥48）
+// 手势用 react-native-gesture-handler（PackageList.java:73 已注册，零新依赖）；按住说话的实现在 useHoldToTalk.ts
+// （欢迎态大球同一份）。v3 一屏一球（D4）：欢迎态由页面上的大球当麦克风，本组件按 `orb={false}` 退成无球形态。
+// 「轻点到底做什么」的判据不在这里——Composer 只报告手势，ChatScreen 的 onTap 决定走免唤醒的
+// 手动唤醒还是 PTT 的 tap 会话（哪个引擎持有麦是 ChatScreen 知道的事实）。
+import { useRef, useState } from 'react'
+import { Text, TextInput, View, Pressable } from 'react-native'
+import { Gesture, GestureDetector } from 'react-native-gesture-handler'
+
+import type { ComposerInputMode } from '../../core/presence/drivingMode'
+import type { FontScalePref } from '../../core/settings/store'
+import { AuroraOrb, type OrbState } from '../../ui/aurora'
+import { Icon, iconRuntimeAvailable } from '../../ui/Icon'
+import { ORB_A11Y } from '../../ui/aurora/AuroraOrb'
+import type { Palette } from '../../ui/theme'
+import { RADIUS, TARGET, scale } from '../../ui/tokens'
+import { composerHolding, composerPlaceholder } from './composerHint'
+import { HOLD_MS, ORB_A11Y_ACTIONS, orbTap, useHoldToTalk } from './useHoldToTalk'
+import type { PttHandle } from './usePtt'
+
+export interface ComposerProps {
+  p: Palette
+  /** 有在飞轮（pending/streaming/process 任一）→ 显示打断 */
+  busy: boolean
+  /** 此刻该给停播键吗（判据 `core/voice/stopPlayback.ts::canStopPlayback`，AR03）：
+   *  真的在出声、或者本轮已经没有在飞请求而播放器还压着待放的音频。**压过 busy**，见下面三态那段 */
+  stoppable?: boolean
+  /** 语音输入把手；null=服务器未配置（没有 audioUrl 就没有语音） */
+  ptt: PttHandle | null
+  /** 想不想画光球（v3 D4 一屏一球，Figma Composer Layout=NoOrb）：欢迎态由页面大球、语音层开着由层内大球当麦克风
+   *  ⇒ 宿主给 false。缺省 true。无光球时空输入框的「按住说话」背板照旧在。
+   *  **按住说话进行中，已经画着的光球留到松手**（见下方锁存）：光球被按住时层才升起来，此刻卸掉手指下的光球，
+   *  RNGH 随即 onFinalize ⇒ pressUp，录音在用户还按着时就被提交 */
+  orb?: boolean
+  /** 光球主态由调用方给（v2=snapshot.primary，v1=ChatScreen 里的旧推导）——
+   *  Composer 自己不再推导：同一个「此刻是什么态」的判据抄两份就会给出两个答案 */
+  orbState: OrbState
+  /** reconnecting 期 ×0.6 亮度（`snapshot.dim`） */
+  orbDim?: boolean
+  /** 语音层开着时主球转静态（同屏循环动画常态 1 个，方案 §11.4） */
+  orbAnimated?: boolean
+  /** 行车档：光球 ×0.5 频率 ×0.6 透明度（判据 orbPolicy.orbTempo，B4-3） */
+  orbDriving?: boolean
+  /** 行车档（`snapshot.driving`）：目标 56、快捷指令 ≤3、**上滑取消禁用**（§6 / §5.1.1 行车条款） */
+  driving?: boolean
+  /** 文本输入形态（判据 drivingMode.ts::composerInputMode）：A 常驻 / B 折叠成键盘键 / C 隐藏 */
+  inputMode?: ComposerInputMode
+  /** 语音层正盖在整列上（driving-landscape，B5-15 lever ②）⇒ 本组件从无障碍树里拿掉。
+   *  真机 hierarchy 抓到：被盖住的 `composer-orb` 与层内 `voice-sheet-orb` **说明完全相同**
+   *  （都是「小舟，开始说话」），读屏念两遍、其中一个还够不到（暗区把触摸拦住了）。
+   *  与 B5-12 暗区那条同形态，也同样是本批 lever ② 自己造的。 */
+  covered?: boolean
+  /** 宿主保留文本草稿；画廊/独立消费方仍可用本地 state。 */
+  draft?: string
+  onDraftChange?(text: string): void
+  fontScale: FontScalePref
+  onSend(text: string): void | boolean
+  onInterrupt(): void
+  /** 只停播（AR03）：停当前出声，不取消在飞请求、不开麦 */
+  onStopPlayback(): void
+  /** 轻点光球（判据在 ChatScreen） */
+  onTap(): void
+}
+
+export function Composer({ p, busy, stoppable = false, ptt, orb = true, orbState, orbDim, orbAnimated, orbDriving, driving = false, inputMode = 'always', covered = false, draft, onDraftChange, fontScale, onSend, onInterrupt, onStopPlayback, onTap }: ComposerProps) {
+  const [localInput, setLocalInput] = useState('')
+  const input = draft ?? localInput
+  const setInput = onDraftChange ?? setLocalInput
+  // B 身份行车档：输入框折叠成键盘键，点开才出来。**形态一变就收回去**——换角色 / 退出行车档
+  // 时留着一个「刚才点开的输入框」，下一次的形态读数就不是形态决定的了
+  const [inputOpen, setInputOpen] = useState(false)
+  // 渲染期调整派生状态（React 官方的 "adjusting state when a prop changes"），不是 effect：
+  // effect 要等这一帧 commit 完才跑，用户会看见一帧「换了形态但输入框还开着」。
+  const [inputModeSeen, setInputModeSeen] = useState(inputMode)
+  if (inputModeSeen !== inputMode) {
+    setInputModeSeen(inputMode)
+    setInputOpen(false)
+  }
+  const submit = () => {
+    const text = input.trim()
+    if (!text) return
+    if (onSend(text) === false) return
+    setInput('')
+  }
+  const recording = ptt?.state === 'recording'
+  const finalizing = ptt?.state === 'finalizing'
+  // 占位符与「按住中」外观（2026-09-17，判据 composerHint.ts）：空输入框长按 = PTT 这条路要说出来，
+  // 按住期间输入框本身也要变（描边 + 底色 accent，与光球同款），不只光球变
+  const hint = { voice: !!ptt, state: ptt?.state ?? ('idle' as const), mode: ptt?.mode ?? ('' as const), driving }
+  const holding = composerHolding(hint)
+  // 光球锁存（v3 P3b）：按住说话进行中只**留住**已经画着的光球，不把没画的那颗带回来——从层内大球按下时
+  // Composer 本来就无球，此时凭空冒出第二颗球、输入框跟着挪位就是新的错。渲染期调整（React 官方
+  // "adjusting state when a prop changes"），不是 effect：effect 晚一帧，球会先卸再挂、手势已经断了
+  const [orbOn, setOrbOn] = useState(orb)
+  const orbWanted = orb || (holding && orbOn)
+  if (orbWanted !== orbOn) setOrbOn(orbWanted)
+  const placeholder = composerPlaceholder(hint)
+  // B4-11 §6「目标 ≥56dp」：行车 56 / 泊车 48。光球热区本来就是 TARGET.driving，不受影响
+  const target = scale(driving ? TARGET.driving : TARGET.parked, 'target', fontScale)
+
+  // 按住说话 / 轻点：实现在 useHoldToTalk.ts（欢迎态大球同一份契约）
+  const makeHold = useHoldToTalk(ptt, driving)
+  const orbGesture = Gesture.Exclusive(makeHold(), orbTap(onTap))
+  // 空输入框的「背板即录音键」（B3-3 / B2 出账 plateGesture）：不再把手势挂在包 TextInput 的
+  // 父 View 上——Android 的 TextInput 自己消费触摸（长按=光标/选择），RNGH 抢不到（B2 真机
+  // 实录 + 本轮自证：长按 4s 出的是光标水滴柄，层不升）。A-spike 三个竞争配置全败：
+  // blocksExternalGesture(Native ref) 与 Exclusive(hold, Gesture.Native()) 真机均不起作用，
+  // disallowInterruption 在 RNGH 2.32 的 PanGesture 上根本不存在（tsc TS2339）。
+  // ⇒ 改为空输入框时铺一层透明触摸层，把「与原生 TextInput 抢触摸」整个绕开：
+  // 轻点→聚焦弹键盘（原生 focus 语义由我们转发），长按→PTT（与光球同款、已验证可用的形态）。
+  // 有字时该层卸载，原生长按选择完整回归。a11y：触摸层不进无障碍树（TalkBack 的双击激活走
+  // a11y action 直达 TextInput，不经普通触摸；长按录音对 TalkBack 本来就不是唯一入口，§8.1）。
+  const inputRef = useRef<TextInput>(null)
+  const plateTap = Gesture.Tap()
+    .runOnJS(true)
+    .maxDuration(HOLD_MS - 20)
+    // RNGH 手势的回调只在触摸时触发；react-hooks/refs 规则无法证明「传进去的闭包不会在渲染期被调用」所以保守判红
+    // eslint-disable-next-line react-hooks/refs -- 见上：onEnd 是触摸回调，不在渲染期跑
+    .onEnd(() => inputRef.current?.focus())
+  const plateGesture = Gesture.Exclusive(makeHold(), plateTap)
+  const plateOverlayOn = !!ptt && !finalizing && input.length === 0
+
+  const a11yLabel = recording ? '小舟，结束并发送' : `${ORB_A11Y[orbState]}，开始说话`
+  // 合一键三态（AR03 / 评审 R06）。原来只有「busy ? 打断 : 发送」两态，而 `busy` 不含音频：
+  // 整段答案一次 final 返回时三个忙态同帧清零，键当场变回「发送」——播了几分钟也没有一步可达的停播入口。
+  // **audio-first**：声音已经在放（或马上要出声）的时候，用户按这枚键的意图压倒性是「别说了」；
+  // 那一刻取消在飞请求换不来任何东西（答案已在交付）。取消在飞请求退到「忙而无音频」与 Dock 的长任务行。
+  const keyMode: 'stop-playback' | 'interrupt' | 'send' = stoppable ? 'stop-playback' : busy ? 'interrupt' : 'send'
+  const keyActive = keyMode !== 'send'
+  const keyColor = keyMode === 'send' ? p.onAccent : keyMode === 'stop-playback' ? p.amber : p.fg1
+
+  return (
+    <View
+      testID="composer"
+      importantForAccessibility={covered ? 'no-hide-descendants' : 'auto'}
+      accessibilityElementsHidden={covered}
+      // v3：输入区是不透明的 surfaceLow 底（原来是半透明叠在深空渐变上的玻璃）
+      style={{
+        borderTopWidth: 1,
+        borderColor: p.line,
+        backgroundColor: p.surfaceLow,
+      }}
+    >
+      {/* 追问 chips 行已挪进回答末尾（v3 P2b，Figma AnswerBlock；MessageBubble → FollowUpChips） */}
+      {/* Figma Composer：左右 12、上下 8、间距 8（TextFirst 高 72 = 8 + 光球位 56 + 8） */}
+      <View style={{ flexDirection: 'row', gap: 8, paddingVertical: 8, paddingHorizontal: 12, alignItems: 'flex-end' }}>
+        {ptt && orbWanted ? (
+          <GestureDetector gesture={orbGesture}>
+            <View
+              testID="composer-orb"
+              accessible
+              accessibilityRole="button"
+              accessibilityLabel={a11yLabel}
+              accessibilityHint="轻点开始说话，说完自动发送；长按可按住说话，上滑取消"
+              // TalkBack 双击 = activate = 轻点（不依赖读屏把双击注入成触摸，RNGH 的 Tap 不一定收得到）
+              accessibilityActions={ORB_A11Y_ACTIONS}
+              onAccessibilityAction={(e) => {
+                if (e.nativeEvent.actionName === 'activate') onTap()
+              }}
+              style={{
+                width: scale(TARGET.driving, 'target', fontScale),
+                height: scale(TARGET.driving, 'target', fontScale),
+                borderRadius: RADIUS.full,
+                alignItems: 'center',
+                justifyContent: 'center',
+                backgroundColor: recording ? p.accentSoft : 'transparent',
+              }}
+            >
+              <AuroraOrb size={44} state={orbState} dim={orbDim} animated={orbAnimated ?? true} driving={orbDriving} />
+            </View>
+          </GestureDetector>
+        ) : null}
+        {/* 文本输入按身份（§6.0，判据 drivingMode.ts::composerInputMode）：
+            A 手持=常驻 / B 支架=折叠成键盘键 / C 可信车载平板=隐藏。非行车一律 'always'。 */}
+        {inputMode === 'hidden' ? (
+          <View style={{ flex: 1 }} />
+        ) : (
+          <View style={{ flex: 1, flexDirection: 'row', gap: 8, alignItems: 'flex-end' }}>
+            {inputMode === 'folded' ? (
+              <Pressable
+                testID="composer-keyboard"
+                accessibilityRole="button"
+                accessibilityLabel={inputOpen ? '收起键盘' : '打开键盘'}
+                onPress={() => setInputOpen(!inputOpen)}
+                style={{
+                  width: target,
+                  height: target,
+                  borderRadius: RADIUS.full,
+                  backgroundColor: p.surfaceHighest,
+                  borderWidth: 1,
+                  borderColor: inputOpen ? p.accent : p.surfaceHighest,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                {iconRuntimeAvailable() ? (
+                  <Icon name="keyboard" size={22} color={inputOpen ? p.accent : p.fg2} />
+                ) : (
+                  <Text style={{ color: inputOpen ? p.accent : p.fg2, fontSize: p.font(16) }}>⌨</Text>
+                )}
+              </Pressable>
+            ) : null}
+            {inputMode === 'folded' && !inputOpen ? null : (
+              <View style={{ flex: 1 }}>
+                <TextInput
+                  ref={inputRef}
+                  testID="composer-input"
+                  // v3（Figma Composer）：闲时 surfaceHighest 实色、描边同色（宽度不变，按住时转 accent 不跳动）；
+                  // 单行高 = 目标高，圆角 24（单行时就是整颗胶囊，多行时是圆角框）
+                  style={{
+                    backgroundColor: holding ? p.accentSoft : p.surfaceHighest,
+                    borderWidth: 1,
+                    borderColor: holding ? p.accent : p.surfaceHighest,
+                    borderRadius: 24,
+                    paddingHorizontal: 16,
+                    paddingVertical: 12,
+                    minHeight: target,
+                    fontSize: p.font(15),
+                    color: p.fg1,
+                    maxHeight: 120,
+                  }}
+                  value={input}
+                  onChangeText={setInput}
+                  placeholder={placeholder}
+                  placeholderTextColor={holding ? p.accent : p.fg3}
+                  multiline
+                  onSubmitEditing={submit}
+                  submitBehavior="blurAndSubmit"
+                  returnKeyType="send"
+                />
+                {plateOverlayOn ? (
+                  <GestureDetector gesture={plateGesture}>
+                    <View
+                      testID="composer-plate-overlay"
+                      accessible={false}
+                      importantForAccessibility="no"
+                      style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }}
+                    />
+                  </GestureDetector>
+                ) : null}
+              </View>
+            )}
+          </View>
+        )}
+        {/* 发送 / 打断 / 停播合一（B5-13，泓舟 B4 真机轮原话②；AR03 补第三态）：出声时 ▣ 停止播报
+            （onStopPlayback，只停声音），忙而未出声时 ■ 停（onInterrupt = cancelCurrentTurn），闲时 ⬆ 发。
+            原 pill 已整段删除——忙时要发新话先停再发（市面惯例）。
+            testID 仍 composer-send（Maestro 01/02/03/06/08 都在闲时按它点）；§6「目标 ≥56dp」的演员不变。
+            v3（D5，2026-10-02 拍板）：发 = 交互色实色（极光收回到光球 / 流式光标 / 语音层顶缘 / AI 角标四处），
+            打断 = 中性 surfaceHighest，停播 = 琥珀；三态都是目标高（泊车 48，原来 44）。
+            ⚠ C 身份行车档没有输入框 ⇒ **闲时不渲染这枚键**（打磨批 A / P09：B4 §6.3 那枚「永远点不动的键」
+            从此不出现），**忙时 / 出声时照旧挂载、可点**。B 身份输入框折成键盘键、还没展开时同理（Figma 08 页 DR-2
+            只有键盘键）：闲时没有可发的字，展开键盘后再出。
+            svg 原生缺席仍回退文字——iconRuntimeAvailable() 是既有判据（坑账 §9.27） */}
+        {(inputMode === 'hidden' || (inputMode === 'folded' && !inputOpen)) && !keyActive ? null : (
+        <Pressable
+          testID="composer-send"
+          accessibilityRole="button"
+          accessibilityLabel={keyMode === 'stop-playback' ? '停止播报' : keyMode === 'interrupt' ? '打断' : '发送'}
+          accessibilityHint={keyMode === 'stop-playback' ? '只停止声音，不会开始录音' : undefined}
+          disabled={false}
+          onPress={keyMode === 'stop-playback' ? onStopPlayback : keyMode === 'interrupt' ? onInterrupt : submit}
+          style={{
+            backgroundColor: keyMode === 'send' ? p.accent : keyMode === 'stop-playback' ? p.amberSoft : p.surfaceHighest,
+            borderWidth: keyMode === 'stop-playback' ? 1 : 0,
+            borderColor: keyMode === 'stop-playback' ? p.amberLine : 'transparent',
+            width: target,
+            height: target,
+            borderRadius: RADIUS.full,
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          {iconRuntimeAvailable() ? (
+            <Icon name={keyActive ? 'stop' : 'arrowUp'} size={22} color={keyColor} />
+          ) : (
+            <Text style={{ color: keyColor, fontSize: p.font(15), fontWeight: '600' }}>{keyActive ? '停' : '发'}</Text>
+          )}
+        </Pressable>
+        )}
+      </View>
+    </View>
+  )
+}

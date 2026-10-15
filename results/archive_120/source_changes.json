@@ -1,0 +1,11 @@
+{
+  "upstream_modified_files": [
+    "hmi/README.md",
+    "hmi/index.html",
+    "hmi/src/main.tsx",
+    "hmi/vite.config.ts"
+  ],
+  "new_runtime": "cockpit-agent/interview/",
+  "new_frontend": "cockpit-agent/hmi/src/studio/",
+  "original_repository_untouched": true
+}

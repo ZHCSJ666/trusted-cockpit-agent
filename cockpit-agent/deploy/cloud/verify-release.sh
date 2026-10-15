@@ -1,0 +1,364 @@
+#!/usr/bin/env bash
+VERIFY_LIBRARY_SOURCED=0
+[[ "${BASH_SOURCE[0]}" != "$0" ]] && VERIFY_LIBRARY_SOURCED=1
+
+verify_error() {
+  printf 'cloud verification: %s\n' "$1" >&2
+  return 1
+}
+
+verify_run_step() {
+  local label="$1" rc restore_errexit=0
+  shift
+  [[ "$-" == *e* ]] && restore_errexit=1
+  set +e
+  "$@"
+  rc=$?
+  [[ "${restore_errexit}" -eq 0 ]] || set -e
+  if [[ "${rc}" -ne 0 ]]; then
+    printf 'cloud verification: %s failed (rc=%s)\n' "${label}" "${rc}" >&2
+    VERIFY_STEP_RC="${rc}"
+    return 0
+  fi
+  VERIFY_STEP_RC=0
+  return 0
+}
+
+verify_prepare_context() {
+  local sha="$1" release_dir mode owner
+  local runtime_file="${SHARED_ROOT}/runtime-project-name"
+  local -a names
+  [[ "${sha}" =~ ^[0-9a-f]{7,40}$ ]] || { verify_error "release selector is invalid"; return 2; }
+  [[ -f "${runtime_file}" && ! -L "${runtime_file}" ]] || { verify_error "runtime project name file is missing"; return 1; }
+  owner="$(stat -c '%U:%G' "${runtime_file}")" || return $?
+  [[ "${owner}" == "root:root" ]] || { verify_error "runtime project name owner mismatch"; return 1; }
+  mode="$(stat -c '%a' "${runtime_file}")" || return $?
+  [[ "${mode}" =~ ^[0-7]{3,4}$ ]] || return 1
+  (( (8#${mode} & 0022) == 0 )) || return 1
+  mapfile -t names <"${runtime_file}" || return $?
+  [[ "${#names[@]}" -eq 1 && "${names[0]}" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || return 1
+  RUNTIME_PROJECT_NAME="${names[0]}"
+  release_dir="$(readlink -f "${RELEASE_ROOT}/current")" || return $?
+  [[ "${release_dir}" == "${RELEASE_ROOT}/releases/${sha}" && -d "${release_dir}" && ! -L "${release_dir}" ]] || return 1
+  [[ -L "${release_dir}/.env" ]] || return 1
+  [[ "$(readlink "${release_dir}/.env")" == "${SHARED_ROOT}/.env" ]] || return 1
+  VERIFY_RELEASE_SHA="${sha}"
+  VERIFY_RELEASE_DIR="${release_dir}"
+}
+
+readonly -a PRIVATE_HTTPS_PORTS=(443 8443 8444 8445 8446)
+readonly -a LOOPBACK_BUSINESS_PORTS=(5173 5174 8090 8092 50059)
+
+compose_for_release() {
+  local release_dir="$1" sha="$2"
+  shift 2
+  RELEASE_SHA="${sha}" docker compose \
+    --project-name "${RUNTIME_PROJECT_NAME}" \
+    --project-directory "${release_dir}" \
+    -f "${release_dir}/compose.yaml" \
+    -f "${SHARED_ROOT}/compose.cloud.yaml" \
+    --env-file "${SHARED_ROOT}/.env" \
+    "$@"
+}
+
+inspect_project_containers() {
+  local release_dir="$1" sha="$2" payload
+  payload="$(compose_for_release "${release_dir}" "${sha}" ps -a --format json)" || return $?
+  PROJECT_COUNTS="$(python3 -c '
+import json
+import sys
+
+raw = sys.stdin.read().strip()
+if not raw:
+    raise SystemExit("compose returned no containers")
+try:
+    decoded = json.loads(raw)
+    rows = decoded if isinstance(decoded, list) else [decoded]
+except json.JSONDecodeError:
+    rows = [json.loads(line) for line in raw.splitlines() if line.strip()]
+states = [str(row.get("State", "")).lower() for row in rows]
+bad = sum(state in {"restarting", "exited", "dead"} for state in states)
+running = sum(state == "running" for state in states)
+print(len(rows), running, bad)
+ ' <<<"${payload}")" || return $?
+  [[ "${PROJECT_COUNTS}" == "30 30 0" ]] \
+    || { verify_error "runtime project container state is not 30 running and 0 bad"; return 1; }
+}
+
+# 五个回环业务端口的就绪等待（2026-09-22）。`compose up -d` 在容器**起来**时就返回，hmi / dashboard 的 Vite
+# 还要 1–2 s 才开始监听（真栈：容器 00:15:18.5 起、Vite 00:15:19.85 就绪，而回滚验收在 00:15:19 就判了红 ⇒ 状态写成
+# ROLLBACK_FAILED，容器其实全部健康）。与上面 HTTPS 那条同一口径：每秒重试、共享一个截止点，到点仍缺才判失败——
+# 等待只放宽「何时判」，不放宽「判什么」：端口绑在非回环地址上是真违规，不等、当场判红。
+LISTENER_READY_TIMEOUT_S="${LISTENER_READY_TIMEOUT_S:-60}"
+LISTENER_READY_INTERVAL_S="${LISTENER_READY_INTERVAL_S:-1}"
+
+verify_loopback_listeners() {
+  local listeners started waited rc
+  LISTENER_READY_S=0
+  [[ "${LISTENER_READY_TIMEOUT_S}" =~ ^[0-9]+$ && "${LISTENER_READY_INTERVAL_S}" =~ ^[0-9]+$ ]] \
+    || { verify_error "listener readiness budget is invalid"; return 1; }
+  started="${SECONDS}"
+  while :; do
+    listeners="$(ss -lntH)" || return $?
+    rc=0
+    python3 -c '
+import sys
+
+required = {5173, 5174, 8090, 8092, 50059}
+seen = set()
+for line in sys.stdin:
+    fields = line.split()
+    if len(fields) < 4:
+        continue
+    address = fields[3]
+    for port in required:
+        if not address.endswith(f":{port}"):
+            continue
+        if address != f"127.0.0.1:{port}":
+            print(f"business port {port} is not loopback-only", file=sys.stderr)
+            raise SystemExit(2)
+        seen.add(port)
+if seen != required:
+    missing = ",".join(str(port) for port in sorted(required - seen))
+    print(f"loopback business ports not listening yet: {missing}", file=sys.stderr)
+    raise SystemExit(3)
+ ' <<<"${listeners}" || rc=$?
+    [[ "${rc}" -ne 0 ]] || break
+    [[ "${rc}" -eq 3 ]] || { verify_error "loopback listener check failed (rc=${rc})"; return 1; }
+    waited=$(( SECONDS - started ))
+    if (( waited >= LISTENER_READY_TIMEOUT_S )); then
+      verify_error "loopback business ports did not all listen within ${waited}s"
+      return 1
+    fi
+    sleep "${LISTENER_READY_INTERVAL_S}"
+  done
+  LISTENER_READY_S=$(( SECONDS - started ))
+}
+
+# Tailscale Serve 判据（2026-09-22 改）：**本项目的五条映射一条不少、每条 tailnet only、后端是约定的回环端口**；
+# 不再要求「恰好五条」。来历：同机另一个项目加了第六条 `:8447 → 127.0.0.1:8768`，计数判据把本项目每一次验收都判红——
+# `267b5d8b` / `1a8ff180` 两次切换后回滚、回滚验收同样红 ⇒ ROLLBACK_FAILED，而 30 个容器全部健康、五个端点全 200。
+# 别的项目的条目不归本闸管；Funnel 仍一条都不许出现（那是整机的公网暴露）。
+verify_tailscale_serve() {
+  local status count
+  status="$(tailscale serve status)" || return $?
+  count="$(python3 -c '
+import re
+import sys
+
+expected = {"443": 5173, "8443": 8090, "8444": 50059, "8445": 5174, "8446": 8092}
+header = re.compile(r"^https://(?P<host>[a-z0-9.-]+\.ts\.net)(?::(?P<port>[0-9]+))? \(tailnet only\)$", re.IGNORECASE)
+proxy = re.compile(r"^\|-- / proxy http://127\.0\.0\.1:(?P<backend>[0-9]+)$")
+lines = [line.rstrip() for line in sys.stdin]
+seen = {}
+hosts = set()
+total = 0
+for index, line in enumerate(lines):
+    match = header.match(line.strip())
+    if not match:
+        continue
+    total += 1
+    port = match.group("port") or "443"
+    if port not in expected:
+        continue
+    body = next((candidate.strip() for candidate in lines[index + 1:index + 3] if candidate.strip()), "")
+    target = proxy.match(body)
+    if target is None or int(target.group("backend")) != expected[port]:
+        raise SystemExit(f"serve entry :{port} does not proxy to 127.0.0.1:{expected[port]}")
+    seen[port] = True
+    hosts.add(match.group("host").lower())
+missing = sorted(set(expected) - set(seen), key=int)
+if missing:
+    raise SystemExit("car-agent serve entries missing: " + ",".join(missing))
+if len(hosts) != 1:
+    raise SystemExit("car-agent serve entries span more than one host")
+print(total)
+ ' <<<"${status}")" || { verify_error "Tailscale Serve does not expose the five car-agent tailnet only entries"; return 1; }
+  # 纯 bash 子串判断：Git Bash 下 `grep -Fqi <<<` 会 Abort 而不判——测试替身在 Windows 上跑不动它
+  if [[ "${status,,}" == *funnel* ]]; then verify_error "Tailscale Funnel must remain disabled"; return 1; fi
+  TAILNET_ENTRY_COUNT="${count}"
+}
+
+container_env_value() {
+  local container_id="$1" key="$2"
+  docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+    "${container_id}" | sed -n "s/^${key}=//p" | head -n 1 || return $?
+}
+
+# 五个 HTTPS 端点的就绪等待。activate 在 `compose up -d` 返回后立刻验收，而 27 个容器同时
+# 冷启时 hmi(5173)/edge(8090) 要 6–10 s 才开始监听（2026-09-06 60a72a2：切栈后第 6 s hmi 仍
+# 未监听，tailscaled 记 connection reset，curl --fail 当场判红 → 误判回滚）。这里对每个端点按
+# HTTPS_READY_INTERVAL_S 重试、五个端点共享一个 HTTPS_READY_TIMEOUT_S 截止点，到点仍非 200 才
+# 判失败——等待只放宽「何时判」，不放宽「判什么」：结果仍必须是 200，超时 fail closed。
+HTTPS_READY_TIMEOUT_S="${HTTPS_READY_TIMEOUT_S:-120}"
+HTTPS_READY_INTERVAL_S="${HTTPS_READY_INTERVAL_S:-1}"
+
+verify_https_endpoints() {
+  local fqdn="$1" name url code started waited
+  HTTPS_RESULTS=""
+  HTTPS_READY_S=0
+  [[ "${HTTPS_READY_TIMEOUT_S}" =~ ^[0-9]+$ && "${HTTPS_READY_INTERVAL_S}" =~ ^[0-9]+$ ]] \
+    || { verify_error "HTTPS readiness budget is invalid"; return 1; }
+  started="${SECONDS}"
+  while IFS=$'\t' read -r name url; do
+    while :; do
+      code="$(curl --silent --output /dev/null \
+        --write-out '%{http_code}' --max-time 20 "${url}")" || code="000"
+      [[ "${code}" == "200" ]] && break
+      waited=$(( SECONDS - started ))
+      if (( waited >= HTTPS_READY_TIMEOUT_S )); then
+        verify_error "HTTPS endpoint ${name} failed (http_code ${code} after ${waited}s)"
+        return 1
+      fi
+      sleep "${HTTPS_READY_INTERVAL_S}"
+    done
+    HTTPS_RESULTS+="${name}=${code}"$'\n'
+  done < <(
+    printf 'hmi\thttps://%s/\n' "${fqdn}"
+    printf 'edge\thttps://%s:8443/healthz\n' "${fqdn}"
+    printf 'llm\thttps://%s:8444/api/llm/providers\n' "${fqdn}"
+    printf 'dashboard\thttps://%s:8445/\n' "${fqdn}"
+    printf 'collector\thttps://%s:8446/healthz\n' "${fqdn}"
+  )
+  HTTPS_READY_S=$(( SECONDS - started ))
+}
+
+run_wss_probes() {
+  local release_dir="$1" sha="$2" fqdn="$3"
+  local hmi_id collector_id ws_token
+  hmi_id="$(compose_for_release "${release_dir}" "${sha}" ps -q hmi)" || return $?
+  collector_id="$(compose_for_release "${release_dir}" "${sha}" ps -q observability-collector)" || return $?
+  [[ -n "${hmi_id}" && -n "${collector_id}" ]] \
+    || { verify_error "probe containers are unavailable"; return 1; }
+  ws_token="$(container_env_value "${hmi_id}" VITE_WS_TOKEN)" || return $?
+  [[ -n "${ws_token}" ]] || { verify_error "runtime WebSocket credential is unavailable"; return 1; }
+  EDGE_PROBE_OUTPUT="$(docker exec -i \
+    -e WS_URL="wss://${fqdn}:8443/ws" \
+    -e WS_TOKEN="${ws_token}" \
+    "${collector_id}" python - \
+    <"${release_dir}/deploy/cloud/probes/edge_ws_probe.py")" || return $?
+  COLLECTOR_PROBE_OUTPUT="$(docker exec -i \
+    -e WS_URL="wss://${fqdn}:8446/stream" \
+    "${collector_id}" python - \
+    <"${release_dir}/deploy/cloud/probes/collector_ws_probe.py")" || return $?
+}
+
+verify_data_and_backup() {
+  local release_dir="$1" sha="$2" postgres_id redis_id
+  postgres_id="$(compose_for_release "${release_dir}" "${sha}" ps -q postgres)" || return $?
+  redis_id="$(compose_for_release "${release_dir}" "${sha}" ps -q redis)" || return $?
+  [[ -n "${postgres_id}" && -n "${redis_id}" ]] \
+    || { verify_error "data dependency containers are unavailable"; return 1; }
+  docker exec "${postgres_id}" pg_isready -U cockpit >/dev/null || return $?
+  [[ "$(docker exec "${redis_id}" redis-cli ping)" == "PONG" ]] || return $?
+  [[ "$(systemctl is-enabled car-agent-backup.timer)" == "enabled" ]] || return $?
+  [[ "$(systemctl is-active car-agent-backup.timer)" == "active" ]] || return $?
+  [[ "$(systemctl show car-agent-backup.service -p Result --value)" == "success" ]] || return $?
+  return 0
+}
+
+verify_resolve_fqdn() {
+  local release_dir="$1" sha="$2" hmi_id fqdn
+  hmi_id="$(compose_for_release "${release_dir}" "${sha}" ps -q hmi)" || return $?
+  [[ -n "${hmi_id}" ]] || return 1
+  fqdn="$(container_env_value "${hmi_id}" __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS)" || return $?
+  [[ "${fqdn}" =~ ^[a-z0-9.-]+\.ts\.net$ ]] || { verify_error "Tailnet FQDN is invalid"; return 1; }
+  VERIFY_FQDN="${fqdn}"
+}
+
+write_verification_evidence() {
+  local sha="$1" timestamp evidence_dir target
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)" || return $?
+  [[ "${timestamp}" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] \
+    || { verify_error "verification timestamp is invalid"; return 1; }
+  evidence_dir="${SHARED_ROOT}/evidence/releases/${sha}"
+  install -d -m 0700 -o root -g root "${evidence_dir}" || return $?
+  target="${evidence_dir}/verification.json"
+  if [[ -e "${target}" ]]; then
+    target="${evidence_dir}/verification-${timestamp}.json"
+  fi
+  PROJECT_COUNTS="${PROJECT_COUNTS}" \
+  TAILNET_ENTRY_COUNT="${TAILNET_ENTRY_COUNT}" \
+  HTTPS_RESULTS="${HTTPS_RESULTS}" \
+  HTTPS_READY_S="${HTTPS_READY_S}" \
+  LISTENER_READY_S="${LISTENER_READY_S:-0}" \
+  EDGE_PROBE_OUTPUT="${EDGE_PROBE_OUTPUT}" \
+  COLLECTOR_PROBE_OUTPUT="${COLLECTOR_PROBE_OUTPUT}" \
+  python3 - "${target}" "${sha}" "${timestamp}" <<'PY' || return $?
+import json
+import os
+from pathlib import Path
+import sys
+
+target = Path(sys.argv[1])
+total, running, bad = (int(value) for value in os.environ["PROJECT_COUNTS"].split())
+https_codes = {}
+for row in os.environ["HTTPS_RESULTS"].splitlines():
+    name, code = row.split("=", 1)
+    https_codes[name] = int(code)
+edge_probe = [
+    json.loads(row)
+    for row in os.environ["EDGE_PROBE_OUTPUT"].splitlines()
+    if row.strip()
+]
+collector_probe = json.loads(os.environ["COLLECTOR_PROBE_OUTPUT"])
+payload = {
+    "schema_version": 1,
+    "release_sha": sys.argv[2],
+    "verified_at": sys.argv[3],
+    "passed": True,
+    "containers": {"total": total, "running": running, "bad": bad},
+    "loopback_business_ports": 5,
+    "tailnet_entries": int(os.environ["TAILNET_ENTRY_COUNT"]),
+    "https_codes": https_codes,
+    "https_ready_s": int(os.environ["HTTPS_READY_S"]),
+    "listener_ready_s": int(os.environ["LISTENER_READY_S"]),
+    "edge_probe": edge_probe,
+    "collector_probe": collector_probe,
+    "postgres_ready": True,
+    "redis_ready": True,
+    "backup_timer_ready": True,
+}
+with target.open("x", encoding="utf-8", newline="\n") as handle:
+    json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+target.chmod(0o600)
+PY
+  chown root:root "${target}" || return $?
+  printf '%s\n' "${target}" || return $?
+}
+
+verify_release() {
+  local sha="$1" rc
+  verify_run_step "verify_prepare_context" verify_prepare_context "${sha}"; rc="${VERIFY_STEP_RC}"
+  [[ "${rc}" -eq 0 ]] || return "${rc}"
+  verify_run_step "inspect_project_containers" inspect_project_containers "${VERIFY_RELEASE_DIR}" "${VERIFY_RELEASE_SHA}"; rc="${VERIFY_STEP_RC}"
+  [[ "${rc}" -eq 0 ]] || return "${rc}"
+  verify_run_step "verify_loopback_listeners" verify_loopback_listeners; rc="${VERIFY_STEP_RC}"
+  [[ "${rc}" -eq 0 ]] || return "${rc}"
+  verify_run_step "verify_tailscale_serve" verify_tailscale_serve; rc="${VERIFY_STEP_RC}"
+  [[ "${rc}" -eq 0 ]] || return "${rc}"
+  verify_run_step "verify_resolve_fqdn" verify_resolve_fqdn "${VERIFY_RELEASE_DIR}" "${VERIFY_RELEASE_SHA}"; rc="${VERIFY_STEP_RC}"
+  [[ "${rc}" -eq 0 ]] || return "${rc}"
+  verify_run_step "verify_https_endpoints" verify_https_endpoints "${VERIFY_FQDN}"; rc="${VERIFY_STEP_RC}"
+  [[ "${rc}" -eq 0 ]] || return "${rc}"
+  verify_run_step "run_wss_probes" run_wss_probes "${VERIFY_RELEASE_DIR}" "${VERIFY_RELEASE_SHA}" "${VERIFY_FQDN}"; rc="${VERIFY_STEP_RC}"
+  [[ "${rc}" -eq 0 ]] || return "${rc}"
+  verify_run_step "verify_data_and_backup" verify_data_and_backup "${VERIFY_RELEASE_DIR}" "${VERIFY_RELEASE_SHA}"; rc="${VERIFY_STEP_RC}"
+  [[ "${rc}" -eq 0 ]] || return "${rc}"
+  verify_run_step "write_verification_evidence" write_verification_evidence "${VERIFY_RELEASE_SHA}"; rc="${VERIFY_STEP_RC}"
+  [[ "${rc}" -eq 0 ]] || return "${rc}"
+  return 0
+}
+
+verify_current_release() {
+  local release_dir sha
+  release_dir="$(readlink -f "${RELEASE_ROOT}/current")" || return $?
+  sha="$(basename "${release_dir}")" || return $?
+  verify_release "${sha}" || return $?
+}
+
+if [[ "${VERIFY_LIBRARY_SOURCED}" -eq 0 ]]; then
+  printf 'verify-release.sh is a source-only verification library\n' >&2
+  false
+fi

@@ -1,0 +1,735 @@
+"""SessionStore：多轮会话状态（待确认/待补槽），Redis 持久。
+
+WS3 §6。支持 confirm/slot 续接 + TTL 超时作废。
+"""
+from __future__ import annotations
+import json
+import time
+import logging
+import os
+import hashlib
+from dataclasses import asdict
+
+from .models import SessionState, Plan, Step, StepResult, StepStatus
+
+logger = logging.getLogger("planner.session")
+
+try:
+    import redis.asyncio as aioredis
+except ImportError:
+    aioredis = None
+
+_KEY_PREFIX = "planner:sess:"
+_OWNER_PREFIX = "planner:sess-owner:"
+_OWNER_FENCE_PREFIX = "planner:sess-owner-fence:"
+_OWNER_FENCE_TTL = 300
+_DELETING = "deleting"
+_DELETED = "deleted"
+_DEFAULT_TTL = 300  # 秒（确认/补槽挂起态；行程等慢流程每轮数十秒+用户阅读，90s 太短致确认过期）
+# 小容量挂起表（QA 卡 Q1-C）：单槽 `_suspend` 覆盖旧挂起的语义，注释里的理由是
+# 「确认条 UI 也只有一个」——**两个并行任务下就不成立**（I-051 商户补槽跨域劫持、
+# I-037① 无订单却进退款确认）。上限刻意小：挂起是**用户脑子里记得的东西**，
+# 三条已经是人能同时惦记的上限，再多只是把「猜错哪一条」换成「猜错更多条」。
+_PENDING_CAPACITY = 3
+# 焦点态：与挂起态分开存（每轮持久、完成不清，供跨轮指代消解）。TTL 比挂起态长。
+_FOCUS_PREFIX = "planner:focus:"
+# 评审 2026-09-19 F04 / W09：key TTL 是**活动状态**的寿命上限（活动路线 / 安全告警 /
+# 会话约束 / 候选台账，各自再按 ts 判活）；**短时引用**（对象 / 上个地点 / 上一轮意图…）
+# 的 5 分钟寿命不再靠 key 过期，由 `context.expire_short_term` 按 `focus_ts` 判。
+# 此前一个 300s 的 key 让「沉默五分钟」把活动路线和告警一起抹掉——缓存超时不是事实解除。
+_FOCUS_TTL = 7200  # 秒
+
+# 评审二轮 R8（2026-09-22）：**读写各三态**。此前「后端连不上」与「表是空的」都是 `[]`、
+# 「存不下」与「隐私删除写栅栏」都是 `False`——一次 Redis 故障因此被说成「当前没有待确认的操作」
+# 甚至「正在清除你的数据」，而用户正是靠这句话决定要不要重说一遍（同批 5 W17 给 memory 补的那三态）。
+PENDING_FOUND = "found"
+PENDING_EMPTY = "empty"
+PENDING_UNAVAILABLE = "unavailable"
+SAVE_OK = "saved"
+SAVE_UNAVAILABLE = "unavailable"
+SAVE_FENCED = "privacy_fenced"
+# 评审三轮 R3-05（2026-09-23）：**删除**也要说真话。此前 `clear` 是布尔：初次读到挂起、删除那一刻后端不可用时返回
+# False，调用方不看返回值照样宣布「已为您取消」、照样下发 `closed_operation_ids`——而那条挂起还在存储里，下一句「确认」
+# 就能把被取消的动作执行掉（`_settle_session` 同形：确认执行完没删掉 ⇒ 再说「确认」重复执行）。
+CLEAR_DELETED = "deleted"
+CLEAR_ABSENT = "already_absent"
+CLEAR_UNAVAILABLE = "unavailable"
+CLEAR_FENCED = "privacy_fenced"
+#: 删不掉的那条在**本进程**里的墓碑寿命（秒）。墓碑只挡这一个随机 operation_id，给宽一点不伤；挂起自身 TTL 缺省 300 s。
+_TOMBSTONE_TTL = 3600
+# CA2-09：消费一条挂起（确认 / 补槽 / 澄清选择 / 取消）的唯一入口 `claim_result` 的结局。
+# 只有 `claimed` 可以继续恢复派发；其余一律不执行（`already_claimed` = 另一个回合正在或已经消费它）。
+CLAIM_OK = "claimed"
+CLAIM_TAKEN = "already_claimed"
+CLAIM_ABSENT = "absent"
+CLAIM_UNAVAILABLE = "unavailable"
+CLAIM_FENCED = "privacy_fenced"
+_CLAIM_RETRIES = 3
+
+PERSONAL_DATA_TARGETS = (
+    {
+        "id": "planner_pending_session",
+        "storage_variants": (
+            "planner:sess:*",
+            "planner:sess-owner:*",
+            "planner:sess-owner-fence:*",
+            "planner:focus:*",
+        ),
+    },
+)
+
+_SAVE_OWNER_LUA = r"""
+if redis.call('EXISTS', KEYS[3]) == 1 then return 0 end
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+redis.call('SADD', KEYS[2], KEYS[1])
+local current_ttl = redis.call('TTL', KEYS[2])
+if current_ttl < tonumber(ARGV[2]) then
+  redis.call('EXPIRE', KEYS[2], ARGV[2])
+end
+return 1
+"""
+
+_SAVE_FOCUS_LUA = r"""
+if redis.call('EXISTS', KEYS[2]) == 1 then return 0 end
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+return 1
+"""
+
+_LOAD_OWNER_LUA = r"""
+if redis.call('EXISTS', KEYS[2]) == 1 then return false end
+return redis.call('GET', KEYS[1])
+"""
+
+
+class SessionStore:
+    def __init__(self, redis_url: str = ""):
+        self._url = redis_url or os.getenv("REDIS_URL", "")
+        self._r = None
+        # Keys include owner and session digests.  A caller-controlled
+        # session_id can never overwrite or address another owner's state.
+        self._mem: dict[str, tuple[SessionState, float]] = {}
+        self._focus_mem: dict[str, tuple[dict, float]] = {}
+        # owner -> expiry; successful privacy deletion retains this tombstone
+        # for at least the pending TTL to reject requests already in flight.
+        self._owner_fences: dict[str, float] = {}
+        # 评审三轮 R3-05：「<挂起表 key>|<operation_id>」→ 墓碑到期时刻。已被本进程关闭 / 消费、却没能从后端删掉的挂起：
+        # 读出口一律过滤掉（确认 / 续接复活不了），后端恢复后的下一次整表写把它真正删掉。**进程内**——`cloud-planner`
+        # 单副本；进程重启会丢墓碑，那一刻若后端刚好恢复、挂起未过期、用户又说「确认」，是记账的残余风险。
+        self._closing: dict[str, float] = {}
+
+    async def _redis(self):
+        if aioredis and self._url and self._r is None:
+            try:
+                self._r = aioredis.from_url(
+                    self._url, decode_responses=True, socket_timeout=3,
+                    socket_connect_timeout=3, socket_keepalive=True,
+                    health_check_interval=30, retry_on_timeout=True)
+                await self._r.ping()
+            except Exception as e:
+                logger.warning("Redis unavailable; configured store fails closed: %s", e)
+                self._r = None
+        return self._r
+
+    async def shared_backend_ready(self) -> bool:
+        """Whether this store can prove a cross-replica privacy deletion.
+
+        Process-local memory is valid for ordinary PoC continuation, but a
+        production privacy responder must not ACK from it: another replica
+        could still retain the same owner.  Callers use this read-only probe
+        before installing/responding on the shared delete bus.
+        """
+        if not self._url:
+            return False
+        r = await self._redis()
+        if r is None:
+            return False
+        try:
+            return bool(await r.ping())
+        except Exception as exc:
+            logger.warning(
+                "SessionStore shared backend unavailable: %s",
+                type(exc).__name__,
+            )
+            return False
+
+    @staticmethod
+    def _digest(value: str) -> str:
+        return hashlib.sha256(
+            str(value or "").encode("utf-8")
+        ).hexdigest()[:24]
+
+    @classmethod
+    def _session_key(cls, user_id: str, session_id: str) -> str:
+        return f"{_KEY_PREFIX}{cls._digest(user_id)}:{cls._digest(session_id)}"
+
+    @classmethod
+    def _focus_key(cls, user_id: str, session_id: str) -> str:
+        return f"{_FOCUS_PREFIX}{cls._digest(user_id)}:{cls._digest(session_id)}"
+
+    def _memory_tombstoned(self, user_id: str) -> bool:
+        expires = self._owner_fences.get(user_id, 0.0)
+        if expires > time.time():
+            return True
+        self._owner_fences.pop(user_id, None)
+        return False
+
+    def _close_locally(self, key: str, operation_id: str | None) -> None:
+        """给一条删不掉的挂起立**进程内墓碑**（R3-05）。没有 operation_id 的旧形态立不了。"""
+        if operation_id:
+            self._closing[f"{key}|{operation_id}"] = time.time() + _TOMBSTONE_TTL
+
+    def _closed_locally(self, key: str, operation_id: str) -> bool:
+        if not self._closing or not operation_id:
+            return False
+        tag = f"{key}|{operation_id}"
+        expires = self._closing.get(tag, 0.0)
+        if expires > time.time():
+            return True
+        self._closing.pop(tag, None)
+        return False
+
+    def _forget_closed(self, key: str) -> None:
+        """这张挂起表刚被整表重写过——写进去的是过滤后的条目，墓碑挡的那些已经真的不在了。"""
+        prefix = f"{key}|"
+        for tag in [t for t in self._closing if t.startswith(prefix)]:
+            self._closing.pop(tag, None)
+
+    async def load(self, session_id: str, *,
+                   owner_user_id: str = "",
+                   operation_id: str = "") -> SessionState | None:
+        """加载挂起的会话状态。TTL 过期返回 None。
+
+        `operation_id` 非空 = 按寻址键定位（QA 卡 Q1-B）：**对不上就返回 None，
+        绝不回落到「最近一条」**——静默回落正是 I-013「全局确认命中旧请求」
+        那个缺陷本身（同 B3「认不出就用默认值」）。
+        """
+        owner = str(owner_user_id or "").strip()
+        if not owner or not str(session_id or "").strip():
+            return None
+        entries = await self.load_all(session_id, owner_user_id=owner)
+        wanted = str(operation_id or "").strip()
+        if wanted:
+            return next(
+                (s for s in entries if s.operation_id == wanted), None)
+        return entries[-1] if entries else None
+
+    @staticmethod
+    def _decode(raw, owner: str) -> list[SessionState]:
+        """反序列化挂起表，顺序 = 挂起先后（最后一条最新）。
+
+        兼容上一版部署留下的**单对象**负载（滚动升级窗口里同一个 Redis 会同时
+        存在两种形状）——认不出的一律当空，绝不半解析出一个残缺状态。
+        """
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return []
+        items = data if isinstance(data, list) else [data]
+        out: list[SessionState] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("owner_user_id") or "").strip() != owner:
+                continue
+            try:
+                out.append(SessionState(**item))
+            except TypeError:
+                continue        # 未知字段 = 更新的写入方，这一条读不了就跳过
+        return out
+
+    @staticmethod
+    def _live(entries: list[SessionState]) -> list[SessionState]:
+        """逐条按自己的截止时刻过期（0 = 旧数据，不判过期，交给 key TTL）。"""
+        now = time.time()
+        return [s for s in entries
+                if not s.expires_at or s.expires_at > now]
+
+    async def load_all(self, session_id: str, *,
+                       owner_user_id: str = "") -> list[SessionState]:
+        """本会话全部未过期挂起，顺序 = 挂起先后（最后一条最新）。
+
+        ⚠ 返回 `[]` **分不清**「没有」与「读不到」——要分清的调用方用 `load_all_result`（R8）。
+        """
+        entries, _state = await self.load_all_result(
+            session_id, owner_user_id=owner_user_id)
+        return entries
+
+    async def load_all_result(self, session_id: str, *,
+                              owner_user_id: str = "") -> tuple[list[SessionState], str]:
+        """`(挂起列表, 读取状态)`；状态 ∈ `found / empty / unavailable`（评审二轮 R8）。
+
+        「配了 Redis 但拿不到连接」「读的时候抛了」= `unavailable`：调用方不得把它说成「没有」，
+        更不得据此给客户端下发 `closed_operation_ids`——那条挂起**可能还在**。
+        隐私删除栅栏命中仍报 `empty`：那不是故障，是数据确实不该被读到。
+        """
+        owner = str(owner_user_id or "").strip()
+        if not owner or not str(session_id or "").strip():
+            return [], PENDING_EMPTY
+        r = await self._redis()
+        if self._url and r is None:
+            return [], PENDING_UNAVAILABLE
+        key = self._session_key(owner, session_id)
+        if r:
+            try:
+                raw = await r.eval(
+                    _LOAD_OWNER_LUA, 2, key, self._owner_fence_key(owner))
+            except Exception as exc:
+                logger.warning("pending read failed (%s); reporting unavailable",
+                               type(exc).__name__)
+                return [], PENDING_UNAVAILABLE
+            entries = self._live(self._decode(raw, owner)) if raw else []
+            # R3-05：本进程关掉却没删掉的那些不算数（确认 / 续接都复活不了它）
+            entries = [s for s in entries if not self._closed_locally(key, s.operation_id)]
+            return entries, (PENDING_FOUND if entries else PENDING_EMPTY)
+
+        # 内存兜底
+        if self._memory_tombstoned(owner):
+            return [], PENDING_EMPTY
+        entry = self._mem.get(key)
+        if not entry:
+            return [], PENDING_EMPTY
+        entries, expire_ts = entry
+        if time.time() >= expire_ts:
+            del self._mem[key]
+            return [], PENDING_EMPTY
+        live = self._live([s for s in entries
+                           if str(s.owner_user_id or "").strip() == owner
+                           and not self._closed_locally(key, s.operation_id)])
+        return live, (PENDING_FOUND if live else PENDING_EMPTY)
+
+    async def save(self, session_id: str, state: SessionState) -> bool:
+        """Save owner-bound pending state, or fail closed."""
+        ok, _evicted = await self.save_pending(session_id, state)
+        return ok
+
+    async def save_pending(
+            self, session_id: str,
+            state: SessionState) -> tuple[bool, SessionState | None]:
+        """存一条挂起，返回 `(是否成功, 被 LRU 淘汰的那条或 None)`。
+
+        ⚠ `False` **分不清**「后端连不上」与「隐私删除写栅栏」——要分清的调用方用
+        `save_pending_result`（R8）。
+        """
+        status, evicted = await self.save_pending_result(session_id, state)
+        return status == SAVE_OK, evicted
+
+    async def save_pending_result(
+            self, session_id: str,
+            state: SessionState, *,
+            replaces: str = "") -> tuple[str, SessionState | None]:
+        """存一条挂起，返回 `(写入状态, 被 LRU 淘汰的那条或 None)`。
+
+        状态 ∈ `saved / unavailable / privacy_fenced`（评审二轮 R8）：连接故障不是隐私清理，
+        两者的话术与恢复出口都不一样；fail-closed 的那一半（不给确认条、不执行）两边都保留。
+
+        **淘汰必须回传**：调用方要拿它对用户说一句「刚才那条 X 已过期」——
+        静默丢弃就是 B3 那条「认不出就用默认值」的确认版（卡 §3-Q1 的 ⚠）。
+        同 `operation_id` 视为**替换**（补槽再次追问不占新槽位）。
+
+        `replaces`（评审三轮 R3-05）：本轮续接上来、已经消费掉的那条挂起——在**同一次整表写**里去掉它、加上新的。
+        此前调用方先 `clear` 旧条再存新条：存失败时两头落空（旧的删了、新的没存）。写失败时这条旧的立进程内墓碑
+        （它已被本轮消费，不能再被确认 / 续接一次）。
+        """
+        owner = str(state.owner_user_id or "").strip()
+        if not owner or not str(session_id or "").strip():
+            return SAVE_UNAVAILABLE, None
+        key = self._session_key(owner, session_id)
+        r = await self._redis()
+        if self._url and r is None:
+            self._close_locally(key, replaces)
+            return SAVE_UNAVAILABLE, None
+        ttl = state.ttl_seconds or _DEFAULT_TTL
+        if not state.expires_at:
+            state.expires_at = time.time() + ttl
+
+        entries, read_state = await self.load_all_result(
+            session_id, owner_user_id=owner)
+        if read_state == PENDING_UNAVAILABLE:
+            self._close_locally(key, replaces)
+            return SAVE_UNAVAILABLE, None
+        entries = [s for s in entries
+                   if s.operation_id not in (state.operation_id, replaces or None)]
+        entries.append(state)
+        evicted: SessionState | None = None
+        while len(entries) > _PENDING_CAPACITY:
+            evicted = entries.pop(0)
+
+        if self._memory_tombstoned(owner) if not r else False:
+            self._close_locally(key, replaces)
+            return SAVE_FENCED, None
+        try:
+            written = await self._write(r, key, owner, entries)
+        except Exception as exc:
+            logger.warning("pending write failed (%s); reporting unavailable",
+                           type(exc).__name__)
+            self._close_locally(key, replaces)
+            return SAVE_UNAVAILABLE, None
+        if not written:
+            # Redis 路径下 `_write` 只在 Lua 看到写栅栏时返回 0（其余失败都抛）。
+            self._close_locally(key, replaces)
+            return SAVE_FENCED, None
+        # 整表重写成功：读出来时已滤掉的墓碑条这次没写回去，它们真的不在了
+        self._forget_closed(key)
+        return SAVE_OK, evicted
+
+    async def _write(self, r, key: str, owner: str,
+                     entries: list[SessionState]) -> bool:
+        """整表落盘。key TTL 取各条剩余寿命的最大值（逐条过期在读侧兜住）。"""
+        if not entries:
+            if r:
+                pipe = r.pipeline(transaction=True)
+                pipe.delete(key)
+                pipe.srem(self._owner_key(owner), key)
+                await pipe.execute()
+            else:
+                self._mem.pop(key, None)
+            return True
+        now = time.time()
+        ttl = max(int(s.expires_at - now) for s in entries)
+        ttl = max(ttl, 1)
+        if r:
+            data = json.dumps([asdict(s) for s in entries],
+                              ensure_ascii=False, default=str)
+            saved = await r.eval(
+                _SAVE_OWNER_LUA, 3, key, self._owner_key(owner),
+                self._owner_fence_key(owner), data, ttl)
+            return int(saved or 0) == 1
+        if self._memory_tombstoned(owner):
+            return False
+        self._mem[key] = (entries, now + ttl)
+        return True
+
+    async def claim_result(self, session_id: str, *, owner_user_id: str,
+                           operation_id: str, token: str) -> tuple[str, SessionState | None]:
+        """CA2-09：原子认领一条挂起，返回 `(结局, 认领时看到的那条)`。
+
+        两个回合同时续接同一条挂起时只有一个拿到 `claimed`；输的一方拿到 `already_claimed`
+        和对方已写下的那条（据此说「正在处理」），**绝不再恢复派发**。Redis 用 WATCH（挂起表 + owner
+        隐私栅栏）乐观事务，被并发改动就重读重试；内存兜底在一个事件循环内同步比较并写入。
+        认领不在挂起过期前失效，认领者收尾照旧按 operation_id 删除。
+        """
+        owner = str(owner_user_id or "").strip()
+        wanted = str(operation_id or "").strip()
+        # 空寻址键 = Q1-B 之前形状的旧记录：同会话至多一条（同键互相替换），按精确相等认领它
+        if not owner or not str(session_id or "").strip() or not token:
+            return CLAIM_ABSENT, None
+        key = self._session_key(owner, session_id)
+        r = await self._redis()
+        if self._url and r is None:
+            return CLAIM_UNAVAILABLE, None
+        if not r:
+            if self._memory_tombstoned(owner):
+                return CLAIM_FENCED, None
+            entry = self._mem.get(key)
+            if not entry or time.time() >= entry[1]:
+                return CLAIM_ABSENT, None
+            live = self._live([s for s in entry[0]
+                               if str(s.owner_user_id or "").strip() == owner
+                               and not self._closed_locally(key, s.operation_id)])
+            target = next((s for s in live if s.operation_id == wanted), None)
+            if target is None:
+                return CLAIM_ABSENT, None
+            if target.claimed_by:
+                return CLAIM_TAKEN, target
+            target.claimed_by, target.claimed_at = token, time.time()
+            return CLAIM_OK, target
+        try:
+            from redis.exceptions import WatchError
+        except ImportError:  # pragma: no cover - redis is a cloud dependency
+            WatchError = RuntimeError
+        fence = self._owner_fence_key(owner)
+        for _attempt in range(_CLAIM_RETRIES):
+            try:
+                async with r.pipeline(transaction=True) as pipe:
+                    await pipe.watch(key, fence)
+                    if await pipe.exists(fence):
+                        return CLAIM_FENCED, None
+                    raw = await pipe.get(key)
+                    entries = [s for s in (self._live(self._decode(raw, owner)) if raw else [])
+                               if not self._closed_locally(key, s.operation_id)]
+                    target = next((s for s in entries if s.operation_id == wanted), None)
+                    if target is None:
+                        return CLAIM_ABSENT, None
+                    if target.claimed_by:
+                        return CLAIM_TAKEN, target
+                    now = time.time()
+                    target.claimed_by, target.claimed_at = token, now
+                    ttl = max(1, max(int(s.expires_at - now) for s in entries))
+                    pipe.multi()
+                    pipe.set(key, json.dumps([asdict(s) for s in entries],
+                                             ensure_ascii=False, default=str), ex=ttl)
+                    await pipe.execute()
+                    return CLAIM_OK, target
+            except WatchError:
+                continue
+            except Exception as exc:
+                logger.warning("pending claim failed (%s); reporting unavailable",
+                               type(exc).__name__)
+                return CLAIM_UNAVAILABLE, None
+        logger.warning("pending claim kept conflicting; reporting unavailable")
+        return CLAIM_UNAVAILABLE, None
+
+    async def clear(self, session_id: str, *, owner_user_id: str = "",
+                    operation_id: str | None = None) -> bool:
+        """Clear this owner's pending state without clearing focus.
+
+        `operation_id=None` = 清空整张挂起表（隐私删除/整会话作废）；
+        给了 id = **只清那一条**，其余挂起原样保留（Q1-C）。
+
+        ⚠ 布尔**分不清**「删掉了」「本来就不在」「后端删不掉」——要分清的调用方用 `clear_result`（R3-05）。
+        """
+        return await self.clear_result(
+            session_id, owner_user_id=owner_user_id,
+            operation_id=operation_id) == CLEAR_DELETED
+
+    async def clear_result(self, session_id: str, *, owner_user_id: str = "",
+                           operation_id: str | None = None) -> str:
+        """删除挂起，返回 `deleted / already_absent / unavailable / privacy_fenced`（评审三轮 R3-05）。
+
+        给了 id 却删不掉（后端不可用 / 写抛错——含「写已生效、回执丢失」）⇒ `unavailable`，并给这条立**进程内墓碑**：
+        本进程的读出口从此看不到它，确认 / 续接复活不了；后端恢复后的下一次整表写把它真正删掉。
+        「能证明的」只有这些：调用方据此决定回执怎么说，不替后端宣布删掉了。
+        """
+        owner = str(owner_user_id or "").strip()
+        if not owner or not str(session_id or "").strip():
+            return CLEAR_ABSENT                  # 空 owner 下什么都存不进去，也就没有可删的
+        key = self._session_key(owner, session_id)
+        r = await self._redis()
+        if self._url and r is None:
+            self._close_locally(key, operation_id)
+            return CLEAR_UNAVAILABLE
+        if operation_id is None:
+            try:
+                if r:
+                    pipe = r.pipeline(transaction=True)
+                    pipe.delete(key)
+                    pipe.srem(self._owner_key(owner), key)
+                    result = await pipe.execute()
+                    deleted = bool(result and int(result[0] or 0))
+                else:
+                    deleted = self._mem.pop(key, None) is not None
+            except Exception as exc:
+                logger.warning("pending table delete failed (%s); reporting unavailable",
+                               type(exc).__name__)
+                return CLEAR_UNAVAILABLE
+            self._forget_closed(key)
+            return CLEAR_DELETED if deleted else CLEAR_ABSENT
+
+        entries, read_state = await self.load_all_result(session_id, owner_user_id=owner)
+        if read_state == PENDING_UNAVAILABLE:
+            self._close_locally(key, operation_id)
+            return CLEAR_UNAVAILABLE
+        kept = [s for s in entries if s.operation_id != operation_id]
+        if len(kept) == len(entries):
+            return CLEAR_ABSENT                  # 不在（含本进程早已立墓碑的那条）
+        try:
+            written = await self._write(r, key, owner, kept)
+        except Exception as exc:
+            logger.warning("pending delete failed (%s); tombstoned locally, reporting unavailable",
+                           type(exc).__name__)
+            self._close_locally(key, operation_id)
+            return CLEAR_UNAVAILABLE
+        if not written:
+            self._close_locally(key, operation_id)
+            return CLEAR_FENCED
+        self._forget_closed(key)
+        return CLEAR_DELETED
+
+    @staticmethod
+    def _owner_key(user_id: str) -> str:
+        return _OWNER_PREFIX + SessionStore._digest(user_id)
+
+    @staticmethod
+    def _owner_fence_key(user_id: str) -> str:
+        return _OWNER_FENCE_PREFIX + SessionStore._digest(user_id)
+
+    async def _scan_owner_records(self, r, user_id: str):
+        """Return an attributable snapshot for privacy deletion.
+
+        Any malformed or ownerless legacy value makes the proof incomplete.
+        Such data is never loaded and the delete remains retryable until its
+        short TTL expires.
+        """
+        session_targets: list[str] = []
+        focus_targets: list[str] = []
+        max_ttl = _OWNER_FENCE_TTL
+        for prefix, owner_field, targets in (
+            (_KEY_PREFIX, "owner_user_id", session_targets),
+            (_FOCUS_PREFIX, "_owner_user_id", focus_targets),
+        ):
+            cursor: int | str = 0
+            while True:
+                cursor, keys = await r.scan(
+                    cursor=cursor, match=prefix + "*", count=128)
+                for key in keys:
+                    raw = await r.get(key)
+                    if not raw:
+                        continue
+                    try:
+                        payload = json.loads(raw)
+                        # 挂起表是**一个 list**（Q1-C）；focus 仍是单对象，旧部署
+                        # 留下的挂起也可能是单对象。三种形状都要能归属到 owner，
+                        # 否则隐私删除会因为「证据不完整」永远失败。
+                        items = (payload if isinstance(payload, list)
+                                 else [payload])
+                        owners = {str(it.get(owner_field) or "").strip()
+                                  for it in items}
+                    except (AttributeError, TypeError, ValueError,
+                            json.JSONDecodeError):
+                        return False, [], [], max_ttl
+                    if not items or len(owners) != 1:
+                        return False, [], [], max_ttl   # 混装 owner = 归属不清
+                    owner = owners.pop()
+                    if not owner:
+                        return False, [], [], max_ttl
+                    if owner == user_id:
+                        targets.append(str(key))
+                        ttl = int(await r.ttl(key))
+                        if ttl > max_ttl:
+                            max_ttl = ttl
+                if int(cursor) == 0:
+                    break
+        return True, session_targets, focus_targets, max_ttl
+
+    async def delete_owner(self, user_id: str) -> bool:
+        """Delete all pending/focus state and retain a write tombstone."""
+        user_id = str(user_id or "").strip()
+        if not user_id:
+            return False
+
+        # Always purge process-local fallback first.  Even when Redis is the
+        # authoritative backend and unavailable, these copies must not revive.
+        # The fence covers the longest remaining record lifetime, otherwise a
+        # request that started before deletion could re-save a 600s record once
+        # a fixed 300s tombstone expires.
+        memory_fence_expires = time.time() + _OWNER_FENCE_TTL
+        for key, (entries, expires) in list(self._mem.items()):
+            # 一个 key 下是一张挂起表（Q1-C）；同键必然同 owner（键含 owner 摘要），
+            # 但仍逐条比对——归属判定不建立在「键长这样」这个约定上。
+            if any(str(s.owner_user_id or "").strip() == user_id
+                   for s in entries):
+                memory_fence_expires = max(memory_fence_expires, expires)
+                self._mem.pop(key, None)
+        for key, (focus, expires) in list(self._focus_mem.items()):
+            if str(focus.get("_owner_user_id") or "").strip() == user_id:
+                memory_fence_expires = max(memory_fence_expires, expires)
+                self._focus_mem.pop(key, None)
+        self._owner_fences[user_id] = max(
+            self._owner_fences.get(user_id, 0.0),
+            memory_fence_expires,
+        )
+
+        r = await self._redis()
+        if self._url and r is None:
+            return False
+        if not r:
+            return True
+
+        owner_key = self._owner_key(user_id)
+        fence_key = self._owner_fence_key(user_id)
+        try:
+            fence = await r.get(fence_key)
+            if fence == _DELETED:
+                ok, sessions, focuses, _ = await self._scan_owner_records(
+                    r, user_id)
+                if not ok or sessions or focuses or await r.exists(owner_key):
+                    return False
+                tombstone_ttl = int(await r.ttl(fence_key))
+                if tombstone_ttl < _OWNER_FENCE_TTL:
+                    await r.expire(fence_key, _OWNER_FENCE_TTL)
+                return True
+            if fence:
+                return False
+            if not await r.set(
+                    fence_key, _DELETING, nx=True, ex=_OWNER_FENCE_TTL):
+                return False
+
+            ok, sessions, focuses, tombstone_ttl = (
+                await self._scan_owner_records(r, user_id))
+            if not ok:
+                return False
+            pipe = r.pipeline(transaction=True)
+            if sessions:
+                pipe.delete(*sessions)
+            if focuses:
+                pipe.delete(*focuses)
+            pipe.delete(owner_key)
+            await pipe.execute()
+
+            ok, sessions, focuses, _ = await self._scan_owner_records(
+                r, user_id)
+            if (not ok or sessions or focuses
+                    or await r.exists(owner_key)):
+                return False
+            await r.set(
+                fence_key, _DELETED,
+                ex=max(_OWNER_FENCE_TTL, int(tombstone_ttl)),
+            )
+            return True
+        except Exception as exc:
+            logger.warning(
+                "SessionStore owner delete failed: %s", type(exc).__name__)
+            return False
+
+    # Focus state is owner-bound and independently TTL'd.
+
+    async def load_focus(self, session_id: str, *,
+                         owner_user_id: str = "") -> dict | None:
+        """加载会话焦点（dict）。TTL 过期返回 None。"""
+        owner = str(owner_user_id or "").strip()
+        if not owner or not str(session_id or "").strip():
+            return None
+        r = await self._redis()
+        if self._url and r is None:
+            return None
+        key = self._focus_key(owner, session_id)
+        if r:
+            raw = await r.eval(
+                _LOAD_OWNER_LUA, 2, key, self._owner_fence_key(owner))
+            try:
+                value = json.loads(raw) if raw else None
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return None
+            if not isinstance(value, dict):
+                return None
+            if str(value.get("_owner_user_id") or "").strip() != owner:
+                return None
+            return {k: v for k, v in value.items()
+                    if k != "_owner_user_id"}
+        if self._memory_tombstoned(owner):
+            return None
+        entry = self._focus_mem.get(key)
+        if entry:
+            data, expire_ts = entry
+            if (time.time() < expire_ts
+                    and str(data.get("_owner_user_id") or "").strip() == owner):
+                return {k: v for k, v in data.items()
+                        if k != "_owner_user_id"}
+            del self._focus_mem[key]
+        return None
+
+    async def save_focus(self, session_id: str, focus: dict, *,
+                         owner_user_id: str = "") -> bool:
+        """保存会话焦点（dict）。每轮成功后更新；独立 _FOCUS_TTL。"""
+        owner = str(owner_user_id or "").strip()
+        if not owner or not str(session_id or "").strip():
+            return False
+        r = await self._redis()
+        if self._url and r is None:
+            return False
+        key = self._focus_key(owner, session_id)
+        # Store owner beside the focus payload so user-all deletion can remove
+        # this second planner session family as well.
+        value = {**dict(focus or {}), "_owner_user_id": owner}
+        data = json.dumps(value, ensure_ascii=False, default=str)
+        if r:
+            saved = await r.eval(
+                _SAVE_FOCUS_LUA, 2, key,
+                self._owner_fence_key(owner), data, _FOCUS_TTL)
+            if int(saved or 0) != 1:
+                return False
+        else:
+            if self._memory_tombstoned(owner):
+                return False
+            self._focus_mem[key] = (value, time.time() + _FOCUS_TTL)
+        return True

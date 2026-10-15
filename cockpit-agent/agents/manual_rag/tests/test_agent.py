@@ -1,0 +1,41 @@
+"""manual-rag 契约测试。验证 RAG 检索命中 + 生成（mock LLM）。"""
+import asyncio
+from unittest.mock import AsyncMock
+
+import pytest
+
+from agents._sdk.testing import run_handle
+from agents.manual_rag.src.agent import ManualRagAgent
+
+
+@pytest.fixture(autouse=True)
+def _mock_knowledge(monkeypatch):
+    monkeypatch.setenv("KNOWLEDGE_VENDOR", "mock")
+    monkeypatch.delenv("REQUIRE_REAL_PROVIDERS", raising=False)
+
+
+def test_query_retrieves_and_answers():
+    agent = ManualRagAgent()
+    agent.llm.complete = AsyncMock(return_value="推荐胎压为前后轮 2.4–2.5 bar。")
+    res = asyncio.run(run_handle(agent, "manual.query", raw_text="胎压多少正常"))
+    assert res.status == "ok"
+    assert res.ui_card["type"] == "manual"
+    # 检索应命中"胎压"相关内容（source 是章节名，chunks 内容含关键词）
+    sources = res.ui_card.get("sources", [])
+    chunks = res.ui_card.get("chunks", [])
+    assert len(sources) > 0, "sources 不应为空"
+    assert any("胎压" in c.get("content", "") for c in chunks), \
+        "chunks 内容应含「胎压」关键词"
+
+
+def test_query_missing_question_asks():
+    """只回答的能力（见下一条）问一句也是普通回答：修前这里钉的是 need_slot，执行器会把它判成 response_only 契约违规。"""
+    res = asyncio.run(run_handle(ManualRagAgent(), "manual.query", raw_text=""))
+    assert res.status == "ok" and not res.actions
+    assert res.speech == "您想了解车辆的哪方面？"
+
+
+def test_manual_query_is_declared_response_only():
+    capability = ManualRagAgent().manifest.capabilities[0]
+    assert capability.intent == "manual.query"
+    assert capability.response_only is True

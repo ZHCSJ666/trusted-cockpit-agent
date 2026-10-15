@@ -1,0 +1,702 @@
+{
+  "snapshots": [
+    {
+      "category": "cafe",
+      "fetched_at": "2026-10-11T15:56:52.793321+00:00",
+      "source_url": "https://overpass-api.de/api/interpreter",
+      "query": "[out:json][timeout:10];nwr[\"amenity\"=\"cafe\"](30.2441,120.1151,30.3041,120.1951);out center 40;",
+      "response": {
+        "version": 0.6,
+        "generator": "Overpass API 0.7.62.11 87bfad18",
+        "osm3s": {
+          "timestamp_osm_base": "2026-10-11T15:55:30Z",
+          "copyright": "The data included in this document is from www.openstreetmap.org. The data is made available under ODbL."
+        },
+        "elements": [
+          {
+            "type": "node",
+            "id": 26488397,
+            "lat": 30.2712537,
+            "lon": 120.1358874,
+            "tags": {
+              "amenity": "cafe",
+              "brand": "星巴克",
+              "brand:en": "Starbucks",
+              "brand:wikidata": "Q37158",
+              "brand:zh": "星巴克",
+              "cuisine": "coffee_shop",
+              "name": "星巴克",
+              "name:en": "Starbucks",
+              "name:zh": "星巴克",
+              "name:zh-Latn-pinyin": "Xīngbākè Kāfēi",
+              "takeaway": "yes"
+            }
+          },
+          {
+            "type": "node",
+            "id": 32751743,
+            "lat": 30.2721603,
+            "lon": 120.1575123,
+            "tags": {
+              "amenity": "cafe",
+              "brand": "星巴克",
+              "brand:en": "Starbucks",
+              "brand:wikidata": "Q37158",
+              "brand:wikipedia": "zh:星巴克",
+              "brand:zh": "星巴克",
+              "cuisine": "coffee_shop",
+              "name": "星巴克",
+              "name:en": "Starbucks",
+              "name:zh": "星巴克",
+              "name:zh-Latn-pinyin": "Xīngbākè Kāfēi",
+              "takeaway": "yes"
+            }
+          },
+          {
+            "type": "node",
+            "id": 33616632,
+            "lat": 30.2609736,
+            "lon": 120.1676055,
+            "tags": {
+              "amenity": "cafe",
+              "brand": "星巴克",
+              "brand:en": "Starbucks",
+              "brand:wikidata": "Q37158",
+              "brand:wikipedia": "en:Starbucks",
+              "brand:zh": "星巴克",
+              "cuisine": "coffee_shop",
+              "name": "星巴克",
+              "name:de": "Starbucks coffee",
+              "name:en": "Starbucks",
+              "name:zh": "星巴克",
+              "name:zh-Latn-pinyin": "Xīngbākè Kāfēi",
+              "official_name": "Starbucks Coffee",
+              "takeaway": "yes"
+            }
+          },
+          {
+            "type": "node",
+            "id": 33616861,
+            "lat": 30.2785515,
+            "lon": 120.12057,
+            "tags": {
+              "amenity": "cafe",
+              "name": "Fifth Avenue"
+            }
+          },
+          {
+            "type": "node",
+            "id": 34111073,
+            "lat": 30.2863743,
+            "lon": 120.1479614,
+            "tags": {
+              "amenity": "cafe",
+              "brand": "星巴克",
+              "brand:en": "Starbucks",
+              "brand:wikidata": "Q37158",
+              "brand:wikipedia": "zh:星巴克",
+              "brand:zh": "星巴克",
+              "cuisine": "coffee_shop",
+              "name": "星巴克",
+              "name:en": "Starbucks",
+              "name:zh": "星巴克",
+              "name:zh-Latn-pinyin": "Xīngbākè Kāfēi",
+              "takeaway": "yes"
+            }
+          },
+          {
+            "type": "node",
+            "id": 206180092,
+            "lat": 30.2697047,
+            "lon": 120.164455,
+            "tags": {
+              "addr:city": "杭州市",
+              "addr:district": "拱墅区",
+              "addr:province": "浙江省",
+              "addr:street": "屏风街",
+              "amenity": "cafe",
+              "name": "光线咖啡",
+              "name:en": "L96 Cafe",
+              "name:zh": "光线咖啡",
+              "name:zh-Latn-pinyin": "Guāngxiàn Kāfēi"
+            }
+          },
+          {
+            "type": "node",
+            "id": 236863989,
+            "lat": 30.2941659,
+            "lon": 120.170008,
+            "tags": {
+              "amenity": "cafe",
+              "name": "两岸咖啡",
+              "name:en": "C. Straits Cafe",
+              "name:zh": "两岸咖啡",
+              "name:zh-Latn-pinyin": "Liang'an Kafei"
+            }
+          },
+          {
+            "type": "node",
+            "id": 236864055,
+            "lat": 30.2791196,
+            "lon": 120.1216539,
+            "tags": {
+              "amenity": "cafe",
+              "name": "两岸咖啡",
+              "name:en": "C. Straits Cafe",
+              "name:zh": "两岸咖啡",
+              "name:zh-Latn-pinyin": "Liang'an Kafei"
+            }
+          },
+          {
+            "type": "node",
+            "id": 243682016,
+            "lat": 30.2614563,
+            "lon": 120.1674624,
+            "tags": {
+              "amenity": "cafe",
+              "name": "两岸咖啡",
+              "name:en": "C. Straits Cafe",
+              "name:zh": "两岸咖啡",
+              "name:zh-Latn-pinyin": "Liang'an Kafei"
+            }
+          },
+          {
+            "type": "node",
+            "id": 269879490,
+            "lat": 30.2831511,
+            "lon": 120.1604392,
+            "tags": {
+              "amenity": "cafe",
+              "name": "两岸咖啡",
+              "name:en": "C. Straits Cafe",
+              "name:zh": "两岸咖啡",
+              "name:zh-Latn-pinyin": "Liang'an Kafei",
+              "source": "survey"
+            }
+          },
+          {
+            "type": "node",
+            "id": 274666965,
+            "lat": 30.2543236,
+            "lon": 120.1277631,
+            "tags": {
+              "amenity": "cafe",
+              "brand": "瑞幸咖啡",
+              "brand:en": "Luckin Coffee",
+              "brand:wikidata": "Q56811344",
+              "brand:zh": "瑞幸咖啡",
+              "cuisine": "coffee_shop",
+              "name": "瑞幸咖啡",
+              "name:en": "Luckin Coffee",
+              "name:zh": "瑞幸咖啡",
+              "takeaway": "yes"
+            }
+          },
+          {
+            "type": "node",
+            "id": 332056013,
+            "lat": 30.2891734,
+            "lon": 120.1411926,
+            "tags": {
+              "amenity": "cafe",
+              "name": "两岸咖啡",
+              "name:en": "C. Straits Cafe",
+              "name:zh": "两岸咖啡",
+              "name:zh-Latn-pinyin": "Liang'an Kafei"
+            }
+          },
+          {
+            "type": "node",
+            "id": 353886374,
+            "lat": 30.245992,
+            "lon": 120.1603964,
+            "tags": {
+              "amenity": "cafe",
+              "brand": "星巴克",
+              "brand:en": "Starbucks",
+              "brand:wikidata": "Q37158",
+              "brand:wikipedia": "en:Starbucks",
+              "brand:zh": "星巴克",
+              "cuisine": "coffee_shop",
+              "name": "星巴克",
+              "name:en": "Starbucks",
+              "name:zh": "星巴克",
+              "name:zh-Latn-pinyin": "Xīngbākè Kāfēi",
+              "official_name": "Starbucks Coffee",
+              "takeaway": "yes"
+            }
+          },
+          {
+            "type": "node",
+            "id": 1563209637,
+            "lat": 30.2498757,
+            "lon": 120.1546721,
+            "tags": {
+              "amenity": "cafe",
+              "brand": "Costa咖啡",
+              "brand:en": "Costa",
+              "brand:wikidata": "Q608845",
+              "brand:wikipedia": "en:Costa Coffee",
+              "brand:zh": "Costa咖啡",
+              "cuisine": "coffee_shop",
+              "name": "Costa咖啡",
+              "name:de": "Costa Coffee (Xihu Tiandi)",
+              "name:en": "Costa",
+              "name:zh": "Costa咖啡",
+              "opening_hours": "Mo-Su 09:00-23:00",
+              "outdoor_seating": "yes",
+              "phone": "+86 571 8810 9983",
+              "takeaway": "yes"
+            }
+          },
+          {
+            "type": "node",
+            "id": 2503521197,
+            "lat": 30.2764502,
+            "lon": 120.116702,
+            "tags": {
+              "addr:city": "杭州市",
+              "addr:district": "西湖区",
+              "addr:housenumber": "26-1",
+              "addr:province": "浙江省",
+              "addr:street": "塘苗路",
+              "amenity": "cafe",
+              "cuisine": "coffee_shop;dessert",
+              "name": "之间咖啡"
+            }
+          },
+          {
+            "type": "node",
+            "id": 3396953480,
+            "lat": 30.2844677,
+            "lon": 120.1192705,
+            "tags": {
+              "addr:city": "hangzhou",
+              "addr:housenumber": "333号",
+              "addr:postcode": "310012",
+              "addr:street": "文二路",
+              "amenity": "cafe",
+              "brand": "星巴克",
+              "brand:en": "Starbucks",
+              "brand:wikidata": "Q37158",
+              "brand:wikipedia": "zh:星巴克",
+              "brand:zh": "星巴克",
+              "cuisine": "coffee_shop",
+              "internet_access": "yes",
+              "name": "星巴克",
+              "name:de": "Starbucks Coffee",
+              "name:en": "Starbucks",
+              "name:zh": "星巴克",
+              "opening_hours": "07:00-22:00",
+              "smoking": "no",
+              "takeaway": "yes"
+            }
+          },
+          {
+            "type": "node",
+            "id": 3522188774,
+            "lat": 30.2523237,
+            "lon": 120.1635693,
+            "tags": {
+              "amenity": "cafe",
+              "cuisine": "coffee_shop",
+              "internet_access": "yes",
+              "name": "悦览树（新华书店咖啡馆）",
+              "name:en": "Yueshu Tree (Xinhua Bookstore Cafe)"
+            }
+          },
+          {
+            "type": "node",
+            "id": 4097719285,
+            "lat": 30.2749058,
+            "lon": 120.1201661,
+            "tags": {
+              "addr:city": "Hangzhou",
+              "addr:postcode": "310000",
+              "addr:street": "WenSanLu DianZi XinXi JieQu, Xihu",
+              "amenity": "cafe",
+              "brand": "星巴克",
+              "brand:en": "Starbucks",
+              "brand:wikidata": "Q37158",
+              "brand:zh": "星巴克",
+              "cuisine": "coffee_shop",
+              "name": "星巴克",
+              "name:en": "Starbucks",
+              "name:zh": "星巴克",
+              "takeaway": "yes"
+            }
+          },
+          {
+            "type": "node",
+            "id": 4427428604,
+            "lat": 30.244149,
+            "lon": 120.15412,
+            "tags": {
+              "addr:housenumber": "206",
+              "addr:street": "南山路",
+              "amenity": "cafe",
+              "cuisine": "italian;mediterranean",
+              "name": "BERNINI",
+              "opening_hours": "Mo-Su 11:00-21:00"
+            }
+          },
+          {
+            "type": "node",
+            "id": 4493630190,
+            "lat": 30.2490396,
+            "lon": 120.1554132,
+            "tags": {
+              "amenity": "cafe",
+              "brand": "星巴克",
+              "brand:en": "Starbucks",
+              "brand:wikidata": "Q37158",
+              "brand:wikipedia": "en:Starbucks",
+              "brand:zh": "星巴克",
+              "cuisine": "coffee_shop",
+              "name": "星巴克",
+              "name:de": "Starbucks coffee",
+              "name:en": "Starbucks",
+              "name:zh": "星巴克",
+              "official_name": "Starbucks Coffee",
+              "takeaway": "yes"
+            }
+          },
+          {
+            "type": "node",
+            "id": 4524646590,
+            "lat": 30.2619986,
+            "lon": 120.1473817,
+            "tags": {
+              "amenity": "cafe",
+              "brand": "星巴克",
+              "brand:en": "Starbucks",
+              "brand:wikidata": "Q37158",
+              "brand:wikipedia": "en:Starbucks",
+              "brand:zh": "星巴克",
+              "cuisine": "coffee_shop",
+              "name": "星巴克",
+              "name:en": "Starbucks",
+              "name:zh": "星巴克",
+              "official_name": "Starbucks Coffee",
+              "takeaway": "yes"
+            }
+          },
+          {
+            "type": "node",
+            "id": 4691921496,
+            "lat": 30.2531978,
+            "lon": 120.1400208,
+            "tags": {
+              "amenity": "cafe",
+              "brand": "星巴克",
+              "brand:en": "Starbucks",
+              "brand:wikidata": "Q37158",
+              "brand:zh": "星巴克",
+              "cuisine": "coffee_shop",
+              "name": "星巴克",
+              "name:en": "Starbucks",
+              "name:zh": "星巴克",
+              "takeaway": "yes"
+            }
+          },
+          {
+            "type": "node",
+            "id": 5032271804,
+            "lat": 30.2797033,
+            "lon": 120.1511292,
+            "tags": {
+              "amenity": "cafe",
+              "brand": "星巴克",
+              "brand:en": "Starbucks",
+              "brand:wikidata": "Q37158",
+              "brand:wikipedia": "zh:星巴克",
+              "brand:zh": "星巴克",
+              "cuisine": "coffee_shop",
+              "name": "星巴克",
+              "name:en": "Starbucks",
+              "name:ja": "スターバックス",
+              "name:zh": "星巴克",
+              "takeaway": "yes"
+            }
+          },
+          {
+            "type": "node",
+            "id": 5072902121,
+            "lat": 30.2748301,
+            "lon": 120.1515297,
+            "tags": {
+              "addr:housenumber": "309",
+              "addr:street": "环城北路",
+              "amenity": "cafe",
+              "cuisine": "coffee_shop",
+              "name:en": "Muxin Coffee"
+            }
+          },
+          {
+            "type": "node",
+            "id": 5074773723,
+            "lat": 30.2776178,
+            "lon": 120.152009,
+            "tags": {
+              "addr:housenumber": "102",
+              "addr:street": "密渡桥路",
+              "amenity": "cafe",
+              "cuisine": "coffee_shop",
+              "internet_access": "wlan",
+              "name:en": "Finite Coffee"
+            }
+          },
+          {
+            "type": "node",
+            "id": 5110686489,
+            "lat": 30.2606935,
+            "lon": 120.1715505,
+            "tags": {
+              "amenity": "cafe",
+              "brand": "星巴克",
+              "brand:en": "Starbucks",
+              "brand:wikidata": "Q37158",
+              "brand:wikipedia": "zh:星巴克",
+              "brand:zh": "星巴克",
+              "cuisine": "coffee_shop",
+              "name": "星巴克",
+              "name:en": "Starbucks",
+              "name:zh": "星巴克",
+              "takeaway": "yes"
+            }
+          },
+          {
+            "type": "node",
+            "id": 5142255227,
+            "lat": 30.2497618,
+            "lon": 120.1289617,
+            "tags": {
+              "amenity": "cafe",
+              "name:en": "Tea house"
+            }
+          },
+          {
+            "type": "node",
+            "id": 5219054721,
+            "lat": 30.2812303,
+            "lon": 120.1725938,
+            "tags": {
+              "addr:street": "朝晖路",
+              "amenity": "cafe",
+              "brand": "星巴克",
+              "brand:en": "Starbucks",
+              "brand:wikidata": "Q37158",
+              "brand:wikipedia": "en:Starbucks",
+              "brand:zh": "星巴克",
+              "cuisine": "coffee_shop",
+              "internet_access": "yes",
+              "name": "星巴克",
+              "name:en": "Starbucks",
+              "name:ja": "スターバックス",
+              "name:zh": "星巴克",
+              "official_name": "Starbucks Coffee",
+              "opening_hours": "Mo-Su 09:00-21:00",
+              "smoking": "outside",
+              "takeaway": "yes"
+            }
+          },
+          {
+            "type": "node",
+            "id": 5600185646,
+            "lat": 30.2797951,
+            "lon": 120.1580055,
+            "tags": {
+              "amenity": "cafe",
+              "brand": "星巴克",
+              "brand:en": "Starbucks",
+              "brand:wikidata": "Q37158",
+              "brand:wikipedia": "zh:星巴克",
+              "brand:zh": "星巴克",
+              "cuisine": "coffee_shop",
+              "name": "星巴克",
+              "name:de": "Starbucks coffee",
+              "name:en": "Starbucks",
+              "name:ja": "スターバックス",
+              "name:zh": "星巴克",
+              "takeaway": "yes"
+            }
+          },
+          {
+            "type": "node",
+            "id": 5637450279,
+            "lat": 30.2467521,
+            "lon": 120.16642,
+            "tags": {
+              "addr:city": "杭州市",
+              "addr:district": "上城区",
+              "addr:housenumber": "3",
+              "addr:province": "浙江省",
+              "addr:street": "保佑桥西弄",
+              "amenity": "cafe",
+              "internet_access": "wlan",
+              "internet_access:fee": "no",
+              "name": "简诺咖啡(南宋御街店)",
+              "outdoor_seating": "no",
+              "smoking": "no"
+            }
+          },
+          {
+            "type": "node",
+            "id": 5980820076,
+            "lat": 30.2724597,
+            "lon": 120.1192438,
+            "tags": {
+              "amenity": "cafe",
+              "brand": "1点点",
+              "brand:en": "ALittle Tea",
+              "brand:wikidata": "Q136345714",
+              "brand:zh": "1点点",
+              "brand:zh-Hans": "1点点",
+              "brand:zh-Hant": "1點點",
+              "cuisine": "bubble_tea",
+              "name": "1点点",
+              "name:en": "ALittle Tea",
+              "name:zh": "1点点",
+              "name:zh-Hans": "1点点",
+              "name:zh-Hant": "1點點",
+              "shop": "beverages",
+              "takeaway": "yes"
+            }
+          },
+          {
+            "type": "node",
+            "id": 5980820333,
+            "lat": 30.2726986,
+            "lon": 120.1188115,
+            "tags": {
+              "amenity": "cafe",
+              "name": "Hola"
+            }
+          },
+          {
+            "type": "node",
+            "id": 6017684836,
+            "lat": 30.2542981,
+            "lon": 120.1278832,
+            "tags": {
+              "amenity": "cafe",
+              "brand": "星巴克",
+              "brand:en": "Starbucks",
+              "brand:wikidata": "Q37158",
+              "brand:zh": "星巴克",
+              "cuisine": "coffee_shop",
+              "name": "星巴克",
+              "name:en": "Starbucks",
+              "name:zh": "星巴克",
+              "takeaway": "yes"
+            }
+          },
+          {
+            "type": "node",
+            "id": 6440805402,
+            "lat": 30.2452508,
+            "lon": 120.1620734,
+            "tags": {
+              "amenity": "cafe",
+              "brand": "古茗",
+              "brand:en": "Good me",
+              "brand:wikidata": "Q101500324",
+              "brand:zh": "古茗",
+              "cuisine": "bubble_tea",
+              "name": "古茗",
+              "name:en": "Good me",
+              "name:zh": "古茗",
+              "takeaway": "yes"
+            }
+          },
+          {
+            "type": "node",
+            "id": 6440805773,
+            "lat": 30.2519748,
+            "lon": 120.1558073,
+            "tags": {
+              "amenity": "cafe",
+              "name": "La Luna",
+              "outdoor_seating": "yes"
+            }
+          },
+          {
+            "type": "node",
+            "id": 6443251515,
+            "lat": 30.2632133,
+            "lon": 120.1440183,
+            "tags": {
+              "amenity": "cafe",
+              "name": "纯真年代书吧",
+              "outdoor_seating": "yes"
+            }
+          },
+          {
+            "type": "node",
+            "id": 6453609462,
+            "lat": 30.2530675,
+            "lon": 120.1585923,
+            "tags": {
+              "amenity": "cafe",
+              "brand": "星巴克",
+              "brand:en": "Starbucks",
+              "brand:wikidata": "Q37158",
+              "brand:wikipedia": "en:Starbucks",
+              "brand:zh": "星巴克",
+              "cuisine": "coffee_shop",
+              "name": "星巴克",
+              "name:en": "Starbucks",
+              "name:zh": "星巴克",
+              "name:zh-Latn-pinyin": "Xīngbākè Kāfēi",
+              "official_name": "Starbucks Coffee",
+              "takeaway": "yes"
+            }
+          },
+          {
+            "type": "node",
+            "id": 6643945591,
+            "lat": 30.2576772,
+            "lon": 120.1587775,
+            "tags": {
+              "addr:housenumber": "245 F1 161",
+              "addr:street": "延安路 Yan'an Road",
+              "amenity": "cafe",
+              "name:de": "Starbucks Coffee",
+              "name:en": "Starbucks Coffee",
+              "opening_hours": "Mo-Su 08:00-22:00"
+            }
+          },
+          {
+            "type": "node",
+            "id": 6643945592,
+            "lat": 30.2548589,
+            "lon": 120.1581273,
+            "tags": {
+              "addr:housenumber": "7",
+              "addr:street": "东坡路",
+              "amenity": "cafe",
+              "name:en": "Maan Coffee",
+              "opening_hours": "Mo-Su 09:30-23:00",
+              "phone": "+86 571 8646 5577"
+            }
+          },
+          {
+            "type": "node",
+            "id": 6650117985,
+            "lat": 30.2710737,
+            "lon": 120.1462661,
+            "tags": {
+              "amenity": "cafe",
+              "name:en": "stop café"
+            }
+          }
+        ]
+      },
+      "location": {
+        "lat": 30.2741,
+        "lon": 120.1551
+      },
+      "notice": "真实公开地图查询的本地缓存，非实时营业/空闲数据，服务不可用时显式标注缓存。"
+    }
+  ]
+}

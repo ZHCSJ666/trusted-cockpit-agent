@@ -1,0 +1,149 @@
+"""指令极性维度（QA 卡 Q7 / I-039）。
+
+端侧分类器是「对象 × 动作」的**正向**匹配——「车窗别开」命中对象词 `车窗` +
+动作词 `开` → `window.open`，**「别」不是任何判据的输入**。用户说别开，车窗开了。
+
+⚠ 这一族在 Q13 之前有一条是**假绿**：「音乐别停」分类器照样判 pause，只是
+`classify()` 产的 `music.pause` 不在 `LOCAL_INTENTS`、被踢上云才没执行。
+Q13 把两个出口收敛之后它落地了——**缺陷第一次诚实显形**（真栈 NG3
+green-by-accident → 0/3）。这就是卡把 Q13 排在 Q7 前面的理由。
+"""
+from __future__ import annotations
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+import pytest
+
+from fast_intent import classify, classify_structured, split_and_classify_any
+from runtime.polarity import is_negated_directive
+
+
+# ── 判据本身 ──────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("text", [
+    "车窗别开", "空调别关", "音乐别停", "别开车窗", "别把天窗打开",
+    "先别开空调", "不要开窗", "不许锁车门", "甭开了",
+    # 裸「不」（2026-10-09 核心旅程 P08）：此前端侧判成开空调（0.9）直接执行
+    "先不开空调了", "不开空调了", "空调先不开了", "我不想开空调", "不用开空调", "后备箱先不开了", "不关了", "不打开车窗",
+])
+def test_negated_directives(text):
+    assert is_negated_directive(text) is True, text
+
+
+@pytest.mark.parametrize("text", [
+    # 正例：必须放行。**否定守卫最贵的失败是把正常指令一起挡掉**
+    "打开车窗", "关闭空调", "把天窗打开", "音乐暂停",
+    # 双重否定：真实语义是**要做**，挡它等于反向漏执行
+    "别忘了关窗", "别忘记打开空调",
+    # 取消挂起：那是 pending_cancel 的事（Q1-A 已收敛），这里认了会打架
+    "不用了", "算了",
+    # 否定词否定的是**别的动词**：「别催」不是「别打开」
+    "别催我，把空调打开",
+    # 约束词不是指令否定（nearby 的检索约束，归 G6）
+    "不要太辣的餐厅",
+    # 裸「不」的非否定搭配（2026-10-09）：建议句、情绪 / 关心、不知道怎么、不如 / 不过、开车不是车控
+    "要不打开空调吧", "我不开心，放首歌", "不知道怎么开空调", "不如把空调打开", "不过先打开空调",
+    "我不关心这个，把空调打开", "我不开车了",
+])
+def test_not_negated_directives(text):
+    assert is_negated_directive(text) is False, text
+
+
+# ── 分类器出口：负极性写操作**不产出本地意图** ────────────────────────────
+
+@pytest.mark.parametrize("text,forbidden", [
+    ("车窗别开", "window.open"),
+    ("空调别关", "hvac.off"),
+    ("音乐别停", "media.pause"),
+    ("别把天窗打开", "sunroof.open"),
+    ("先不开空调了", "hvac.on"),
+    ("我不想开空调", "hvac.on"),
+    ("后备箱先不开了", "trunk.open"),
+])
+def test_negated_write_action_is_not_classified_locally(text, forbidden):
+    """**不产出**，而不是产出反向意图。
+
+    「车窗别开」的反向是 `window.close`——用户没让你关，他让你别开。
+    把「别开」映射成「关」只是换了一个错误动作，而且是一个**有副作用**的。
+    """
+    assert classify_structured(text) is None, f"{text} 仍被判成可本地执行"
+    got = (classify(text) or {}).get("name")
+    assert got != forbidden, f"{text} → {got}"
+    assert got is None
+
+
+# ── 撤回（评审二轮批 A 顺手，2026-09-22）：「取消刚才打开空调」不是「打开空调」 ────────
+
+@pytest.mark.parametrize("text,forbidden", [
+    ("取消刚才打开空调", "hvac.on"),
+    ("取消开车窗", "window.open"),
+    ("算了刚才开空调不用了", "hvac.on"),
+    ("取消刚才那个座椅加热", "seat.heating.on"),
+    ("撤销刚才解锁", "door_lock.open"),
+])
+def test_withdrawn_write_action_is_not_classified_locally(text, forbidden):
+    """撤回一个动作 ≠ 再做一遍那个动作。离线复算：三句都被端侧判成正向执行。"""
+    from runtime.polarity import is_withdrawn_directive
+    assert is_withdrawn_directive(text) is True, text
+    assert classify_structured(text) is None, f"{text} 仍被判成可本地执行"
+    assert (classify(text) or {}).get("name") != forbidden, text
+
+
+@pytest.mark.parametrize("text,want", [
+    ("取消静音", "volume.unmute"),          # 「取消静音」是 unmute 的词面本身
+    ("取消导航", "navigate_cancel"),
+])
+def test_lexicalised_cancel_commands_stay_local(text, want):
+    from runtime.polarity import is_withdrawn_directive
+    assert is_withdrawn_directive(text) is False, text
+    got = (classify(text) or {}).get("name") or ""
+    assert got and (got == want or got.endswith(want.split(".")[-1]) or "cancel" in got), (text, got)
+
+
+def test_withdrawal_is_not_the_edge_noop_reply():
+    """撤回句不走「保持当前状态」本地直回——云侧的挂起取消要收得到它。"""
+    from fast_intent import is_negated_write_directive
+    assert is_negated_write_directive("取消刚才打开空调") is False
+
+
+def test_positive_counterparts_still_classify():
+    """反向对照——这一半和上一半一样重要（§4.3「反向验证要两头做」）。"""
+    for text, want in (("打开车窗", "window.open"),
+                       ("关闭空调", "hvac.off"),
+                       ("暂停音乐", "media.pause"),
+                       ("打开天窗", "sunroof.open")):
+        assert (classify(text) or {}).get("name") == want, text
+
+
+def test_query_collar_still_works():
+    """同一道出口收口上原有的「问句不许被执行成写操作」不得被本批改坏。"""
+    assert classify_structured("车窗最多能开多大") is None
+
+
+# ── 复合句：逐段判极性 ────────────────────────────────────────────────────
+
+def test_compound_sentence_keeps_only_the_real_directive():
+    """NG4 原句：三段里只有中间那段是真指令。
+
+    分段路径逐段过 `classify_structured`，于是极性守卫**天然逐段生效**——
+    这正是把守卫放在分类器出口（而不是某条路径里）的收益。
+    """
+    parts = split_and_classify_any("车窗别开，空调关了，音乐别停")
+    assert parts is not None
+    by_text = {p.get("_raw_text"): p for p in parts}
+    assert by_text["车窗别开"]["_needs_cloud"] is True
+    assert by_text["音乐别停"]["_needs_cloud"] is True
+    mid = by_text["空调关了"]
+    assert mid["_needs_cloud"] is False
+    assert mid["data"]["object"] == "aircon"
+
+
+def test_replace_verb_is_negatable():
+    """「不要换第二家」是禁止变更；「这家不要了，换第二家」是局部取消 + 新动作（评审 §4 对比对，2026-09-20）。"""
+    from runtime.polarity import is_negated_directive
+    assert is_negated_directive("不要换第二家") is True
+    assert is_negated_directive("别换台") is True
+    assert is_negated_directive("这家不要了，换第二家") is False

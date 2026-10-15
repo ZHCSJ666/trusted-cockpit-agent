@@ -1,0 +1,61 @@
+{
+  "status": "clarify",
+  "message": "请先选择一份适用的车型、年份和地区手册。",
+  "steps": [
+    {
+      "id": "s1",
+      "tool": "search_manual",
+      "args": {
+        "query": "帮我查询一下怎么去杭州市政府"
+      },
+      "depends_on": [],
+      "status": "clarify",
+      "message": "请先选择一份适用的车型、年份和地区手册。",
+      "data": {
+        "documents": [
+          {
+            "id": "c436eb074c87967eea31",
+            "filename": "Volvo_EC40_2026_UK_en.pdf",
+            "vehicle": "Volvo EC40 2026 UK",
+            "title": "EC40 2026 (25w46) User Manual",
+            "pages": 433,
+            "chunks": 904,
+            "sha256": "1fcca03a413beb0242dd5282a5f645b2b1b5a313610e620e46ec6c28ac4a0939",
+            "source_url": "https://www.volvocars.com/static/support-content/pdfs/uk_en-GB_ec40_2026_UM_8bbd937f411a2582b90516ef58b938ae.pdf",
+            "imported_at": "2026-10-11T15:49:42.429279+00:00"
+          },
+          {
+            "id": "3b407e395d33a4854076",
+            "filename": "Volvo_EC40_2026_US_en.pdf",
+            "vehicle": "Volvo EC40 2026 US",
+            "title": "EC40 2026 (25w17) User Manual",
+            "pages": 421,
+            "chunks": 888,
+            "sha256": "15bb5257af9ff6c032b13a5ad0fc3539b038df60aaabb953bf7068faadffa0f4",
+            "source_url": "https://www.volvocars.com/static/support/pdf/us_en-US_ec40_2026_UM_d2f062b9377f3b650b74c5c6841da8fc.pdf",
+            "imported_at": "2026-10-11T15:49:43.189159+00:00"
+          },
+          {
+            "id": "7c2ddc00d72f4d09ded8",
+            "filename": "Tesla_Model3_2024plus_US_en.pdf",
+            "vehicle": "Tesla Model 3 2024+ US",
+            "title": "Model 3 2024+ Owner’s Manual",
+            "pages": 328,
+            "chunks": 1002,
+            "sha256": "0b211f472b0089fd0fc82e09fe64513bdbddb60649371d4ad9249145bf0d539d",
+            "source_url": "https://www.tesla.com/ownersmanual/model3/en_us/Owners_Manual.pdf",
+            "imported_at": "2026-10-11T15:49:43.827304+00:00"
+          }
+        ]
+      }
+    }
+  ],
+  "orchestration": {
+    "tier": "T0",
+    "rounds": 0,
+    "tool_count": 1,
+    "max_tools": 8,
+    "max_rounds": 4,
+    "request_id": "workspace-1791739373796917691"
+  }
+}

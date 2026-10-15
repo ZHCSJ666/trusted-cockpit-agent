@@ -1,0 +1,1524 @@
+schema_version: 1
+# 覆盖补全：为覆盖矩阵里仍缺正例/硬负例/对照的**云侧全部 intent** 与**端侧危险动作**
+# 补最小对照对。
+#
+# 为什么用 route_flip 对：一对同框架、只换对象的句子，能同时给两个 intent 各补一个
+# 正例、一个硬负例和一次对照参与——比堆三条互不相关的单句既省条数又更能证明边界。
+# 这不是「复制近义句冲条数」：每一对都是一条真实存在、且模型确实会混的边界。
+cases:
+  # ── 充电域：规划 vs 状态 vs 检索 ────────────────────────────────────────
+  - id: tu.charging.plan-vs-status
+    title: 长途补能规划
+    family_id: tu.charging-plan-status
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [charging], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    turns:
+      - input: {utterance: 我要开去长沙，帮我把路上补能安排好, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [charging.plan]}], forbidden_intents: [charging.status, charging.find], allow_extra_intents: false}
+  - id: tu.charging.status-vs-plan
+    title: 只问当前电量
+    family_id: tu.charging-plan-status
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [charging], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    relation: {base_case: tu.charging.plan-vs-status, type: route_flip, expectation: {forbidden_after: [charging.plan], required_change: true}}
+    turns:
+      - input: {utterance: 车现在还剩百分之多少电, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [charging.status]}], forbidden_intents: [charging.plan, charging.find], allow_extra_intents: false}
+  - id: tu.charging.plan-vs-find
+    title: 跨城补能规划（第二正例）
+    family_id: tu.charging-plan-find
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [charging], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    turns:
+      - input: {utterance: 从广州开到南宁，中途该在哪几个服务区补电, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [charging.plan]}], forbidden_intents: [charging.status], allow_extra_intents: true}
+  - id: tu.charging.find-vs-plan
+    title: 就地找一个桩（第二正例的对照）
+    family_id: tu.charging-plan-find
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [charging], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    relation: {base_case: tu.charging.plan-vs-find, type: route_flip, expectation: {forbidden_after: [charging.plan], required_change: true}}
+    turns:
+      - input: {utterance: 现在就近给我找一个能充电的地方, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [charging.find]}], forbidden_intents: [charging.plan], allow_extra_intents: false}
+
+  # ── 导航域：搜 POI vs 看详情 vs 存地点 ──────────────────────────────────
+  - id: tu.nav.search-vs-detail
+    title: 搜索导航 POI
+    family_id: tu.nav-search-detail
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [action_flip], domains: [nearby, navigation], boundary: nearby-navigation, layers: [l1]}
+    # 2026-08-02 泓舟裁定：找地点的边界**按动词划、不按对象划**——「找/搜/附近有什么」
+    # 归 nearby.search（周边发现），「导航去/带我去」才归 navigation（出行）。
+    # 台账 skills/exemplars/boundaries.yaml#nearby-navigation.find-vs-go。
+    provenance: {kind: authored, reviewed_by: human, reviewed_at: 2026-08-02, gold_revision_reason: "2026-08-02 裁定：找=发现归 nearby.search，导航=出行归 navigation；台账 nearby-navigation.find-vs-go", gold_revised_at: 2026-08-02}
+    turns:
+      - input: {utterance: 帮我搜一下附近的地铁站有哪些, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [nearby.search]}], forbidden_intents: [navigation.navigate_to, nearby.detail], allow_extra_intents: false}
+  - id: tu.nav.detail-vs-search
+    title: 看某个 POI 的详情
+    family_id: tu.nav-search-detail
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [action_flip], domains: [nearby, navigation], boundary: nearby-navigation, layers: [l1]}
+    # 本条测的是 **search→detail 的动作翻面**，不是域归属。裁定只覆盖「找地点」那一侧，
+    # 「看某个 POI 的详情」两域各有一个等价 intent 且都讲得通——故 any_of 收两个，
+    # 把断言集中在真正要守的那件事：**详情不许退化成再搜一次**。
+    provenance: {kind: authored, reviewed_by: human, reviewed_at: 2026-08-02, gold_revision_reason: "随 base 一并恢复；detail 侧两域等价 intent 都算对，断言收敛到 search→detail 的翻面", gold_revised_at: 2026-08-02}
+    relation: {base_case: tu.nav.search-vs-detail, type: route_flip, expectation: {forbidden_after: [nearby.search], required_change: true}}
+    turns:
+      - input: {utterance: 广州东站这个站点的详细信息给我看看, context: {}}
+        expected:
+          # 「先搜到这个站点、再取它的详情」是合法计划——poi_detail 要 poi_id，模型
+          # 补一步检索拿 id 反而更正确。本条真正要守的是**详情步必须在**，不是
+          # 「只许一步」；把 search 列进 forbidden 会把一个更好的计划判成红。
+          plan: {required_intent_groups: [{any_of: [navigation.poi_detail, nearby.detail]}], allow_extra_intents: true}
+  - id: tu.nav.setplace-vs-detail
+    title: 把当前位置存成常用地点
+    family_id: tu.nav-setplace-detail
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [action_flip], domains: [navigation], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    turns:
+      - input: {utterance: 把现在这个位置记成我家, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [navigation.set_place]}], forbidden_intents: [navigation.poi_detail, navigation.navigate_to], allow_extra_intents: false}
+  - id: tu.nav.detail-vs-setplace
+    title: 看常用地点的详情
+    family_id: tu.nav-setplace-detail
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [action_flip], domains: [navigation], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    relation: {base_case: tu.nav.setplace-vs-detail, type: route_flip, expectation: {forbidden_after: [navigation.set_place], required_change: true}}
+    turns:
+      - input: {utterance: 我家那个地点的详细信息是什么, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [navigation.poi_detail]}], forbidden_intents: [navigation.set_place], allow_extra_intents: false}
+
+  # ── 周边域：下单 vs 看详情 ──────────────────────────────────────────────
+  - id: tu.nearby.order-vs-detail
+    title: 订位（写操作）
+    family_id: tu.nearby-order-detail
+    cohort: unseen_transfer
+    risk: high
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [action_flip, write_action], domains: [nearby], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    turns:
+      - input: {utterance: 帮我在这家订今晚七点四位, context: {focus: {last_intent: nearby.search, last_poi: 巴蜀风（珠江新城店）}}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [nearby.order]}], forbidden_intents: [nearby.detail, shop.order], allow_extra_intents: false}
+  - id: tu.nearby.detail-vs-order
+    title: 只看详情（读操作）
+    family_id: tu.nearby-order-detail
+    cohort: unseen_transfer
+    risk: high
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [action_flip], domains: [nearby], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    relation: {base_case: tu.nearby.order-vs-detail, type: route_flip, expectation: {forbidden_after: [nearby.order], required_change: true}}
+    turns:
+      - input: {utterance: 这家营业到几点, context: {focus: {last_intent: nearby.search, last_poi: 巴蜀风（珠江新城店）}}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [nearby.detail]}], forbidden_intents: [nearby.order], allow_extra_intents: false}
+
+  # ── 提醒域：改期 vs 完成 ────────────────────────────────────────────────
+  - id: tu.reminder.update-vs-complete
+    title: 提醒改期
+    family_id: tu.reminder-update-complete
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [action_flip], domains: [reminder], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    turns:
+      - input: {utterance: 把交周报那条挪到后天下午, context: {focus: {last_intent: reminder.list}}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [reminder.update]}], forbidden_intents: [reminder.complete, reminder.create], allow_extra_intents: false}
+  - id: tu.reminder.complete-vs-update
+    title: 提醒标记完成
+    family_id: tu.reminder-update-complete
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [action_flip], domains: [reminder], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    relation: {base_case: tu.reminder.update-vs-complete, type: route_flip, expectation: {forbidden_after: [reminder.update], required_change: true}}
+    turns:
+      - input: {utterance: 交周报那条已经办完了，勾掉吧, context: {focus: {last_intent: reminder.list}}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [reminder.complete]}], forbidden_intents: [reminder.update], allow_extra_intents: false}
+
+  # ── 场景域：改 vs 停用 vs 删 ────────────────────────────────────────────
+  - id: tu.scene.update-vs-deactivate
+    title: 改场景内容
+    family_id: tu.scene-update-deactivate
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [action_flip], domains: [scene], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    turns:
+      - input: {utterance: 把夜间模式里的氛围灯改成暖白, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [scene.update]}], forbidden_intents: [scene.deactivate, scene.delete], allow_extra_intents: false}
+  - id: tu.scene.deactivate-vs-update
+    title: 停用场景
+    family_id: tu.scene-update-deactivate
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [action_flip], domains: [scene], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    relation: {base_case: tu.scene.update-vs-deactivate, type: route_flip, expectation: {forbidden_after: [scene.update], required_change: true}}
+    turns:
+      - input: {utterance: 把夜间模式关掉, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [scene.deactivate]}], forbidden_intents: [scene.update, scene.delete], allow_extra_intents: false}
+  - id: tu.scene.delete-vs-update
+    title: 删除场景
+    family_id: tu.scene-delete-update
+    cohort: unseen_transfer
+    risk: high
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [action_flip, write_action], domains: [scene], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    turns:
+      - input: {utterance: 把夜间模式这个场景彻底删掉, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [scene.delete]}], forbidden_intents: [scene.update, scene.deactivate], allow_extra_intents: false}
+  - id: tu.scene.update-vs-delete
+    title: 只改不删
+    family_id: tu.scene-delete-update
+    cohort: unseen_transfer
+    risk: high
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [action_flip], domains: [scene], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    relation: {base_case: tu.scene.delete-vs-update, type: route_flip, expectation: {forbidden_after: [scene.delete], required_change: true}}
+    turns:
+      - input: {utterance: 夜间模式先别删，把里面的温度调成二十三度就行, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [scene.update]}], forbidden_intents: [scene.delete], allow_extra_intents: false}
+
+  # ── 行程域：行程内导航 vs 行程状态 / 单点导航 ───────────────────────────
+  - id: tu.trip.navigate-vs-status
+    title: 导航到行程下一站
+    family_id: tu.trip-navigate-status
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [action_flip], domains: [trip], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    turns:
+      - input: {utterance: 出发去行程里的下一个点, context: {focus: {last_intent: trip.plan}}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [trip.navigate]}], forbidden_intents: [trip.status, trip.modify], allow_extra_intents: false}
+  - id: tu.trip.status-vs-navigate
+    title: 只问行程进度
+    family_id: tu.trip-navigate-status
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [action_flip], domains: [trip], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    relation: {base_case: tu.trip.navigate-vs-status, type: route_flip, expectation: {forbidden_after: [trip.navigate], required_change: true}}
+    turns:
+      - input: {utterance: 行程走到第几站了, context: {focus: {last_intent: trip.plan}}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [trip.status]}], forbidden_intents: [trip.navigate], allow_extra_intents: false}
+  - id: tu.trip.navigate-vs-plain-nav
+    title: 行程内导航（第二正例）
+    family_id: tu.trip-navigate-plain
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [scope_flip], domains: [trip, navigation], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    turns:
+      - input: {utterance: 按行程带我去今天的第二个景点, context: {focus: {last_intent: trip.plan}}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [trip.navigate]}], forbidden_intents: [trip.status, trip.modify], allow_extra_intents: false}
+  - id: tu.trip.plain-nav-vs-trip
+    title: 与行程无关的单点导航
+    family_id: tu.trip-navigate-plain
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [scope_flip], domains: [trip, navigation], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    relation: {base_case: tu.trip.navigate-vs-plain-nav, type: route_flip, expectation: {forbidden_after: [trip.navigate], required_change: true}}
+    turns:
+      - input: {utterance: 带我去白云机场, context: {focus: {last_intent: trip.plan}}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [navigation.navigate_to]}], forbidden_intents: [trip.navigate], allow_extra_intents: false}
+
+  # ── 信息域：空气质量的硬负例 ────────────────────────────────────────────
+  - id: tu.info.air-vs-index
+    title: 空气质量不是生活指数
+    family_id: tu.info-air-index
+    cohort: unseen_transfer
+    risk: low
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [info], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    turns:
+      - input: {utterance: 今天 AQI 是多少, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [info.air_quality]}], forbidden_intents: [info.indices, info.weather], allow_extra_intents: false}
+  - id: tu.info.index-vs-air
+    title: 生活指数不是空气质量
+    family_id: tu.info-air-index
+    cohort: unseen_transfer
+    risk: low
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [info], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    relation: {base_case: tu.info.air-vs-index, type: route_flip, expectation: {forbidden_after: [info.air_quality], required_change: true}}
+    turns:
+      - input: {utterance: 今天钓鱼指数怎么样, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [info.indices]}], forbidden_intents: [info.air_quality], allow_extra_intents: false}
+
+  # ── 端侧危险动作：开/关成对 ────────────────────────────────────────────
+  - id: tu.port.open-vs-close
+    title: 打开充电口（第二正例）
+    family_id: tu.port
+    cohort: unseen_transfer
+    risk: critical
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [direction_flip, dangerous_action], domains: [charging_port], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    turns:
+      - input: {utterance: 把充电口开一下, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [charging_port.open]}], forbidden_intents: [charging_port.close, fuel_tank_cover.open], allow_extra_intents: false}
+  - id: tu.port.close-vs-open
+    title: 关闭充电口
+    family_id: tu.port
+    cohort: unseen_transfer
+    risk: critical
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [direction_flip, dangerous_action], domains: [charging_port], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    relation: {base_case: tu.port.open-vs-close, type: route_flip, expectation: {forbidden_after: [charging_port.open], required_change: true}}
+    turns:
+      - input: {utterance: 把充电口关上, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [charging_port.close]}], forbidden_intents: [charging_port.open], allow_extra_intents: false}
+  - id: tu.port.close-second
+    title: 关闭充电口（第二正例）
+    family_id: tu.port-close
+    cohort: unseen_transfer
+    risk: critical
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [direction_flip, dangerous_action], domains: [charging_port], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    turns:
+      - input: {utterance: 充电结束了，把充电盖合上, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [charging_port.close]}], forbidden_intents: [charging_port.open, fuel_tank_cover.close], allow_extra_intents: false}
+  - id: tu.door.open-second
+    title: 解锁车门（第二正例）
+    family_id: tu.door-open
+    cohort: unseen_transfer
+    risk: critical
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [direction_flip, dangerous_action], domains: [door_lock], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    turns:
+      - input: {utterance: 车门给我开锁, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [door_lock.open]}], forbidden_intents: [door_lock.close, trunk.open], allow_extra_intents: false}
+  - id: tu.door.close-vs-open
+    title: 落锁车门
+    family_id: tu.door-close
+    cohort: unseen_transfer
+    risk: critical
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [direction_flip, dangerous_action], domains: [door_lock], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    turns:
+      - input: {utterance: 把车门落锁, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [door_lock.close]}], forbidden_intents: [door_lock.open], allow_extra_intents: false}
+  - id: tu.door.close-second
+    title: 落锁车门（第二正例）
+    family_id: tu.door-close-2
+    cohort: unseen_transfer
+    risk: critical
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [direction_flip, dangerous_action], domains: [door_lock], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    turns:
+      - input: {utterance: 我下车了，帮我锁上车门, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [door_lock.close]}], forbidden_intents: [door_lock.open, trunk.close], allow_extra_intents: false}
+  - id: tu.fuel.open-second
+    title: 打开油箱盖（第二正例）
+    family_id: tu.fuel-open
+    cohort: unseen_transfer
+    risk: critical
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [direction_flip, dangerous_action], domains: [fuel_tank_cover], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    turns:
+      - input: {utterance: 加油了，把油箱盖弹开, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [fuel_tank_cover.open]}], forbidden_intents: [fuel_tank_cover.close, charging_port.open], allow_extra_intents: false}
+  - id: tu.fuel.close-vs-open
+    title: 关闭油箱盖
+    family_id: tu.fuel-close
+    cohort: unseen_transfer
+    risk: critical
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [direction_flip, dangerous_action], domains: [fuel_tank_cover], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    turns:
+      - input: {utterance: 把油箱盖关上, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [fuel_tank_cover.close]}], forbidden_intents: [fuel_tank_cover.open], allow_extra_intents: false}
+  - id: tu.fuel.close-second
+    title: 关闭油箱盖（第二正例）
+    family_id: tu.fuel-close-2
+    cohort: unseen_transfer
+    risk: critical
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [direction_flip, dangerous_action], domains: [fuel_tank_cover], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    turns:
+      - input: {utterance: 加完油了，油箱盖合上吧, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [fuel_tank_cover.close]}], forbidden_intents: [fuel_tank_cover.open, charging_port.close], allow_extra_intents: false}
+
+  # ── 端侧核心：空调升降温、媒体播放控制 ─────────────────────────────────
+  - id: tu.hvac.inc-vs-dec
+    title: 温度调高
+    family_id: tu.hvac-inc-dec
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [direction_flip, vehicle_control], domains: [hvac], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    turns:
+      - input: {utterance: 温度再高两度, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [hvac.inc]}], forbidden_intents: [hvac.dec, hvac.set], allow_extra_intents: false}
+  - id: tu.hvac.dec-vs-inc
+    title: 温度调低
+    family_id: tu.hvac-inc-dec
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [direction_flip, vehicle_control], domains: [hvac], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    relation: {base_case: tu.hvac.inc-vs-dec, type: route_flip, expectation: {forbidden_after: [hvac.inc], required_change: true}}
+    turns:
+      - input: {utterance: 温度再低两度, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [hvac.dec]}], forbidden_intents: [hvac.inc, hvac.set], allow_extra_intents: false}
+  - id: tu.hvac.dec-second
+    title: 温度调低（第二正例）
+    family_id: tu.hvac-dec
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [direction_flip, vehicle_control], domains: [hvac], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02, gold_revision_reason: "能力面同时存在 hvac.dec 与 aircon.dec 两个同义 intent，gold 只列其一等于替产品在重复能力里挑一个", gold_revised_at: 2026-08-02}
+    turns:
+      - input: {utterance: 空调调凉一点, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [hvac.dec]}], forbidden_intents: [hvac.inc], allow_extra_intents: false}
+  - id: tu.hvac.inc-second
+    title: 温度调高（第二正例）
+    family_id: tu.hvac-inc
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [direction_flip, vehicle_control], domains: [hvac], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02, gold_revision_reason: "同上，与 tu.hvac.dec-second 对称", gold_revised_at: 2026-08-02}
+    turns:
+      - input: {utterance: 空调调暖一点, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [hvac.inc]}], forbidden_intents: [hvac.dec], allow_extra_intents: false}
+  - id: tu.media.pause-vs-play
+    title: 暂停播放
+    family_id: tu.media-pause-play
+    cohort: unseen_transfer
+    risk: low
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [direction_flip], domains: [media], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    turns:
+      - input: {utterance: 先暂停一下, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [media.pause]}], forbidden_intents: [media.play, media.next], allow_extra_intents: false}
+  - id: tu.media.play-vs-pause
+    title: 继续播放
+    family_id: tu.media-pause-play
+    cohort: unseen_transfer
+    risk: low
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [direction_flip], domains: [media], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    relation: {base_case: tu.media.pause-vs-play, type: route_flip, expectation: {forbidden_after: [media.pause], required_change: true}}
+    turns:
+      - input: {utterance: 继续放吧, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [media.play]}], forbidden_intents: [media.pause, media.next], allow_extra_intents: false}
+  - id: tu.media.pause-second
+    title: 暂停播放（第二正例）
+    family_id: tu.media-pause
+    cohort: unseen_transfer
+    risk: low
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [direction_flip], domains: [media], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    turns:
+      - input: {utterance: 音乐停一下, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [media.pause]}], forbidden_intents: [media.play], allow_extra_intents: false}
+  # ── media.stop 覆盖（2026-08-27，QA N2 新增 active intent）────────────────
+  # 这一族的考点是**暂停 / 停止 / 播放三者不许互相顶替**：出 bug 之前端侧把全部
+  # 「关/停」形态折进 pause，`media=stopped` 因此语音不可达；折叠一旦回潮，
+  # 下面四条里必然有一条红。硬负例刻意成对（stop 顶掉 pause、pause 顶掉 stop），
+  # 「收窄/放宽面只写一边守不住」。
+  - id: tu.media.stop-vs-pause
+    title: 停止播放（不是暂停）
+    family_id: tu.media-stop-pause
+    cohort: seen_regression
+    risk: low
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [direction_flip], domains: [media], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-27}
+    turns:
+      - input: {utterance: 停止播放, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [media.stop]}], forbidden_intents: [media.pause, media.play], allow_extra_intents: false}
+  - id: tu.media.stop-second
+    title: 停止播放（第二正例）
+    family_id: tu.media-stop
+    cohort: seen_regression
+    risk: low
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [direction_flip], domains: [media], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-27}
+    turns:
+      - input: {utterance: 把音乐关了, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [media.stop]}], forbidden_intents: [media.pause], allow_extra_intents: false}
+  - id: tu.media.pause-vs-stop
+    title: 暂停不是停止（对照）
+    family_id: tu.media-stop-pause
+    cohort: seen_regression
+    risk: low
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [direction_flip], domains: [media], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-27}
+    relation: {base_case: tu.media.stop-vs-pause, type: route_flip, expectation: {forbidden_after: [media.stop], required_change: true}}
+    turns:
+      - input: {utterance: 先暂停, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [media.pause]}], forbidden_intents: [media.stop, media.next], allow_extra_intents: false}
+  - id: tu.media.play-vs-stop
+    title: 继续播放不是停止（硬负例）
+    family_id: tu.media-stop
+    cohort: seen_regression
+    risk: low
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [direction_flip], domains: [media], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-27}
+    turns:
+      - input: {utterance: 继续播放吧, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [media.play]}], forbidden_intents: [media.stop, media.pause], allow_extra_intents: false}
+  - id: tu.media.prev-second
+    title: 上一首（第二正例）
+    family_id: tu.media-prev
+    cohort: unseen_transfer
+    risk: low
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [direction_flip], domains: [media], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    turns:
+      - input: {utterance: 回到上一首, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [media.prev]}], forbidden_intents: [media.next, media.pause], allow_extra_intents: false}
+
+  # ── 首轮裁定后的覆盖补口 ────────────────────────────────────────────────
+  # `tu.hvac.dec-second` 的 gold 被放宽成 `any_of: [hvac.dec]`（能力面有两个
+  # 同义 intent），多成员组按契约不替成员算正例——所以 hvac.dec 需要再补一条单成员正例。
+  - id: tu.hvac.dec-third
+    title: 空调温度调低三度
+    family_id: tu.hvac-dec-explicit
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [direction_flip, vehicle_control], domains: [hvac], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    turns:
+      - input: {utterance: 把空调温度调低三度, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [hvac.dec]}], forbidden_intents: [hvac.inc], allow_extra_intents: false}
+  # `tu.nav.search-vs-detail` 降回 candidate 后 navigation.search_poi 缺正例与对照。
+  # 这一对刻意换到**已登记的** navigation-vision 台账边界上，不再碰 nearby/navigation
+  # 那条尚未裁定的地盘。
+  - id: tu.nav.search-vs-vision
+    title: 在地图上找一个地标
+    family_id: tu.nav-search-vision
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [navigation, vision], boundary_ledger: navigation-vision.where-vs-what, boundary_side: left, layers: [l1]}
+    provenance: {kind: authored, source_ref: navigation-vision.where-vs-what, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    turns:
+      - input: {utterance: 在地图上帮我找一下广州塔, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [navigation.search_poi]}], forbidden_intents: [vision.describe], allow_extra_intents: false}
+  # `navigation.search_poi` 的第二条**单成员**正例。为什么需要它：2026-08-03 把
+  # `cp.dep.poi-then-navigate` 的 gold 对齐 find-vs-go 台账后（改成 any_of 双容忍），
+  # 这个 intent 的单成员正例从 2 掉到 1——**多成员 any_of 不替成员算正例**（契约 §6-3）。
+  # 判别词沿用同族已确立的那个：**「在地图上/地图里」**把它与 nearby 的周边发现分开
+  # （find-vs-go 管的是「找/搜」的地盘，「在地图上定位某个具体地标」不在那条裁定里）。
+  - id: tu.nav.map-locate-landmark
+    title: 在地图里定位一个具体地标
+    family_id: tu.nav-map-locate
+    cohort: unseen_transfer
+    risk: low
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [navigation, nearby], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_at: 2026-08-03}
+    turns:
+      - input: {utterance: 在地图里查一下深圳北站的位置, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [navigation.search_poi]}], forbidden_intents: [nearby.search, vision.describe], allow_extra_intents: false}
+  - id: tu.nav.vision-vs-search
+    title: 看窗外那个塔是什么
+    family_id: tu.nav-search-vision
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [navigation, vision], boundary_ledger: navigation-vision.where-vs-what, boundary_side: right, layers: [l1]}
+    provenance: {kind: authored, source_ref: navigation-vision.where-vs-what, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-02}
+    relation: {base_case: tu.nav.search-vs-vision, type: route_flip, expectation: {forbidden_after: [navigation.search_poi], required_change: true}}
+    turns:
+      - input: {utterance: 看看窗外那个塔是什么, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [vision.describe]}], forbidden_intents: [navigation.search_poi], allow_extra_intents: false}
+
+  # ── parking.query_fee 覆盖（2026-08-03 新增能力，findings §6.1）────────────
+  # 新能力进 active intent 集，覆盖矩阵立刻要 2 正例 / 2 硬负例 / 1 对照。
+  # 说法一律避开 manifest examples 与对抗语料原句「停车费先别交，我想先知道多少钱」
+  # ——把它们写进来等于把那条 unseen 用例洗成 seen（M5 纪律）。
+  - id: tu.parking.fee-amount
+    title: 只问停车费多少，不付款
+    family_id: tu.parking-fee
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip, write_action], domains: [parking], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_at: 2026-08-03}
+    turns:
+      - input: {utterance: 我这趟停车一共多少钱, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [parking.query_fee]}], forbidden_intents: [parking.pay], allow_extra_intents: false}
+  - id: tu.parking.fee-charged
+    title: 问收了多少费也是只读
+    family_id: tu.parking-fee-charged
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A9], mechanisms: [colloquial, write_action], domains: [parking], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_at: 2026-08-03}
+    turns:
+      - input: {utterance: 查一下停车场收了我多少费, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [parking.query_fee]}], forbidden_intents: [parking.pay], allow_extra_intents: false}
+  # 硬负例 ①：明确要付款时不该再拆一个查询步——`_pay` 内部本来就会在缺 amount 时查费
+  - id: tu.parking.pay-not-query
+    title: 说了付就付，不要多拆一个查询步
+    family_id: tu.parking-fee
+    cohort: unseen_transfer
+    risk: high
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip, write_action, dangerous_action], domains: [parking], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_at: 2026-08-03}
+    relation: {base_case: tu.parking.fee-amount, type: route_flip, expectation: {forbidden_after: [parking.query_fee], required_change: true}}
+    turns:
+      - input: {utterance: 我这趟停车的钱付了吧, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [parking.pay]}], forbidden_intents: [parking.query_fee], allow_extra_intents: false}
+  # 硬负例 ②：找停车场归 nearby（find-vs-go 台账），既不查费也不付款
+  - id: tu.parking.find-not-fee
+    title: 找停车场既不查费也不付款
+    family_id: tu.parking-find
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [parking, nearby], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_at: 2026-08-03}
+    turns:
+      - input: {utterance: 这边哪儿还有空的停车场, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [nearby.search]}], forbidden_intents: [parking.query_fee, parking.pay], allow_extra_intents: false}
+
+  # ── 生产 builtin-tools：动态 ToolRegistry inventory 的 L0 覆盖 ──────────
+  # 三组各两条原创同义对照；每条 singleton required 本工具，并把另两个工具列为硬负例。
+  # 语料避开 ToolRegistry manifest examples，不靠 route hint 或 exemption 涂绿 active-intent 分母。
+  - id: tu.tools.datetime.standardize
+    title: 把相对日期时间标准化
+    family_id: tu.tools-datetime
+    cohort: unseen_transfer
+    risk: low
+    status: stable
+    tags: {attacks: [A6], mechanisms: [cloud_only, paraphrase], domains: [tools], layers: [l0]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-05, stabilized_provider: deterministic, stabilized_at: 2026-08-05, stabilized_processes: 2, stabilized_samples_per_process: 3, stabilized_process_runs: [task5b-l0-tools-a-594649fc, task5b-l0-tools-b-594649fc], stabilized_samples: 6, evidence_report: "%TEMP%/intent-l0-tools-promotion-{a,b}-594649fc573648b99af9b0a5bcd8b27b.json"}
+    turns:
+      - input: {utterance: 把下周二上午九点转换成标准日期时间, context: {}}
+        expected:
+          ingress: {allowed: [cloud], forbidden: [edge_local]}
+          plan: {required_intent_groups: [{any_of: [datetime.parse]}], forbidden_intents: [unit.convert, math.eval], allow_extra_intents: false}
+  - id: tu.tools.datetime.resolve
+    title: 解析相对时间的具体时刻
+    family_id: tu.tools-datetime
+    cohort: unseen_transfer
+    risk: low
+    status: stable
+    tags: {attacks: [A6], mechanisms: [cloud_only, paraphrase], domains: [tools], layers: [l0]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-05, stabilized_provider: deterministic, stabilized_at: 2026-08-05, stabilized_processes: 2, stabilized_samples_per_process: 3, stabilized_process_runs: [task5b-l0-tools-a-594649fc, task5b-l0-tools-b-594649fc], stabilized_samples: 6, evidence_report: "%TEMP%/intent-l0-tools-promotion-{a,b}-594649fc573648b99af9b0a5bcd8b27b.json"}
+    relation: {base_case: tu.tools.datetime.standardize, type: invariant, expectation: {}}
+    turns:
+      - input: {utterance: 解析一下三天后傍晚六点对应的具体日期和时间, context: {}}
+        expected:
+          ingress: {allowed: [cloud], forbidden: [edge_local]}
+          plan: {required_intent_groups: [{any_of: [datetime.parse]}], forbidden_intents: [unit.convert, math.eval], allow_extra_intents: false}
+
+  - id: tu.tools.unit.speed
+    title: 换算速度单位
+    family_id: tu.tools-unit
+    cohort: unseen_transfer
+    risk: low
+    status: stable
+    tags: {attacks: [A6], mechanisms: [cloud_only, paraphrase], domains: [tools], layers: [l0]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-05, stabilized_provider: deterministic, stabilized_at: 2026-08-05, stabilized_processes: 2, stabilized_samples_per_process: 3, stabilized_process_runs: [task5b-l0-tools-a-594649fc, task5b-l0-tools-b-594649fc], stabilized_samples: 6, evidence_report: "%TEMP%/intent-l0-tools-promotion-{a,b}-594649fc573648b99af9b0a5bcd8b27b.json"}
+    turns:
+      - input: {utterance: 把七十二公里每小时换算成米每秒, context: {}}
+        expected:
+          ingress: {allowed: [cloud], forbidden: [edge_local]}
+          plan: {required_intent_groups: [{any_of: [unit.convert]}], forbidden_intents: [datetime.parse, math.eval], allow_extra_intents: false}
+  - id: tu.tools.unit.mass
+    title: 换算质量单位
+    family_id: tu.tools-unit
+    cohort: unseen_transfer
+    risk: low
+    status: stable
+    tags: {attacks: [A6], mechanisms: [cloud_only, paraphrase], domains: [tools], layers: [l0]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-05, stabilized_provider: deterministic, stabilized_at: 2026-08-05, stabilized_processes: 2, stabilized_samples_per_process: 3, stabilized_process_runs: [task5b-l0-tools-a-594649fc, task5b-l0-tools-b-594649fc], stabilized_samples: 6, evidence_report: "%TEMP%/intent-l0-tools-promotion-{a,b}-594649fc573648b99af9b0a5bcd8b27b.json"}
+    relation: {base_case: tu.tools.unit.speed, type: invariant, expectation: {}}
+    turns:
+      - input: {utterance: 三公斤折合成多少克, context: {}}
+        expected:
+          ingress: {allowed: [cloud], forbidden: [edge_local]}
+          plan: {required_intent_groups: [{any_of: [unit.convert]}], forbidden_intents: [datetime.parse, math.eval], allow_extra_intents: false}
+
+  - id: tu.tools.math.square
+    title: 计算平方和
+    family_id: tu.tools-math
+    cohort: unseen_transfer
+    risk: low
+    status: stable
+    tags: {attacks: [A6], mechanisms: [cloud_only, paraphrase], domains: [tools], layers: [l0]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-05, stabilized_provider: deterministic, stabilized_at: 2026-08-05, stabilized_processes: 2, stabilized_samples_per_process: 3, stabilized_process_runs: [task5b-l0-tools-a-594649fc, task5b-l0-tools-b-594649fc], stabilized_samples: 6, evidence_report: "%TEMP%/intent-l0-tools-promotion-{a,b}-594649fc573648b99af9b0a5bcd8b27b.json"}
+    turns:
+      - input: {utterance: 计算二十三的平方再加七, context: {}}
+        expected:
+          ingress: {allowed: [cloud], forbidden: [edge_local]}
+          plan: {required_intent_groups: [{any_of: [math.eval]}], forbidden_intents: [datetime.parse, unit.convert], allow_extra_intents: false}
+  - id: tu.tools.math.divide
+    title: 计算除法和差
+    family_id: tu.tools-math
+    cohort: unseen_transfer
+    risk: low
+    status: stable
+    tags: {attacks: [A6], mechanisms: [cloud_only, paraphrase], domains: [tools], layers: [l0]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-05, stabilized_provider: deterministic, stabilized_at: 2026-08-05, stabilized_processes: 2, stabilized_samples_per_process: 3, stabilized_process_runs: [task5b-l0-tools-a-594649fc, task5b-l0-tools-b-594649fc], stabilized_samples: 6, evidence_report: "%TEMP%/intent-l0-tools-promotion-{a,b}-594649fc573648b99af9b0a5bcd8b27b.json"}
+    relation: {base_case: tu.tools.math.square, type: invariant, expectation: {}}
+    turns:
+      - input: {utterance: 求一百二十除以八再减三的结果, context: {}}
+        expected:
+          ingress: {allowed: [cloud], forbidden: [edge_local]}
+          plan: {required_intent_groups: [{any_of: [math.eval]}], forbidden_intents: [datetime.parse, unit.convert], allow_extra_intents: false}
+  # ── 除雾：2026-08-10 新增能力面的覆盖（front_defogger / rear_defogger）──────
+  #
+  # 这四个 intent 是当天补进 `VEHICLE_INTENTS` 的（端云两头此前都没有除雾能力，
+  # P3a 影子实录：`关闭强力前除雾` 被规划成 `accompany_home.close` 并被 VAL 执行）。
+  # **加了 active intent 就必须补覆盖**——不补的话 `--strict` 会以 12 条 gap 阻断，
+  # 而普通 `--list` 只展示、不阻断，很容易被读成「没问题」。这一课本身值得记：
+  # **同一个门禁在两种模式下的严厉程度不同，报绿之前先确认自己跑的是哪种模式。**
+  #
+  # 不走 `coverage_exemptions.yaml` 的判据：那张表豁免的是「**不经云侧 LLM 落域**、
+  # 没有可测对象」的端侧原子车控。除雾恰恰相反——把它加进能力面的**全部理由**就是
+  # 让云侧 planner 能选中它，它有可测的对象，而且原始 badcase 就发生在云侧。
+  #
+  # 形态复用本文件 2026-08-02 那批的 route_flip 对：前挡 ↔ 后挡是天然的同框架换对象，
+  # 一对同时给两个 intent 各补正例、硬负例与一次对照参与。
+  # **status 一律 reviewed**：新写的 gold 未经 live 稳定化，不进 gate 池、不动案例集，
+  # 因此也不触碰正式 baseline 的比对面（§4.3「动 gate 案例集前先问 baseline」）。
+  - id: tu.defog.front-open
+    title: 打开前挡除雾
+    family_id: tu.defog-open
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [defogger], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-10}
+    turns:
+      - input: {utterance: 把前挡除雾打开, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [front_defogger.open]}], forbidden_intents: [rear_defogger.open, hvac.on], allow_extra_intents: false}
+  - id: tu.defog.rear-open
+    title: 打开后挡除雾
+    family_id: tu.defog-open
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [defogger], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-10}
+    relation: {base_case: tu.defog.front-open, type: route_flip, expectation: {forbidden_after: [front_defogger.open], required_change: true}}
+    turns:
+      - input: {utterance: 把后挡除雾打开, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [rear_defogger.open]}], forbidden_intents: [front_defogger.open, hvac.on], allow_extra_intents: false}
+  - id: tu.defog.front-close
+    title: 关闭前挡除雾
+    family_id: tu.defog-close
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [defogger], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-10}
+    turns:
+      - input: {utterance: 前挡除雾可以关了, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [front_defogger.close]}], forbidden_intents: [rear_defogger.close, hvac.off], allow_extra_intents: false}
+  - id: tu.defog.rear-close
+    title: 关闭后挡除雾
+    family_id: tu.defog-close
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [defogger], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-10}
+    relation: {base_case: tu.defog.front-close, type: route_flip, expectation: {forbidden_after: [front_defogger.close], required_change: true}}
+    turns:
+      - input: {utterance: 后挡除雾可以关了, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [rear_defogger.close]}], forbidden_intents: [front_defogger.close, hvac.off], allow_extra_intents: false}
+  # 第二正例用**另一种说法**而不是同句改标点（本文件 `os.open.trunk` 那条注释记过：
+  # 按条数记正例 2 条、按唯一输入记只有 1 条，恰好涂绿最低要求）。
+  # 这两条同时把「起雾」这种**陈述式**触发钉住：端侧对它刻意不接（宁可漏接上云），
+  # 所以它必须在云侧落对。
+  - id: tu.defog.front-open-colloquial
+    title: 前风挡起雾的口语说法
+    family_id: tu.defog-open-colloquial
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A6], mechanisms: [paraphrase, object_flip], domains: [defogger], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-10}
+    turns:
+      - input: {utterance: 前风挡起雾了看不清，处理一下, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [front_defogger.open]}], forbidden_intents: [rear_defogger.open, wiper.on], allow_extra_intents: false}
+  - id: tu.defog.rear-open-colloquial
+    title: 后风挡起雾的口语说法
+    family_id: tu.defog-open-colloquial
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A6], mechanisms: [paraphrase, object_flip], domains: [defogger], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-10}
+    relation: {base_case: tu.defog.front-open-colloquial, type: route_flip, expectation: {forbidden_after: [front_defogger.open], required_change: true}}
+    turns:
+      - input: {utterance: 后风挡起雾了看不清，处理一下, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [rear_defogger.open]}], forbidden_intents: [front_defogger.open, wiper.on], allow_extra_intents: false}
+  # ⚠ 下面这条的输入是 **P3a 影子实录的原句**——它当时被规划成 `accompany_home.close`
+  # 并被 VAL 照单执行。`forbidden_intents` 里放 `accompany_home.close` 就是那次事故的
+  # 反向钉子：**能力补齐之后，这句话再落到伴我回家上就是回归。**
+  - id: tu.defog.front-close-strong
+    title: 关闭强力前除雾（原 badcase 原句）
+    family_id: tu.defog-close-strong
+    cohort: unseen_transfer
+    risk: high
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [defogger], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-10}
+    turns:
+      - input: {utterance: 关闭强力前除雾, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [front_defogger.close]}], forbidden_intents: [accompany_home.close, rear_defogger.close, hvac.off], allow_extra_intents: false}
+  - id: tu.defog.rear-close-colloquial
+    title: 后除雾不用了
+    family_id: tu.defog-close-strong
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A6], mechanisms: [paraphrase, object_flip], domains: [defogger], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-10}
+    relation: {base_case: tu.defog.front-close-strong, type: route_flip, expectation: {forbidden_after: [front_defogger.close], required_change: true}}
+    turns:
+      - input: {utterance: 后除雾不用了，关掉吧, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [rear_defogger.close]}], forbidden_intents: [front_defogger.close, accompany_home.close, hvac.off], allow_extra_intents: false}
+  # ── 真实商户：看菜单 vs 下单 vs 别家品牌 ────────────────────────────────
+  # luckin.menu 是 2026-08-13 新增的只读能力。在它之前，「这家店的菜单」在整个能力
+  # 目录里只对应演示商户的 shop.menu，真实门店的问句因此答出了演示数据
+  # （trace 9899486a8773d577）。两对 route_flip 钉住它的两条边界：
+  #   ① 看菜单 ≠ 下单（同一家店、同一个品牌，只差有没有要执行写操作）
+  #   ② 问哪家品牌就查哪家（问麦当劳不许去瑞幸取菜单）
+  # 门店锚定是硬前提：官方菜单绑定 deptId，所以正例都要求先经 nearby.search。
+  - id: tu.merchant.luckin-menu-vs-order
+    title: 看这家瑞幸有什么可点（只读）
+    family_id: tu.merchant-luckin-menu-order
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip, capability_present, mcp], domains: [nearby, luckin], layers: [l1], boundary_ledger: luckin-mcd.menu-store-resolution, boundary_side: left}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-13}
+    turns:
+      - input: {utterance: 就近那家瑞幸都卖些什么, context: {}}
+        expected:
+          plan:
+            required_intent_groups: [{any_of: [nearby.search]}, {any_of: [luckin.menu]}]
+            dependencies: [{producer: [nearby.search], consumer: luckin.menu, carries: [store_name, store_longitude, store_latitude]}]
+            forbidden_intents: [luckin.order, shop.menu, mcd.menu]
+            allow_extra_intents: false
+  - id: tu.merchant.luckin-order-vs-menu
+    title: 在这家瑞幸点一杯（写操作）
+    family_id: tu.merchant-luckin-menu-order
+    cohort: unseen_transfer
+    risk: high
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip, write_action, mcp], domains: [nearby, luckin], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-13}
+    relation: {base_case: tu.merchant.luckin-menu-vs-order, type: route_flip, expectation: {forbidden_after: [luckin.menu], required_change: true}}
+    turns:
+      - input: {utterance: 在最近那家瑞幸给我点一杯冰美式, context: {}}
+        expected:
+          plan:
+            required_intent_groups: [{any_of: [nearby.search]}, {any_of: [luckin.order]}]
+            dependencies: [{producer: [nearby.search], consumer: luckin.order, carries: [store_name, store_longitude, store_latitude]}]
+            forbidden_intents: [luckin.menu, shop.order, luckin.order_cancel]
+            allow_extra_intents: false
+  - id: tu.merchant.luckin-menu-paraphrase
+    title: 换个说法看瑞幸菜单（invariant 对照）
+    family_id: tu.merchant-luckin-menu-order
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A6], mechanisms: [paraphrase, capability_present, mcp], domains: [nearby, luckin], layers: [l1], boundary_ledger: luckin-mcd.menu-store-resolution, boundary_side: left}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-13}
+    relation: {base_case: tu.merchant.luckin-menu-vs-order, type: invariant, expectation: {}}
+    turns:
+      - input: {utterance: 瑞幸这家店都有哪些饮品, context: {}}
+        expected:
+          plan:
+            required_intent_groups: [{any_of: [nearby.search]}, {any_of: [luckin.menu]}]
+            forbidden_intents: [luckin.order, shop.menu, mcd.menu]
+            allow_extra_intents: false
+  - id: tu.merchant.mcd-menu-not-luckin
+    title: 问麦当劳的吃食不许去瑞幸取菜单
+    family_id: tu.merchant-brand-flip
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip, capability_present, mcp], domains: [mcd, luckin], layers: [l1], boundary_ledger: luckin-mcd.menu-store-resolution, boundary_side: right}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-13}
+    turns:
+      - input: {utterance: 麦当劳现在有些什么能吃的, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [mcd.menu]}], forbidden_intents: [luckin.menu, luckin.order, shop.menu, nearby.search], allow_extra_intents: false}
+  - id: tu.merchant.mcd-menu-no-nearby-step
+    title: 问这家麦当劳能点什么不该先查周边
+    family_id: tu.merchant-brand-flip
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip, capability_present, mcp], domains: [mcd, nearby], layers: [l1], boundary_ledger: luckin-mcd.menu-store-resolution, boundary_side: right}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-13}
+    turns:
+      - input: {utterance: 这家麦当劳都能点些什么, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [mcd.menu]}], forbidden_intents: [nearby.search, luckin.menu, shop.menu], allow_extra_intents: false}
+  # ── 2026-08-13 demo-mkemhn 复盘落的两条新边界（台账双向各 2 例）──────────────
+  # ① nearby-luckin.pure-discovery-vs-discover-then-menu：纯门店发现（只要列表，
+  #   不许自作主张续菜单/下单）vs 发现+看单组合（说了「看有什么/能点什么」就必须
+  #   把菜单步排进去，不许停在发现或详情卡）。左句「查询附近的瑞幸咖啡」在真栈曾
+  #   两连拒后掉 chitchat、被编造出门店列表（trace 3650e2b5）。
+  - id: tu.merchant.luckin-pure-discovery
+    title: 只查瑞幸门店列表不许自作主张续单
+    family_id: tu.merchant-pure-discovery
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A4], mechanisms: [overroute, mcp], domains: [nearby, luckin], layers: [l1], boundary_ledger: nearby-luckin.pure-discovery-vs-discover-then-menu, boundary_side: left}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-13}
+    turns:
+      - input: {utterance: 帮我搜下附近还有哪些瑞幸门店, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [nearby.search]}], forbidden_intents: [luckin.menu, luckin.order], allow_extra_intents: false}
+  - id: tu.merchant.luckin-pure-discovery-count
+    title: 问周边瑞幸有几家仍是纯发现
+    family_id: tu.merchant-pure-discovery
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A4], mechanisms: [overroute, mcp], domains: [nearby, luckin], layers: [l1], boundary_ledger: nearby-luckin.pure-discovery-vs-discover-then-menu, boundary_side: left}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-13}
+    relation: {base_case: tu.merchant.luckin-pure-discovery, type: invariant, expectation: {}}
+    turns:
+      - input: {utterance: 周边一共有几家瑞幸咖啡, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [nearby.search]}], forbidden_intents: [luckin.menu, luckin.order], allow_extra_intents: false}
+  - id: tu.merchant.luckin-discover-then-menu
+    title: 说了看有什么喝的就必须带菜单步
+    family_id: tu.merchant-pure-discovery
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A8], mechanisms: [capability_present, mcp], domains: [nearby, luckin], layers: [l1], boundary_ledger: nearby-luckin.pure-discovery-vs-discover-then-menu, boundary_side: right}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-13}
+    turns:
+      - input: {utterance: 找找附近的瑞幸，顺便看看都有什么喝的, context: {}}
+        expected:
+          plan:
+            required_intent_groups: [{any_of: [nearby.search]}, {any_of: [luckin.menu]}]
+            dependencies: [{producer: [nearby.search], consumer: luckin.menu, carries: [store_name, store_longitude, store_latitude]}]
+            forbidden_intents: [nearby.detail, shop.menu, luckin.order]
+            allow_extra_intents: false
+  - id: tu.merchant.luckin-discover-then-menu-paraphrase
+    title: 换个说法的发现加看单（invariant 对照）
+    family_id: tu.merchant-pure-discovery
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A6], mechanisms: [paraphrase, capability_present, mcp], domains: [nearby, luckin], layers: [l1], boundary_ledger: nearby-luckin.pure-discovery-vs-discover-then-menu, boundary_side: right}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-13}
+    relation: {base_case: tu.merchant.luckin-discover-then-menu, type: invariant, expectation: {}}
+    turns:
+      - input: {utterance: 看看周边瑞幸店里有什么能点的, context: {}}
+        expected:
+          plan:
+            required_intent_groups: [{any_of: [nearby.search]}, {any_of: [luckin.menu]}]
+            forbidden_intents: [nearby.detail, shop.menu, luckin.order]
+            allow_extra_intents: false
+  # ② luckin-mcd.swap-store-keep-item：换店保商品。句式同构，接线本质不同——
+  #   瑞幸必须 nearby.search 重建坐标可信链（官方门店绑 deptId），麦当劳按
+  #   store_hint 文本由桥内重选，不需要周边搜索。HMI 预览卡「换一家门店」按钮
+  #   两个品牌各发各的句式，品牌词就是判据。
+  - id: tu.merchant.luckin-swap-store
+    title: 瑞幸换门店保商品要重建可信链
+    family_id: tu.merchant-swap-store
+    cohort: unseen_transfer
+    risk: high
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip, mcp], domains: [luckin, mcd], layers: [l1], boundary_ledger: luckin-mcd.swap-store-keep-item, boundary_side: left}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-13}
+    turns:
+      - input: {utterance: 瑞幸帮我换一家门店，咖啡还是生椰拿铁, context: {}}
+        expected:
+          plan:
+            required_intent_groups: [{any_of: [nearby.search]}, {any_of: [luckin.order]}]
+            dependencies: [{producer: [nearby.search], consumer: luckin.order, carries: [store_name, store_longitude, store_latitude]}]
+            forbidden_intents: [mcd.order, shop.order, luckin.order_cancel]
+            allow_extra_intents: false
+  - id: tu.merchant.luckin-swap-store-paraphrase
+    title: 换家瑞幸店饮品不变（invariant 对照）
+    family_id: tu.merchant-swap-store
+    cohort: unseen_transfer
+    risk: high
+    status: reviewed
+    tags: {attacks: [A6], mechanisms: [paraphrase, mcp], domains: [luckin, mcd], layers: [l1], boundary_ledger: luckin-mcd.swap-store-keep-item, boundary_side: left}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-13}
+    relation: {base_case: tu.merchant.luckin-swap-store, type: invariant, expectation: {}}
+    turns:
+      - input: {utterance: 换家瑞幸店，饮品不变还是冰美式, context: {}}
+        expected:
+          plan:
+            required_intent_groups: [{any_of: [nearby.search]}, {any_of: [luckin.order]}]
+            forbidden_intents: [mcd.order, shop.order, luckin.order_cancel]
+            allow_extra_intents: false
+  - id: tu.merchant.mcd-swap-store
+    title: 麦当劳换门店走店名重选不查周边
+    family_id: tu.merchant-swap-store
+    cohort: unseen_transfer
+    risk: high
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip, mcp], domains: [mcd, luckin], layers: [l1], boundary_ledger: luckin-mcd.swap-store-keep-item, boundary_side: right}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-13}
+    turns:
+      - input: {utterance: 麦当劳帮我换一家店，还是点巨无霸, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [mcd.order]}], forbidden_intents: [luckin.order, shop.order, nearby.search], allow_extra_intents: false}
+  - id: tu.merchant.mcd-swap-store-paraphrase
+    title: 换个麦当劳餐厅餐品不变（invariant 对照）
+    family_id: tu.merchant-swap-store
+    cohort: unseen_transfer
+    risk: high
+    status: reviewed
+    tags: {attacks: [A6], mechanisms: [paraphrase, mcp], domains: [mcd, luckin], layers: [l1], boundary_ledger: luckin-mcd.swap-store-keep-item, boundary_side: right}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-13}
+    relation: {base_case: tu.merchant.mcd-swap-store, type: invariant, expectation: {}}
+    turns:
+      - input: {utterance: 换个麦当劳餐厅下单，餐品保持人气超值四件套, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [mcd.order]}], forbidden_intents: [luckin.order, shop.order, nearby.search], allow_extra_intents: false}
+  # ── 驾驶员状态：能不能继续开（人）vs 适不适合出门（天气路况）─────────────
+  # 2026-08-15 卡 Q9 / QA 轮 I-043。这一对补的不是「模型分不清」，是**能力面本来
+  # 就没有左边那一侧**：`safety.driver_state` 之前不存在，于是「困到睁不开眼了，
+  # 还要开两个小时」三次取样分别落到闲聊、拒识和音量调节（trace 见迷你集 SF4）。
+  # 判据是**约束在人还是在环境**：疲劳/饮酒/身体不适看人，雨雪雾拥堵看环境。
+  # 两侧共用「能不能开」这个框架，正是模型最容易一锅端的地方。
+  - id: tu.safety.driver-state-fatigue
+    title: 疲劳时能否继续驾驶
+    family_id: tu.safety-driver-vs-env
+    cohort: unseen_transfer
+    risk: critical
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [safety], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-15}
+    turns:
+      - input: {utterance: 困到睁不开眼了，还要开两个小时, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [safety.driver_state]}], forbidden_intents: [safety.driving_advice, info.weather, chitchat.talk, volume.dec], allow_extra_intents: false}
+  - id: tu.safety.driver-state-alcohol
+    title: 饮酒后能否驾驶
+    family_id: tu.safety-driver-vs-env
+    cohort: unseen_transfer
+    risk: critical
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [safety], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-15}
+    turns:
+      - input: {utterance: 刚喝了两杯酒，还能开车回家吗, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [safety.driver_state]}], forbidden_intents: [safety.driving_advice, navigation.navigate_to, chitchat.talk], allow_extra_intents: false}
+  - id: tu.safety.env-not-driver-weather
+    title: 天气路况适不适合出门（硬负例：约束在环境不在人）
+    family_id: tu.safety-driver-vs-env
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [safety], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-15}
+    turns:
+      - input: {utterance: 这会儿路上情况开车出门合适吗, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [safety.driving_advice, safety.road_condition]}], forbidden_intents: [safety.driver_state], allow_extra_intents: false}
+  - id: tu.safety.env-not-driver-rain
+    title: 下雨天开车注意什么（硬负例：环境侧第二例）
+    family_id: tu.safety-driver-vs-env
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [safety], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-15}
+    turns:
+      - input: {utterance: 下大雨路面湿滑，开车要注意什么, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [safety.driving_advice, safety.weather_alert]}], forbidden_intents: [safety.driver_state], allow_extra_intents: false}
+  - id: tu.safety.driver-state-paraphrase
+    title: 撑一下应该没事吧（invariant 对照）
+    family_id: tu.safety-driver-vs-env
+    cohort: unseen_transfer
+    risk: critical
+    status: reviewed
+    tags: {attacks: [A6], mechanisms: [paraphrase], domains: [safety], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-15}
+    relation: {base_case: tu.safety.driver-state-fatigue, type: invariant, expectation: {}}
+    turns:
+      - input: {utterance: 有点犯困，撑一下应该没事吧, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [safety.driver_state]}], forbidden_intents: [safety.driving_advice, info.weather, chitchat.talk], allow_extra_intents: false}
+  # ── 只算不导 vs 真的动身（navigation.estimate，2026-08-19 卡 Q8 / I-016）──────
+  # 与上面 driver-state 同一条判据的第二次适用：**补的不是「模型分不清」，
+  # 是能力面上本来就没有左边那一侧**。在 estimate 之前，导航域只有
+  # navigate_to 一个「跟这两点有关」的工具，于是「从A到B多远多久」被就近挑成导航
+  # 并**真的开始导航**（真栈 --repeat 3：1/3 发出 navigate、答「全程约21公里」）。
+  # 判据是**用户要的是数还是行程**。两侧都要锁：只锁左边会纵容把「导航去」也答成
+  # 估算，那是把一个不可逆动作变成一句话，方向反了但一样错。
+  - id: tu.nav.estimate-distance
+    title: 两点间开车多远多久（只算不导）
+    family_id: tu.nav-estimate-vs-go
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [navigation], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-19}
+    turns:
+      - input: {utterance: 从深圳市民中心到深圳北站开车大概多远、要多久, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [navigation.estimate]}], forbidden_intents: [navigation.navigate_to, navigation.search_poi, nearby.search, chitchat.talk], allow_extra_intents: false}
+  - id: tu.nav.estimate-duration
+    title: 到目的地还要多久（只算不导，第二正例）
+    family_id: tu.nav-estimate-vs-go
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [navigation], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-19}
+    turns:
+      - input: {utterance: 从家开到宝安机场大概要多长时间, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [navigation.estimate]}], forbidden_intents: [navigation.navigate_to, trip.plan, chitchat.talk], allow_extra_intents: false}
+  - id: tu.nav.go-not-estimate
+    title: 导航去某地（硬负例：要动身不是问数）
+    family_id: tu.nav-estimate-vs-go
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [navigation], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-19}
+    turns:
+      - input: {utterance: 导航去深圳北站, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [navigation.navigate_to]}], forbidden_intents: [navigation.estimate, navigation.search_poi], allow_extra_intents: false}
+  - id: tu.nav.go-with-origin-not-estimate
+    title: 从X出发去Y（硬负例第二例：说了起点仍然是要动身）
+    family_id: tu.nav-estimate-vs-go
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [navigation], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-19}
+    turns:
+      - input: {utterance: 从深圳欢乐海岸出发去世界之窗, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [navigation.navigate_to]}], forbidden_intents: [navigation.estimate, navigation.search_poi], allow_extra_intents: false}
+  # C8（2026-08-28，QA P1-08）：**上面那条跑不到 T22 的真实条件**——它的 context 是空的，
+  # 而真栈里前一轮已经建起了路线会话，planner 读到焦点「当前正在导航」就落 reroute。
+  # reroute 当时**契约里没有 origin 维**，起点在算路/话术/卡片三处全硬编码「当前位置」。
+  # 所以这条变体验的不是「落哪个 intent」（两条都对），是**那一维有没有被接住**。
+  # ⚠ 家族与话术都要另起：同一条 utterance 跨 cohort、同一 family 跨 cohort 都被
+  # 契约守卫当场拒（本条第一版两样全犯）。cohort 取 `seen_regression` 是如实标注
+  # ——这条用例是**照着 C8 的修法**写的，不是未见迁移（同前三批的口径）。
+  - id: tu.nav.origin-with-active-route
+    title: 导航中说「从X出发去Y」（active_route 在场：换起点，不是丢起点）
+    family_id: tu.nav-reroute-origin
+    cohort: seen_regression
+    risk: high
+    status: reviewed
+    tags: {attacks: [A5], mechanisms: [focus, object_flip], domains: [navigation], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-28}
+    turns:
+      - input:
+          utterance: 从深圳北站出发去世界之窗
+          context:
+            focus: {last_intent: navigation.navigate_to, active_route: {destination: 世界之窗}}
+            history: [{role: user, text: 导航去世界之窗}, {role: assistant, text: 已为您规划路线}]
+        expected:
+          plan:
+            required_intent_groups: [{any_of: [navigation.reroute, navigation.navigate_to]}]
+            forbidden_intents: [navigation.estimate, navigation.search_poi, trip.modify]
+            allow_extra_intents: false
+            slots:
+              - {intent: navigation.reroute, key: origin, matcher: presence}
+              - {intent: navigation.navigate_to, key: origin, matcher: presence}
+  - id: tu.nav.estimate-paraphrase
+    title: 去趟那儿得开多久（invariant 对照）
+    family_id: tu.nav-estimate-vs-go
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A6], mechanisms: [paraphrase], domains: [navigation], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-19}
+    relation: {base_case: tu.nav.estimate-distance, type: invariant, expectation: {}}
+    turns:
+      - input: {utterance: 从市民中心去趟深圳北站得开多久, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [navigation.estimate]}], forbidden_intents: [navigation.navigate_to, nearby.search, chitchat.talk], allow_extra_intents: false}
+  # ── 终止 vs 增量调整（navigation.cancel，2026-08-19 卡 Q8 / I-017）────────
+  # 同批把裸取消判据收窄之后（`pending_cancel._no_substance_left`），「取消导航」
+  # 不再被前置闸当成「取消挂起」吞掉——**放开一条路却不给它落点，是把一个错换成
+  # 另一个错**，所以这五条与那次收窄是同一笔改动的两面。
+  # 判据是**终止还是调整**：cancel 结束这一趟，reroute 改这一趟（删途经点/换路/改目的地）。
+  # 两侧都要锁：只锁左边会让「换条路」也被兑现成结束导航，那比答非所问更糟。
+  - id: tu.nav.cancel-route
+    title: 取消当前导航（终止）
+    family_id: tu.nav-cancel-vs-reroute
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [navigation], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-19}
+    turns:
+      - input: {utterance: 取消导航, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [navigation.cancel]}], forbidden_intents: [navigation.reroute, navigation.navigate_to, navigation.estimate], allow_extra_intents: false}
+  - id: tu.nav.cancel-route-colloquial
+    title: 别导航了（终止，口语第二正例）
+    family_id: tu.nav-cancel-vs-reroute
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [paraphrase], domains: [navigation], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-19}
+    turns:
+      - input: {utterance: 别导航了, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [navigation.cancel]}], forbidden_intents: [navigation.reroute, navigation.navigate_to], allow_extra_intents: false}
+  - id: tu.nav.reroute-not-cancel
+    title: 途经点不去了（硬负例：改这一趟不是结束这一趟）
+    family_id: tu.nav-cancel-vs-reroute
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [navigation], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-19}
+    turns:
+      # ⚠ 原话不能逐字取自被注入的知识（manifest examples / boundaries texts）——
+      # `unseen_transfer` cohort 的 leakage 检查当场抓到「刚才那个途经点不去了」。
+      # 换一句同形态但没进过知识库的：门禁在按设计工作，尺子该让的是**这句话**，
+      # 不是那条检查。
+      - input: {utterance: 顺路那个加油站不去了, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [navigation.reroute]}], forbidden_intents: [navigation.cancel], allow_extra_intents: false}
+  - id: tu.nav.change-route-not-cancel
+    title: 换条避堵的路（硬负例第二例）
+    family_id: tu.nav-cancel-vs-reroute
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [navigation], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-19}
+    turns:
+      - input: {utterance: 换条避堵的路走, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [navigation.reroute]}], forbidden_intents: [navigation.cancel], allow_extra_intents: false}
+  - id: tu.nav.cancel-paraphrase
+    title: 结束导航吧（invariant 对照）
+    family_id: tu.nav-cancel-vs-reroute
+    cohort: unseen_transfer
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A6], mechanisms: [paraphrase], domains: [navigation], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-19}
+    relation: {base_case: tu.nav.cancel-route, type: invariant, expectation: {}}
+    turns:
+      - input: {utterance: 结束导航吧, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [navigation.cancel]}], forbidden_intents: [navigation.reroute, navigation.navigate_to], allow_extra_intents: false}
+
+  # ── 同一事项双时刻 vs 普通提醒查询（reminder.create_batch，2026-08-24 SL1）──
+  # MiniMax 对同一句会随机给两步、一步或零步；新能力把「同一件事提醒两次」收成一次
+  # 原子提交。边界不在“有几个时间词”，而在第二段是否明确复指**同一事项**：不同事项
+  # 仍走普通 create 计划，查询仍走 list。全族进入 route_hint 修复资产，故必须是
+  # seen_regression，不能借这 5 条冒充 unseen transfer。
+  - id: tu.reminder.batch-two-times
+    title: 同一事项两个时刻各提醒一次
+    family_id: tu.reminder-batch-vs-ordinary
+    cohort: seen_regression
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [step_cardinality], domains: [reminder], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-24}
+    turns:
+      - input: {utterance: 明天下午四点提醒我提交材料，三点半再提醒我一次, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [reminder.create_batch]}], forbidden_intents: [reminder.create, reminder.list], allow_extra_intents: false}
+  - id: tu.reminder.batch-call-twice
+    title: 叫我两次（第二正例）
+    family_id: tu.reminder-batch-vs-ordinary
+    cohort: seen_regression
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [step_cardinality, paraphrase], domains: [reminder], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-24}
+    turns:
+      - input: {utterance: 后天上午十点叫我去复诊，九点半再叫我一次, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [reminder.create_batch]}], forbidden_intents: [reminder.create, reminder.list], allow_extra_intents: false}
+  - id: tu.reminder.two-events-not-batch
+    title: 两个不同事项不能合成同一批（硬负例）
+    family_id: tu.reminder-batch-vs-ordinary
+    cohort: seen_regression
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [step_cardinality, object_flip], domains: [reminder], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-24}
+    turns:
+      - input: {utterance: 明天下午四点提醒我开会，三点半提醒我取快递, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [reminder.create]}], forbidden_intents: [reminder.create_batch, reminder.list], allow_extra_intents: false}
+  - id: tu.reminder.list-two-times-not-batch
+    title: 查两个时段的提醒不是新建（硬负例第二例）
+    family_id: tu.reminder-batch-vs-ordinary
+    cohort: seen_regression
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [step_cardinality, action_flip], domains: [reminder], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-24}
+    turns:
+      - input: {utterance: 明天下午四点有哪些提醒，三点半的也列一下, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [reminder.list]}], forbidden_intents: [reminder.create_batch, reminder.create], allow_extra_intents: false}
+  - id: tu.reminder.batch-paraphrase
+    title: 两次提醒换一种说法（invariant 对照）
+    family_id: tu.reminder-batch-vs-ordinary
+    cohort: seen_regression
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A6], mechanisms: [step_cardinality, paraphrase], domains: [reminder], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-24}
+    relation: {base_case: tu.reminder.batch-two-times, type: invariant, expectation: {}}
+    turns:
+      - input: {utterance: 明天早上九点提醒我交材料，八点半再提醒我一次, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [reminder.create_batch]}], forbidden_intents: [reminder.create, reminder.list], allow_extra_intents: false}
+
+  # ── 会话临时预览清理 vs 真实订单生命周期（shop.preview_discard，2026-08-25）──
+  # QA 探针会创建商户预览，但“取消待确认”只关闭编排挂起，不会自动删除 Redis 草稿。
+  # 新能力因此只处理认证 user + 当前 session 的临时预览；绝不能借“取消/订单”宽词
+  # 吞掉真实订单取消或历史查单。能力声明与 route_hint 已进入修复资产，整族必须标
+  # seen_regression，不能把修过的原话冒充 unseen transfer。
+  - id: tu.shop.preview-discard-current-session
+    title: 清理本次会话的订单预览
+    family_id: tu.shop-preview-discard-vs-order-lifecycle
+    cohort: seen_regression
+    risk: critical
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [shop], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-25}
+    turns:
+      - input: {utterance: 清理本次会话的订单预览, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [shop.preview_discard]}], forbidden_intents: [shop.order_cancel, luckin.order_cancel, shop.order_status], allow_extra_intents: false}
+  - id: tu.shop.preview-discard-temporary-draft
+    title: 丢弃本会话下单临时草稿（第二正例）
+    family_id: tu.shop-preview-discard-vs-order-lifecycle
+    cohort: seen_regression
+    risk: critical
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip, paraphrase], domains: [shop], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-25}
+    turns:
+      - input: {utterance: 丢弃这个会话的下单临时草稿, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [shop.preview_discard]}], forbidden_intents: [shop.order_cancel, luckin.order_cancel, shop.order_status], allow_extra_intents: false}
+  - id: tu.shop.real-order-cancel-not-preview-discard
+    title: 取消真实瑞幸订单不是清理预览（硬负例）
+    family_id: tu.shop-preview-discard-vs-order-lifecycle
+    cohort: seen_regression
+    risk: critical
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [luckin, shop], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-25}
+    turns:
+      - input: {utterance: 取消刚才那笔瑞幸订单, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [luckin.order_cancel]}], forbidden_intents: [shop.preview_discard, shop.order_status], allow_extra_intents: false}
+  - id: tu.shop.history-query-not-preview-discard
+    title: 查询历史订单不是清理预览（硬负例第二例）
+    family_id: tu.shop-preview-discard-vs-order-lifecycle
+    cohort: seen_regression
+    risk: high
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [action_flip], domains: [shop], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-25}
+    turns:
+      - input: {utterance: 查一下我之前的订单, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [shop.order_status]}], forbidden_intents: [shop.preview_discard, shop.order_cancel], allow_extra_intents: false}
+  - id: tu.shop.preview-discard-paraphrase
+    title: 取消本次订单预览（invariant 对照）
+    family_id: tu.shop-preview-discard-vs-order-lifecycle
+    cohort: seen_regression
+    risk: critical
+    status: reviewed
+    tags: {attacks: [A6], mechanisms: [paraphrase], domains: [shop], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-08-25}
+    relation: {base_case: tu.shop.preview-discard-current-session, type: invariant, expectation: {}}
+    turns:
+      - input: {utterance: 取消本次订单预览, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [shop.preview_discard]}], forbidden_intents: [shop.order_cancel, luckin.order_cancel, shop.order_status], allow_extra_intents: false}
+
+  # ── 场景定义问 vs 开启 / 部件模式（scene.describe，2026-10-05 固定语料 V207）─────────────
+  # 「露营模式是什么意思」此前没有能力可落、规划器判无需动作；定义问只讲不做（只响应能力），开启归 scene.activate，
+  # 空调 / 座椅这些部件自带的模式归手册。部件模式误落到 scene.describe 时 Agent 会改派手册，但计划层仍应直接落手册。
+  # 四条均为 seen_regression：能力声明（描述与范例）本身就是这次修复，不能伪装成未见迁移。
+  - id: tu.scene.activate-vs-describe
+    title: 打开露营模式
+    family_id: tu.scene-describe-vs-activate
+    cohort: seen_regression
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [scene], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-10-05}
+    turns:
+      - input: {utterance: 打开露营模式, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [scene.activate]}], forbidden_intents: [scene.describe], allow_extra_intents: false}
+  - id: tu.scene.describe-vs-activate
+    title: 露营模式是什么意思
+    family_id: tu.scene-describe-vs-activate
+    cohort: seen_regression
+    risk: medium
+    status: reviewed
+    tags: {attacks: [A2], mechanisms: [object_flip], domains: [scene], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-10-05}
+    relation: {base_case: tu.scene.activate-vs-describe, type: route_flip, expectation: {forbidden_after: [scene.activate], required_change: true}}
+    turns:
+      - input: {utterance: 露营模式是什么意思, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [scene.describe]}], forbidden_intents: [scene.activate, chitchat.talk], allow_extra_intents: false}
+  - id: tu.scene.describe-vs-manual
+    title: 午休模式开了会做哪些事
+    family_id: tu.scene-describe-vs-manual
+    cohort: seen_regression
+    risk: low
+    status: reviewed
+    tags: {attacks: [A1], mechanisms: [domain_collision], domains: [scene, manual], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-10-05}
+    turns:
+      - input: {utterance: 午休模式开了会做哪些事, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [scene.describe]}], forbidden_intents: [manual.query, scene.activate], allow_extra_intents: false}
+  - id: tu.scene.manual-vs-describe
+    title: 空调有哪些模式（部件模式不是场景）
+    family_id: tu.scene-describe-vs-manual
+    cohort: seen_regression
+    risk: low
+    status: reviewed
+    tags: {attacks: [A1], mechanisms: [domain_collision], domains: [scene, manual], layers: [l1]}
+    provenance: {kind: authored, reviewed_by: human, reviewed_via: blanket_authorisation, reviewed_at: 2026-10-05}
+    relation: {base_case: tu.scene.describe-vs-manual, type: route_flip, expectation: {forbidden_after: [scene.describe], required_change: true}}
+    turns:
+      - input: {utterance: 空调有哪些模式, context: {}}
+        expected:
+          plan: {required_intent_groups: [{any_of: [manual.query]}], forbidden_intents: [scene.describe, scene.list], allow_extra_intents: false}

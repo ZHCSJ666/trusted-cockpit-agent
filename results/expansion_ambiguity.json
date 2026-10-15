@@ -1,0 +1,195 @@
+{
+  "status": "clarify",
+  "message": "您想操作什么设备？请说明对象、位置和目标值。",
+  "before": {
+    "speed": 0,
+    "gear": "P",
+    "windows": {
+      "front_left": 0,
+      "front_right": 0,
+      "rear_left": 0,
+      "rear_right": 0
+    },
+    "temperature": 24,
+    "doors": {
+      "front_left": false,
+      "front_right": false,
+      "rear_left": false,
+      "rear_right": false
+    },
+    "trunk_open": false,
+    "massage": false,
+    "profile": "standard",
+    "source": "simulated",
+    "revision": 0,
+    "navigation_destination": null,
+    "state_age_ms": 0,
+    "sunroof_percent": 0,
+    "lights": {
+      "headlight": false,
+      "ambient": false,
+      "warning": false
+    },
+    "wiper_level": 0,
+    "seats": {
+      "front_left": {
+        "heating": 0,
+        "ventilation": 0,
+        "recline": 90
+      },
+      "front_right": {
+        "heating": 0,
+        "ventilation": 0,
+        "recline": 90
+      }
+    }
+  },
+  "vehicle": {
+    "speed": 0,
+    "gear": "P",
+    "windows": {
+      "front_left": 0,
+      "front_right": 0,
+      "rear_left": 0,
+      "rear_right": 0
+    },
+    "temperature": 24,
+    "doors": {
+      "front_left": false,
+      "front_right": false,
+      "rear_left": false,
+      "rear_right": false
+    },
+    "trunk_open": false,
+    "massage": false,
+    "profile": "standard",
+    "source": "simulated",
+    "revision": 0,
+    "navigation_destination": null,
+    "state_age_ms": 3,
+    "sunroof_percent": 0,
+    "lights": {
+      "headlight": false,
+      "ambient": false,
+      "warning": false
+    },
+    "wiper_level": 0,
+    "seats": {
+      "front_left": {
+        "heating": 0,
+        "ventilation": 0,
+        "recline": 90
+      },
+      "front_right": {
+        "heating": 0,
+        "ventilation": 0,
+        "recline": 90
+      }
+    }
+  },
+  "calls": [],
+  "trace": [
+    {
+      "stage": "input",
+      "status": "ok",
+      "detail": {
+        "text": "帮我打开一点",
+        "source": "user",
+        "vehicle_source": "simulated"
+      }
+    },
+    {
+      "stage": "input",
+      "status": "ok",
+      "detail": "原话用于授权；模型计划只作为候选。"
+    },
+    {
+      "stage": "ambiguity",
+      "status": "clarify",
+      "detail": "您想操作什么设备？请说明对象、位置和目标值。"
+    }
+  ],
+  "evidence": [],
+  "steps": [],
+  "plan": {
+    "kind": "workflow",
+    "steps": []
+  },
+  "workspace": {
+    "location": {
+      "name": "杭州（演示起点，非设备定位）",
+      "lat": 30.2741,
+      "lon": 120.1551,
+      "simulated": true
+    },
+    "places": [],
+    "candidate_sets": [],
+    "candidates": [],
+    "route": null,
+    "last_route": null,
+    "preferences": [],
+    "reminders": [],
+    "documents": [
+      {
+        "id": "c436eb074c87967eea31",
+        "filename": "Volvo_EC40_2026_UK_en.pdf",
+        "vehicle": "Volvo EC40 2026 UK",
+        "title": "EC40 2026 (25w46) User Manual",
+        "pages": 433,
+        "chunks": 904,
+        "sha256": "1fcca03a413beb0242dd5282a5f645b2b1b5a313610e620e46ec6c28ac4a0939",
+        "source_url": "https://www.volvocars.com/static/support-content/pdfs/uk_en-GB_ec40_2026_UM_8bbd937f411a2582b90516ef58b938ae.pdf",
+        "imported_at": "2026-10-11T15:49:42.429279+00:00"
+      },
+      {
+        "id": "3b407e395d33a4854076",
+        "filename": "Volvo_EC40_2026_US_en.pdf",
+        "vehicle": "Volvo EC40 2026 US",
+        "title": "EC40 2026 (25w17) User Manual",
+        "pages": 421,
+        "chunks": 888,
+        "sha256": "15bb5257af9ff6c032b13a5ad0fc3539b038df60aaabb953bf7068faadffa0f4",
+        "source_url": "https://www.volvocars.com/static/support/pdf/us_en-US_ec40_2026_UM_d2f062b9377f3b650b74c5c6841da8fc.pdf",
+        "imported_at": "2026-10-11T15:49:43.189159+00:00"
+      },
+      {
+        "id": "7c2ddc00d72f4d09ded8",
+        "filename": "Tesla_Model3_2024plus_US_en.pdf",
+        "vehicle": "Tesla Model 3 2024+ US",
+        "title": "Model 3 2024+ Owner’s Manual",
+        "pages": 328,
+        "chunks": 1002,
+        "sha256": "0b211f472b0089fd0fc82e09fe64513bdbddb60649371d4ad9249145bf0d539d",
+        "source_url": "https://www.tesla.com/ownersmanual/model3/en_us/Owners_Manual.pdf",
+        "imported_at": "2026-10-11T15:49:43.827304+00:00"
+      }
+    ],
+    "last_weather": null,
+    "last_news": null,
+    "last_search": null,
+    "last_manual": null,
+    "providers": {
+      "places": "Photon / OpenStreetMap Overpass",
+      "routes": "OSRM / OpenStreetMap",
+      "weather": "Open-Meteo",
+      "news": "Google News RSS",
+      "search": "Bing RSS",
+      "memory": "local SQLite",
+      "manual": "local PDF + lexical retrieval"
+    }
+  },
+  "source": "simulated",
+  "provider": "kimi",
+  "mode": "guarded",
+  "elapsed_ms": 3.2,
+  "orchestration": {
+    "tier": "T0",
+    "rounds": 0,
+    "tool_count": 0,
+    "max_tools": 8,
+    "max_rounds": 4,
+    "request_id": "workspace-1791733915318219375"
+  },
+  "session_id": "qa_ambiguity",
+  "channel": "workspace"
+}

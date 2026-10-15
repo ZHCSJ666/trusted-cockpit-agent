@@ -1,0 +1,268 @@
+"""端侧「结构化意图 → 意图名」只能有一个出口（QA 卡 Q13）。
+
+**背景**：端侧有两处把结构化意图翻成意图名——单句路径 `classify()` 与分段路径
+`_to_legacy_name()`——它们不一致。阶段 0.2 探针实测 **15/38 处不同，其中 7 处
+`is_local` 判定相反**：同一句话在单句形态与复合句形态下走**不同的路**。
+后果三类（卡 §3-Q13）：
+
+1. 媒体域的端侧快路径在**最常见的单句形态下根本没生效**（`classify("暂停音乐")`
+   产 `music.pause`，不在 `LOCAL_INTENTS` → 整句上云）。架构文档写的是「端侧快系统
+   处理高频/确定/安全敏感指令（车控、**媒体**）」——媒体这半边一直在绕云。
+2. 「下一首」方向相反：单句本地、复合句上云。
+3. `_to_legacy_name` 对双闪/前后除雾返回 `None`，复合句里必然整组上云。
+
+**这条判据代码里已经写过一次，当时只修了一处**（`fast_intent.py` aircon 分支，
+2026-08-04）：「发现根因时要问『同一形态还有几处』——『改遍了』和『发现了』是两件事」。
+那次没问，今天的答案是 15 处。那条注释是它自己的反例。
+
+## 这里为什么是三条断言，以及哪条会长期有效
+
+- `test_only_one_intent_naming_implementation`：**源码级，长期有效**。收敛之后
+  「两个出口一致」这种断言会变成**恒绿**（只剩一个实现，比什么都过）——正是 §4.3
+  「恒绿的断言比没有更糟」。真正防再分叉的是这一条。
+- `test_intent_name_golden`：**行为锁**。它钉的不是「两个出口相等」，是**这 38 条
+  文本各自应该叫什么名字、能不能本地执行**。改任何一个名字都会红。
+- `test_touched_objects_have_no_dead_alias`：收敛让 `LOCAL_INTENTS` 里一批
+  「两个名字都收着」的条目变成死条目。**只删本批证明得了的那些**——
+  「清理死条目之前先证明它真的死了」（2026-08-04 那条老账）。
+"""
+from __future__ import annotations
+
+import inspect
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+import pytest
+
+from fast_intent import LOCAL_INTENTS, classify, classify_structured, is_local
+from val import VAL
+import fast_intent
+
+
+# ── 金标：文本 → (意图名, 能否端侧执行) ──────────────────────────────────
+# 权威来源：`commands.yaml` 各对象的 `edge_intents`（B4「端侧意图名单的唯一声明处」）。
+#   · on/off 还是 open/close —— 按 edge_intents 声明（ambient_light/headlight/seat/wiper
+#     声明的都是 `.on/.off`，所以 `classify()` 原来产的 `.open` 是错的那个）；
+#   · 媒体子类统一落 `media.*` —— `LOCAL_INTENTS` 只登记 media.*，这也是架构文档的承诺；
+#   · 除雾按 `front_defogger.open/close` —— edge_intents 声明的就是 open/close。
+_GOLDEN = [
+    # 媒体：收敛前单句形态全部上云（`music.*` 不在 LOCAL_INTENTS）
+    # ⚠ 2026-08-16 Q7 改过这一行，留痕。Q13 落地时它是 `("media.pause", True)`，
+    # 并在这里标着「极性错误是 Q7 的事，本表只锁名字与路由」。Q7 的极性守卫落地后
+    # 分类器对负极性写操作**不产出本地意图**，所以名字是 None、不可本地执行。
+    # **这条红是行为锁在按设计工作**：它逼我显式承认这次变更，而不是让它悄悄发生。
+    ("音乐别停", None, False),
+    # ⚠ 2026-08-27（QA N2）改过这三行，**留痕**：原来「停止/关闭」与「暂停」一律
+    # 落 `media.pause`——`media_map` 把 stop/close 折进了 pause。折掉的那个终态
+    # (`stopped`) 恰好是 VAL 的初始态，于是它成了「只能离开、回不来」的态，
+    # 探针每一轮车态恢复都留一条不可能达成的差异。**行为锁按设计工作**：
+    # 修出口必须显式改这几行，而不是让路由悄悄变。
+    # 裸「停」仍归 pause（口语，不改）；「暂停」当然还是 pause——三者的分界就是判据。
+    ("停止音乐", "media.stop", True),
+    ("关闭音乐", "media.stop", True),
+    # ⚠ 2026-10-10 翻面，**留痕**：媒体停止兜底曾把任何带「停止 / 停下 / 关闭」的句子判成停止媒体在端侧执行——
+    # 「关闭导航」「停止导航」「停止充电」把音乐停了、导航充电照走，话也没上云。兜底只认媒体线索或整句只有动词。
+    ("关闭导航", None, False),
+    ("停止导航", None, False),
+    ("停止充电", None, False),
+    ("关闭定位", None, False),
+    ("关闭儿童锁", None, False),
+    # 「锁车」族只认整句短指令：说的是锁车相关的功能设置时不当锁车（2026-10-10）
+    ("关闭锁车鸣笛", None, False),
+    ("锁车后自动升窗", None, False),
+    ("停止播放", "media.stop", True),
+    ("关闭电台", "media.stop", True),
+    ("停止", "media.stop", True),
+    ("暂停音乐", "media.pause", True),
+    ("音乐停", "media.pause", True),
+    ("播放音乐", "media.play", True),
+    # 方向必须保住：结构化意图里 `下一首`/`上一首` 逐字相同（都是 operate=switch），
+    # 方向只在原话里。收敛后由唯一实现从 `_raw_text` 取回——不是靠某个调用方记得传形参。
+    ("下一首", "media.next", True),
+    ("上一首", "media.prev", True),
+    # 空调族（收敛前两个出口就一致，作对照——证明「没修过头」）
+    ("打开空调", "hvac.on", True),
+    ("关闭空调", "hvac.off", True),
+    ("空调调到26度", "hvac.set", True),
+    ("空调温度高一点", "hvac.inc", True),
+    ("风速大一点", "aircon.wind_speed.inc", True),
+    # 开合类对照
+    ("打开车窗", "window.open", True),
+    ("关闭车窗", "window.close", True),
+    ("打开天窗", "sunroof.open", True),
+    ("关闭天窗", "sunroof.close", True),
+    ("打开遮阳帘", "sunshade.open", True),
+    ("关闭遮阳帘", "sunshade.close", True),
+    ("把后视镜折叠", "rear_view_mirror.fold", True),
+    ("把后视镜展开", "rear_view_mirror.unfold", True),
+    ("打开后备箱", "trunk.open", True),
+    ("锁车门", "door_lock.close", True),
+    ("解锁车门", "door_lock.open", True),
+    # 2026-10-10 核心旅程 P3 K02：最常说的「锁车」修前端侧认不出、上云后落到闲聊答「已上锁」
+    ("锁车", "door_lock.close", True),
+    ("帮我锁车", "door_lock.close", True),
+    ("把车锁上", "door_lock.close", True),
+    ("锁门", "door_lock.close", True),
+    ("打开充电口", "charging_port.open", True),
+    ("打开方向盘加热", "steering_wheel.heating.open", True),
+    ("音量大一点", "volume.inc", True),
+    ("音量小一点", "volume.dec", True),
+    # on/off 族：edge_intents 声明的是 on/off，收敛前 `classify()` 产的 `.open` 是错的
+    ("打开氛围灯", "ambient_light.on", True),
+    ("氛围灯调成红色", "ambient_light.set", True),
+    ("打开大灯", "headlight.on", True),
+    ("座椅加热打开", "seat.heating.on", True),
+    ("座椅通风打开", "seat.ventilation.on", True),
+    ("打开雨刷", "wiper.on", True),
+    # 除雾：收敛前 `_to_legacy_name` 缺这两个对象 → 复合句里整组上云
+    ("打开前除雾", "front_defogger.open", True),
+    ("打开后除雾", "rear_defogger.open", True),
+    # 行车记录仪：收敛**当场照出**的一处——`_to_legacy_name` 原来产 `dashcam.on`，
+    # 而 edge_intents 与 LOCAL_INTENTS 都是 `open/close` ⇒ 分段路径从来路由不了它，
+    # 单句路径靠 `classify()` 的兜底恰好拼对、把它盖住了。
+    # ⚠ 抓到这处的是 **L0 语料 `ei.local.dashcam`**（它测 ingress 路由），
+    # 本文件当时全绿——**名字对不对与走哪条路，是两层断言**。补进金标。
+    ("打开行车记录仪", "dashcam.open", True),
+    ("关闭行车记录仪", "dashcam.close", True),
+    # ⚠ 下面五行 2026-08-19（QA 卡 Q8）翻面，**留痕**：它们原来锁的是「能力缺席时
+    # 诚实上云」，现在锁的是「能力补上了、走端侧」。**行为锁按设计工作**——
+    # 补能力必然要显式改这几行，而不是让路由悄悄变。
+    # 双闪：原为 `("打开双闪", "warning_light.open", False)`——commands.yaml 当时没有
+    # 这个对象（被 `gen_commands_yaml` 的 family 表并进了 headlight）。
+    ("打开双闪", "warning_light.open", True),
+    ("关闭双闪", "warning_light.close", True),
+    # 静音：原为 `("静音", None, False)` / `("取消静音", None, False)`，两个出口都认不出。
+    # 落点是 `volume` 不是 `media`，理由写在 commands.yaml 的 volume 对象上。
+    ("静音", "volume.mute", True),
+    ("取消静音", "volume.unmute", True),
+    # 方向盘：名字这一层**一直是对的**，所以这两行在旧代码下也绿——真正红的是
+    # 下面那条 VAL 校验断言（旧实现产 `operate=open` / `mode=height`，
+    # 知识库两者都不认，端侧秒回「暂不支持哦」）。**名字对不代表命令合法。**
+    ("关掉方向盘加热", "steering_wheel.heating.close", True),
+    ("方向盘调高", "steering_wheel.height.inc", True),
+]
+
+
+@pytest.mark.parametrize("text,want_name,want_local", _GOLDEN,
+                         ids=[g[0] for g in _GOLDEN])
+def test_intent_name_golden(text, want_name, want_local):
+    got = (classify(text) or {}).get("name")
+    assert got == want_name, f"{text!r} → {got!r}，金标 {want_name!r}"
+    assert is_local(got or "") is want_local, (
+        f"{text!r} → {got!r} 的 is_local={is_local(got or '')}，金标 {want_local}")
+
+
+@pytest.mark.parametrize("text,want_name,_local", _GOLDEN,
+                         ids=[g[0] for g in _GOLDEN])
+def test_segment_path_agrees_with_single_sentence_path(text, want_name, _local):
+    """分段路径（复合句）必须给出同一个名字。
+
+    收敛之后这条与上一条走的是同一个实现，因此**结构上必然通过**——它留在这里的
+    作用是「再分叉」的探针（配合下面那条源码级断言），不是独立证据。
+    这话写在这里，免得下一个人把它当成两条独立的保护。
+    """
+    structured = classify_structured(text)
+    got = fast_intent._to_legacy_name(structured) if structured else None
+    assert got == want_name, f"{text!r} 分段路径 → {got!r}，金标 {want_name!r}"
+
+
+@pytest.mark.parametrize("text,want_name,want_local", _GOLDEN,
+                         ids=[g[0] for g in _GOLDEN])
+def test_fast_path_command_is_accepted_by_val(text, want_name, want_local):
+    """端侧快路径产出的结构化命令**必须过 VAL 校验**——名字对不等于命令合法。
+
+    ⚠ **这条断言是 2026-08-19 补的，补它的直接原因是一个活了很久的洞**（QA I-004）：
+    `steering_wheel.heating.open` 在 `commands.yaml` 里声明齐全、在 `LOCAL_INTENTS` 里、
+    `classify()` 也产得出这个名字——**唯独端侧快路径产的 VAL 命令是 `operate=open`，
+    而方向盘的 `operates` 是 `[set, inc, dec]`**，于是 `_validate_command` 一律判
+    unsupported_command，真栈三次取样全是「暂不支持哦」。
+
+    为什么既有的门禁看不见它：`test/eval_capability_integrity.py` 逐条跑的是
+    **`edge_call.decode_intent`** 那条路（云侧计划面），它产的是 `set` + `enabled`
+    ——**合法**。同一个 intent 有两个产出方，门禁只走了其中一条。
+    这是「同一件事有两份实现，迟早有一份是错的」在**结构化命令形状**上的形态。
+
+    判据刻意**只要求合法、不要求两个产出方逐字相同**：实测另有 7 对良性差异
+    （media 别名 music、`switch` 带不带 mode 等），把它们一并锁死只会制造噪声红。
+    """
+    if not want_local:
+        return                       # 上云的那些本来就不经 VAL
+    structured = classify_structured(text)
+    assert structured is not None, f"{text!r} 认不出结构化意图"
+    data = structured["data"]
+    val = VAL()
+    ok, err = val._validate_command(
+        data.get("object"), data.get("operate"), val._normalize_entities(data))
+    assert ok, (f"{text!r} → {data!r} 过不了 VAL 校验（{err}）；"
+                "端侧会秒回「暂不支持哦」，能力声明齐全也没用")
+
+
+# ── 源码级：只允许存在一处「对象 → 名字」的分支链 ──────────────────────────
+
+_OBJ_BRANCH = re.compile(r"\bobj\s*(?:==|in)\s")
+
+
+def test_only_one_intent_naming_implementation():
+    """整个 `fast_intent` 里，只能有**一个**函数在做「对象 → 意图名」的分派。
+
+    判据是「函数体里有多少处按 `obj` 分支」——≥5 处即认定它在维护一张对象表。
+    收敛前 `classify()` 与 `_to_legacy_name()` 各有一张（60+ 与 40+ 处），
+    于是同一个对象在两处各拼一个名字，而 `LOCAL_INTENTS` 把两个名字都收着，
+    分歧就此隐形三个月。
+
+    ⚠ 这条断言本身要能红：把 `classify()` 的分支链复制回来，它立刻红。
+    """
+    src = inspect.getsource(fast_intent)
+    offenders = []
+    for name, fn in vars(fast_intent).items():
+        if not callable(fn) or not hasattr(fn, "__code__"):
+            continue
+        if fn.__code__.co_filename != fast_intent.__file__:
+            continue
+        try:
+            body = inspect.getsource(fn)
+        except OSError:            # pragma: no cover - 源码不可读时不误判
+            continue
+        hits = len(_OBJ_BRANCH.findall(body))
+        if hits >= 5:
+            offenders.append((name, hits))
+    assert len(offenders) == 1, (
+        f"「对象 → 意图名」的分派必须只有一处，实测 {len(offenders)} 处："
+        f"{sorted(offenders)}。同一件事有两份实现，迟早有一份是错的。")
+    assert src.count("def _to_legacy_name") == 1
+
+
+# ── 收敛的连带：本批证明得了的死条目 ────────────────────────────────────
+
+# 这四族的 `edge_intents` 声明的是 `.on/.off`，收敛后唯一实现只会产 `.on/.off`，
+# `.open/.close` 因此**不可达**。`LOCAL_INTENTS` 只服务端侧路由（`is_local`），
+# 云侧场景动作走 `action_to_structured` 对 `commands.yaml`，不看这张表——
+# 所以删掉这些条目不会影响 `scene_orchestrator` 产的 `ambient_light.open`。
+_DEAD_AFTER_CONVERGENCE = [
+    "ambient_light.open", "ambient_light.close",
+    "headlight.open", "headlight.close",
+    "wiper.open", "wiper.close",
+    "seat.heating.open", "seat.heating.close",
+    "seat.ventilation.open", "seat.ventilation.close",
+    "seat.massage.open", "seat.massage.close",
+    "seat.lumbar_support.open", "seat.lumbar_support.close",
+    "fragrance.open", "fragrance.close",
+]
+
+
+@pytest.mark.parametrize("dead", _DEAD_AFTER_CONVERGENCE)
+def test_touched_objects_have_no_dead_alias(dead):
+    """收敛后不可达的别名必须从 `LOCAL_INTENTS` 删掉。
+
+    留着它们不是无害的：**「两个名字都收着」正是上一次分歧能藏三个月的原因**
+    （2026-08-04 那条注释写得很清楚，只是当时没把它变成断言）。
+
+    ⚠ 只删本批**证明得了**的这些。`bluetooth/wifi/equalizer/voice_assistant/
+    hotspot/auto_hold/epb/surround_view/low_beam/call_log/dashboard` 也各有一对别名，
+    但它们属于 §4.2 那 14 条端侧能力欠账（`commands.yaml` 里压根没有 `edge_intents`），
+    定名字要连能力面一起定——那是 Q8/阶段 4，不在本卡范围。**不在这里顺手删。**
+    """
+    assert dead not in LOCAL_INTENTS

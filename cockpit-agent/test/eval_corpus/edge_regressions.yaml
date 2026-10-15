@@ -1,0 +1,143 @@
+# 端侧 fast_intent 历史缺陷回归语料（T3.4）。转录自
+# orchestrator/edge/tests/test_fast_intent_extended.py::TestBatteryQuery 的内联 pytest 断言，
+# 供 test/eval_fast_intent.py 纳入评测基线做逐例回归比对；不替代原 pytest（继续独立运行，
+# 是第一道防线，本文件是把同一批案例也变成可聚合基线的第二道防线）。
+#
+# 背景：裸"电池"过宽匹配，曾把"深入调研固态电池"劫持成电量查询（"电量72%"），已收窄为
+# 须与电量级/状态词共现（见 fast_intent.py 电池共现词检查）。
+#
+# schema:
+#   text: 输入
+#   expect_object: 期望 classify_structured(text)["data"]["object"]（与 forbid_object 二选一）
+#   forbid_object: 期望"绝不能"被判成该 object（劫持检测专用；classify_structured 返回 None
+#                  也算通过——"别劫持成 battery"不代表"必须能分类成别的东西"）
+#   source: 溯源（原 pytest 文件:类:方法），供人工核对
+#   tags: 分桶/检索标签
+
+positive:
+  - text: 当前还剩多少电量
+    expect_object: battery
+    source: "orchestrator/edge/tests/test_fast_intent_extended.py::TestBatteryQuery::test_battery_query_classified_and_local"
+    tags: [battery, positive]
+  - text: 电量还有多少
+    expect_object: battery
+    source: "orchestrator/edge/tests/test_fast_intent_extended.py::TestBatteryQuery::test_battery_query_classified_and_local"
+    tags: [battery, positive]
+  - text: 还剩多少电
+    expect_object: battery
+    source: "orchestrator/edge/tests/test_fast_intent_extended.py::TestBatteryQuery::test_battery_query_classified_and_local"
+    tags: [battery, positive]
+  - text: 电池还有多少
+    expect_object: battery
+    source: "orchestrator/edge/tests/test_fast_intent_extended.py::TestBatteryQuery::test_battery_with_level_or_status_word_still_local"
+    tags: [battery, positive]
+  - text: 电池剩多少电
+    expect_object: battery
+    source: "orchestrator/edge/tests/test_fast_intent_extended.py::TestBatteryQuery::test_battery_with_level_or_status_word_still_local"
+    tags: [battery, positive]
+  - text: 看下电池状态
+    expect_object: battery
+    source: "orchestrator/edge/tests/test_fast_intent_extended.py::TestBatteryQuery::test_battery_with_level_or_status_word_still_local"
+    tags: [battery, positive]
+  - text: 电池健康吗
+    expect_object: battery
+    source: "orchestrator/edge/tests/test_fast_intent_extended.py::TestBatteryQuery::test_battery_with_level_or_status_word_still_local"
+    tags: [battery, positive]
+
+  # R4.1 P3 B1：气象并入天气类（气象 5.0%→天气类，纯命名遗漏）
+  - text: 长沙的气象怎么样
+    expect_object: weather
+    source: "R4.1 P3 B1 气象同义词"
+    tags: [weather, b1, synonym]
+  - text: 气象查询澳门台北
+    expect_object: weather
+    source: "R4.1 P3 B1 气象同义词"
+    tags: [weather, b1, synonym]
+  - text: 深圳今天气象怎么样
+    expect_object: weather
+    source: "R4.1 P3 B1 气象同义词"
+    tags: [weather, b1, synonym]
+
+  # R4.1 P3 B2：设置页/界面开合族（补关闭方向 + 界面/页面通用）
+  - text: 关闭系统设置
+    expect_object: page
+    source: "R4.1 P3 B2 设置页开合（关闭方向）"
+    tags: [page, b2, settings_page]
+  - text: 打开语音技能界面
+    expect_object: page
+    source: "R4.1 P3 B2 设置页开合（界面通用，无「设置」字）"
+    tags: [page, b2, settings_page]
+  - text: 打开负一屏页面
+    expect_object: page
+    source: "R4.1 P3 B2 设置页开合（页面通用）"
+    tags: [page, b2, settings_page]
+
+  # R4.1b P0：端侧对象化（低成本非安全敏感）——空气净化 / 导航播报 / 按键音
+  - text: 打开空气净化
+    expect_object: air_purifier
+    source: "R4.1b P0 空气净化对象化"
+    tags: [air_purifier, r4.1b]
+  - text: 关闭空气净化
+    expect_object: air_purifier
+    source: "R4.1b P0 空气净化对象化"
+    tags: [air_purifier, r4.1b]
+  - text: 打开导航播报
+    expect_object: navi_broadcast
+    source: "R4.1b P0 导航播报对象化（edge_expected=true 子集）"
+    tags: [navi_broadcast, r4.1b]
+  - text: 关闭导航播报
+    expect_object: navi_broadcast
+    source: "R4.1b P0 导航播报对象化"
+    tags: [navi_broadcast, r4.1b]
+  - text: 打开按键音
+    expect_object: key_tone
+    source: "R4.1b P0 按键音对象化"
+    tags: [key_tone, r4.1b]
+
+hijack_guard:
+  - text: 深入调研一下固态电池的现状和量产前景
+    forbid_object: battery
+    source: "orchestrator/edge/tests/test_fast_intent_extended.py::TestBatteryQuery::test_battery_topic_not_hijacked_as_battery_query"
+    tags: [battery, hijack, research_topic]
+  - text: 固态电池技术
+    forbid_object: battery
+    source: "orchestrator/edge/tests/test_fast_intent_extended.py::TestBatteryQuery::test_battery_topic_not_hijacked_as_battery_query"
+    tags: [battery, hijack, research_topic]
+  - text: 研究下电池行业的发展
+    forbid_object: battery
+    source: "orchestrator/edge/tests/test_fast_intent_extended.py::TestBatteryQuery::test_battery_topic_not_hijacked_as_battery_query"
+    tags: [battery, hijack, research_topic]
+
+  # R4.1 P3 B1：气象反例——地点(导航)/云端预警(info.alerts)不得被端侧判成 weather
+  - text: 气象局怎么走
+    forbid_object: weather
+    source: "R4.1 P3 B1 气象反例（气象局=地点，走导航）"
+    tags: [weather, hijack, b1]
+  - text: 附近的气象局在哪
+    forbid_object: weather
+    source: "R4.1 P3 B1 气象反例（气象局=地点，走导航）"
+    tags: [weather, hijack, b1]
+  - text: 气象台发布了什么预警
+    forbid_object: weather
+    source: "R4.1 P3 B1 气象反例（预警=info.alerts 云端）"
+    tags: [weather, hijack, b1]
+
+  # R4.1 P3 B2：设置页开合反例——读内容/manual 类不得被判成 page（须上云）
+  - text: 打开设置里的隐私协议给我读一下
+    forbid_object: page
+    source: "R4.1 P3 B2 反例（读内容请求=云端，非开设置页）"
+    tags: [page, hijack, b2]
+  - text: 辅助驾驶怎么用
+    forbid_object: page
+    source: "R4.1 P3 B2 反例（怎么用=manual.query 云端）"
+    tags: [page, hijack, b2]
+
+  # R4.1b P0 反例：语义相邻对象不得被新对象误吸
+  - text: 查一下今天的空气质量
+    forbid_object: air_purifier
+    source: "R4.1b P0 反例（空气质量=air_quality 查询，非空气净化控制）"
+    tags: [air_purifier, hijack, r4.1b]
+  - text: 导航去公司
+    forbid_object: navi_broadcast
+    source: "R4.1b P0 反例（导航去X=navigation 路线，非导航播报开关）"
+    tags: [navi_broadcast, hijack, r4.1b]

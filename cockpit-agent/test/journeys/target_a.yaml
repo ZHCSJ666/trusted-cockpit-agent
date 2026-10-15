@@ -1,0 +1,191 @@
+# A 组：跨 Agent 自主执行 —— 目标级（能力标尺；允许红，红灯=工程 backlog，不拦退出码）
+# 每条红灯按「修 / 立卡 / 修正预期」三选一评审（设计 §6 P1）。
+suite: A-autonomy-target
+journeys:
+  - id: A1-4
+    title: 条件依赖 DAG：查天气→按结果决定建不建提醒
+    level: target
+    lane: live
+    tags: [autonomy]
+    retry: 1        # 天气→T2 条件重规划受 live LLM 采样影响；两次均须满足不反问时间的硬断言
+    setup:
+      location: {lat: 22.5333, lng: 113.9505}
+    turns:
+      # 校准记录（批次3 假绿）：speech_all [雨,提醒] 被「好的，查一下…就提醒我带伞。
+      # 什么时候提醒你？」的**用户原话回声**蒙过（reminder hint 吞条件句反问时间）——
+      # 补 speech_not 反问 + 要求天气证据词。
+      - say: 查一下明天深圳会不会下雨，要是下雨就提醒我明早带伞
+        expect:
+          latency_s: 75
+          speech_not: [什么时候提醒, 几点提醒]
+          any_of:
+            - speech_all: [雨, 提醒]
+            - speech_any: [不会下雨, 无需, 不用带伞, 没有雨]
+    cleanup:
+      - 取消带伞的提醒
+      - 确定
+
+  - id: A2-1
+    title: 搜店→导航单句直达（中间结果传递，不反问）
+    level: target
+    lane: live
+    tags: [autonomy]
+    requires: [AMAP_KEY]
+    retry: 1        # 高德/LLM 单轮超时只做一次有界重试；不得降级为无 action
+    setup:
+      location: {lat: 22.5333, lng: 113.9505}
+    turns:
+      # 校准记录（2026-07-15 @M3 canonical）：禁词 '第几个' 被顺路补能 offer 的通用话术
+      # 误伤（「另外顺路的充电有…说『第几个』即可」——导航已直达真店名，非反问哪家店）
+      # → 移除；反问断链语义仍由 哪一家/想去哪/请选择 钉住。
+      - say: 找一家附近评分最高的川菜馆，直接导航过去
+        expect:
+          latency_s: 75
+          action: {type: navigate}
+          speech_not: [哪一家, 想去哪, 请选择]   # 用户说了“直接”，反问=断链
+
+  - id: A2-2b
+    title: 赛程→提醒单句成单（REMINDABLE 单句版）
+    level: target
+    lane: live
+    tags: [autonomy, continuity]
+    requires: [API_FOOTBALL_KEY]
+    retry: 1
+    turns:
+      # 与 regression A2-2a 使用同一真实赛事发现机制；没有真实场次即 FAIL。
+      - say: $E2E_SPORTS_SINGLE_REMINDER_QUERY
+        expect:
+          latency_s: 60
+          speech_any: [提醒]
+          speech_not: [什么时候提醒, 几点提醒]
+    cleanup:
+      - 取消观看的提醒
+      - 确定
+
+  - id: A2-4
+    title: 导航 ETA→提醒（REMINDABLE 即插契约的 navigation 缺口）
+    level: target
+    lane: live
+    tags: [autonomy, proactive]
+    requires: [AMAP_KEY]
+    setup:
+      location: {lat: 22.5333, lng: 113.9505}
+    turns:
+      - say: 导航去宝安国际机场
+        expect:
+          latency_s: 60
+          action: {type: navigate}
+      - say: 到之前一刻钟提醒我给张姐打电话
+        expect:
+          latency_s: 45
+          speech_any: [提醒]
+          # 理想=按 ETA-15min 成单；可接受降级=诚实说明按预计时长转时间。反问时间=红。
+          speech_not: [什么时候提醒, 几点提醒]
+    cleanup:
+      - 取消打电话的提醒
+      - 确定
+
+  - id: A3-3
+    title: 搜索薄证据→follow_up 引导→「深入调研」续接同话题
+    level: target
+    lane: live
+    tags: [autonomy, continuity]
+    requires: [EXA_API_KEY]
+    turns:
+      - say: 帮我查查车规级固态电池和半固态电池的量产良率对比
+        expect:
+          latency_s: 90
+      - say: 那深入调研一下吧
+        expect:
+          latency_s: 150
+          cards_any: [research_report]
+          card_contains: [固态]        # 复用上轮话题，不是空跑“调研一下吧”
+
+  - id: A5-1
+    title: 多步部分失败诚实回执（trip 故障注入，天气照答）
+    level: target
+    lane: live
+    tags: [honesty, autonomy]
+    requires: [QWEATHER_PROJECT_ID|QWEATHER_KEY]
+    setup:
+      docker_stop: trip-planner-agent
+      location: {lat: 22.5333, lng: 113.9505}
+    turns:
+      - say: 帮我规划明天的杭州一日游，顺便看下明天杭州的天气
+        expect:
+          latency_s: 120
+          any_of:
+            - cards_any: [weather]
+            - speech_any: ["℃", 气温, 多云, 晴, 小雨, 阵雨]
+          # 部分失败必须明说，不能静默吞掉也不能装成功
+          speech_any: [没能, 没跑成功, 没成功, 没拿到结果, 帮不了, 失败, 出错, 暂时, 稍后, 不可用, 遇到问题]
+          speech_not: [第1天, 第一天, 已为您规划好]
+
+  # ── M2 Task Ledger：长任务的三条用户可见语义（子 RFC §6 P2 DoD）──────────
+  # orphaned 续接（重启容器后诚实报告）与 verify 失败话术不在此处：前者要重启容器
+  # （runner 不做基础设施操作，已由 test/e2e_ledger.py 场景⑤覆盖）；后者在当前代码下
+  # 不会自然 unsat（首批三处声明的 Agent 今天没有假完成，见子 RFC §9.6）。
+  - id: A6-1
+    title: 长任务可停可问：受理→查进度→喊停（Task Ledger 拉模式）
+    level: target
+    lane: live
+    tags: [autonomy, honesty]
+    turns:
+      # 受理：开单成功才承诺「可停可问」——承诺得起才说
+      - say: 慢慢查一下钠离子电池的产业化进展，查完告诉我
+        expect:
+          latency_s: 60
+          speech_any: [报告, 查, 几分钟]
+          follow_up_any: [别查了, 怎么样了]
+      # 进度：从账本读事实确定性作答，不进 LLM（任务状态是系统持有的事实）
+      - say: 那个调研查得怎么样了
+        expect:
+          latency_s: 30
+          speech_any: [还在查, 查完, 中断]
+          speech_not: [没让我查过, 查不到]
+      # 取消：拉模式置态，后台下一次心跳自行收尾
+      - say: 别查了
+        expect:
+          latency_s: 30
+          speech_any: [正在停, 已经结束, 没有正在跑]
+    cleanup:
+      - 别查了
+
+  - id: A6-2
+    title: 长任务幂等受理：连说两遍不双跑
+    level: target
+    lane: live
+    tags: [autonomy, honesty]
+    turns:
+      - say: 慢慢查一下固态电池的封装工艺，查完告诉我
+        expect:
+          latency_s: 60
+          speech_any: [报告, 查, 几分钟]
+      # 同一目标再说一遍 → 幂等命中，答「已经在查了」而不是又开一个后台任务
+      - say: 慢慢查一下固态电池的封装工艺，查完告诉我
+        expect:
+          latency_s: 30
+          speech_any: [已经在查, 深入查, 完整报告, 查完]
+    cleanup:
+      - 别查了
+
+  # 支付闭环（§9.17 批 2）：确认闸 → 网关亮码。断言状态化（need_confirm 态 +
+  # 卡类型），话术只用容忍集。worker 推进 captured 与幂等防双付的时序断言在
+  # e2e_payment（那里能控等待窗）；「确认前渠道零动作」由第一轮 need_confirm 态
+  # 与网关侧契约测试（Authorize 不碰渠道）合钉，语料算子集无 cards_not、不硬造。
+  - id: A7-1
+    title: 停车缴费：二次确认后出付款码（Agent 不持凭证）
+    level: target
+    lane: live
+    tags: [autonomy, payment]
+    turns:
+      - say: 帮我交一下停车费
+        expect:
+          latency_s: 40
+          need_confirm: true
+          speech_any: [确认支付, 元]
+      - say: 确认
+        expect:
+          latency_s: 40
+          cards_any: [payment_qr]
+          speech_any: [扫码, 付款码, 支付]

@@ -1,0 +1,356 @@
+"""引擎级焦点态集成：控制轮后焦点持久，下一轮指代规划 prompt 注入焦点块。
+
+进程内 stub（_Spy 模式，参考 test_multi_intent.py），不依赖 gRPC。
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from orchestrator.cloud.engine import PlannerEngine
+from orchestrator.cloud.planning import PlanBuilder
+from orchestrator.cloud.executor import DagExecutor
+from orchestrator.cloud.aggregator import Aggregator
+from orchestrator.cloud.context import Focus
+from orchestrator.cloud.models import Plan, Step
+from orchestrator.cloud.session import SessionStore
+
+
+@pytest.fixture(autouse=True)
+def _skills_off(monkeypatch):
+    """本文件测焦点机制：假 LLM 按 prompt 关键词出计划——skill 注入块的 policy 文本
+    （含「空调」「最近对话」字样）会误触发关键词匹配，钉 off 隔离（M0b Full Migration）。"""
+    monkeypatch.setenv("SKILLS_MODE", "off")
+
+
+def _agent(agent_id, intents):
+    caps = [SimpleNamespace(intent=i, slots=[], description=i) for i in intents]
+    manifest = SimpleNamespace(
+        agent_id=agent_id, trust_level="oem", latency_budget_ms=2000,
+        requires_permissions=[], capabilities=caps, kind="agent", deployment="cloud")
+    return SimpleNamespace(manifest=manifest, endpoint=f"{agent_id}:50000")
+
+
+_AGENTS = [_agent("hvac", ["hvac.set", "hvac.inc"])]
+
+
+class _Spy:
+    def __init__(self):
+        self.planner_prompts: list[str] = []
+
+    async def call_agent(self, endpoint, intent, slots, ctx, meta):
+        return SimpleNamespace(status=0, speech="空调已设置为26度", follow_up="",
+                               actions=[], ui_card=None, data=None, missing_slots=[])
+
+    async def llm(self, messages, **kwargs):
+        system = messages[0]["content"]
+        user = messages[1]["content"] if len(messages) > 1 else ""
+        if "任务编排器" in system:
+            self.planner_prompts.append(user)
+            if "调高" in user or "再" in user:
+                return json.dumps({"steps": [
+                    {"id": "s1", "capability_ref": "cap_0001",
+                     "slots": {}, "depends_on": [], "slot_refs": {}}]})
+            return json.dumps({"steps": [
+                {"id": "s1", "capability_ref": "cap_0002",
+                 "slots": {"temperature": "26", "position": "副驾"},
+                 "depends_on": [], "slot_refs": {}}]})
+        return "好的，已完成。"
+
+    async def resolve(self, query="", intent="", top_k=1):
+        return _AGENTS
+
+    async def list_agents(self):
+        return _AGENTS
+
+
+def _engine():
+    spy = _Spy()
+    session = SessionStore(redis_url="")
+    engine = PlannerEngine(
+        clients=spy,
+        planner=PlanBuilder(llm_fn=spy.llm, registry_fn=spy.resolve),
+        executor=DagExecutor(call_agent_fn=spy.call_agent),
+        aggregator=Aggregator(llm_fn=spy.llm),
+        session=session,
+    )
+    return engine, spy, session
+
+
+def _req(text, session_id="focus-s"):
+    return SimpleNamespace(
+        text=text, session_id=session_id, request_id="r",
+        is_confirmation=False,
+        context=SimpleNamespace(user_id="u1", vehicle_id="v1"))
+
+
+def _run(engine, req):
+    async def collect():
+        return [e async for e in engine.run(req)]
+    return asyncio.run(collect())
+
+
+def test_control_turn_persists_focus():
+    engine, spy, session = _engine()
+    _run(engine, _req("把副驾空调调到26度"))
+    focus = asyncio.run(session.load_focus(
+        "focus-s", owner_user_id="u1"))
+    assert focus is not None
+    assert focus["obj"] == "空调"
+    assert "副驾" in focus["positions"]
+    assert focus["attr"] == "温度"
+
+
+def test_followup_turn_injects_focus_into_planner_prompt():
+    engine, spy, session = _engine()
+    _run(engine, _req("把副驾空调调到26度"))   # 第一轮：建立焦点
+    _run(engine, _req("再调高一点"))            # 第二轮：指代
+    # 第一轮 prompt 无焦点（首轮），第二轮 prompt 应带焦点块
+    assert "当前对话焦点" not in spy.planner_prompts[0]
+    assert any("当前对话焦点" in p and "空调" in p and "副驾" in p
+               for p in spy.planner_prompts[1:])
+
+
+def test_focus_disabled_when_memory_off():
+    engine, spy, session = _engine()
+
+    def _req_mem_off(text):
+        r = _req(text)
+        r.meta = {"memory_enabled": "false"}
+        return r
+
+    _run(engine, _req_mem_off("把副驾空调调到26度"))
+    # memory_enabled=false → 不读写焦点/历史
+    assert asyncio.run(session.load_focus(
+        "focus-s", owner_user_id="u1")) is None
+
+
+def test_destination_focus_meta_only_reaches_location_scoped_steps():
+    """导航结果的精确目的地坐标属于 location 上下文：只向显式声明该 scope 的 Agent 下发。
+
+    Planner 即使忽略「那边」焦点，天气 Agent 仍能用结构化目的地坐标，而非退回浏览器当前位置。
+    """
+    plan = Plan(steps=[
+        Step(id="weather", agent_id="info", intent="info.weather",
+             context_scopes=["location"]),
+        Step(id="chat", agent_id="chitchat", intent="chitchat.general",
+             context_scopes=[]),
+    ])
+    focus = Focus(
+        last_destination="大梅沙海滨公园",
+        destination_lat=22.596,
+        destination_lng=114.306,
+    )
+
+    PlannerEngine._apply_focus_meta(plan, focus)
+
+    assert plan.steps[0].meta["focus_destination"] == "大梅沙海滨公园"
+    assert plan.steps[0].meta["focus_destination_lat"] == "22.596"
+    assert plan.steps[0].meta["focus_destination_lng"] == "114.306"
+    assert "focus_destination_lat" not in plan.steps[1].meta
+
+
+def test_deictic_weather_followup_uses_last_city_even_if_model_invents_another():
+    plan = Plan(
+        raw_text="现在有影响开车的天气预警吗",
+        steps=[Step(id="alerts", agent_id="info", intent="info.alerts",
+                    slots={"city": '{"city":"上海","road":""}'},
+                    context_scopes=["location"])],
+    )
+
+    PlannerEngine._apply_focus_meta(
+        plan, Focus(last_city="深圳", last_intent="info.weather")
+    )
+
+    assert plan.steps[0].slots["city"] == "深圳"
+
+
+def test_session_constraints_go_only_to_steps_that_declared_the_scope():
+    """C12-B 下发面：与候选集同一条门控通道（manifest `context_scopes`）。
+
+    **刻意不广播**——它与安全告警的取舍相反：告警是所有域都得服从的约束，
+    忌口是个人数据，给不消费它的 Agent 只是多一处扩散面（最小化下发）。
+    """
+    plan = Plan(
+        raw_text="推荐附近适合晚饭的地方",
+        steps=[Step(id="near", agent_id="nearby", intent="nearby.search",
+                    context_scopes=["location", "session_constraints"]),
+               Step(id="talk", agent_id="chitchat", intent="chitchat.talk")],
+    )
+
+    PlannerEngine._apply_focus_meta(
+        plan, Focus(session_constraints={"no_spicy": True}))
+
+    assert json.loads(plan.steps[0].meta["focus_session_constraints"]) == {
+        "no_spicy": True}
+    assert "focus_session_constraints" not in plan.steps[1].meta
+
+
+def test_weather_after_unrelated_turn_does_not_inherit_stale_city():
+    """城市焦点只服务同域续接，不能跨过一次无关会话污染新的当前位置查询。"""
+    plan = Plan(
+        raw_text="现在天气怎么样",
+        steps=[Step(id="weather", agent_id="info", intent="info.weather",
+                    slots={"city": ""}, context_scopes=["location"])],
+    )
+
+    PlannerEngine._apply_focus_meta(
+        plan, Focus(last_city="深圳", last_intent="chitchat.talk")
+    )
+
+    assert plan.steps[0].slots["city"] == ""
+
+
+def test_object_city_explicitly_named_this_turn_beats_the_previous_city():
+    """对象化是格式错误，不代表其中被原话点名的新城市可以被旧焦点覆盖。"""
+    plan = Plan(
+        raw_text="北京现在有天气预警吗",
+        steps=[Step(id="alerts", agent_id="info", intent="info.alerts",
+                    slots={"city": '{"city":"北京","road":""}'},
+                    context_scopes=["location"])],
+    )
+
+    PlannerEngine._apply_focus_meta(
+        plan, Focus(last_city="深圳", last_intent="info.weather")
+    )
+
+    assert plan.steps[0].slots["city"] == "北京"
+
+
+def test_explicit_city_in_weather_followup_beats_the_previous_city():
+    plan = Plan(
+        raw_text="北京现在有天气预警吗",
+        steps=[Step(id="alerts", agent_id="info", intent="info.alerts",
+                    slots={"city": "北京"}, context_scopes=["location"])],
+    )
+
+    PlannerEngine._apply_focus_meta(plan, Focus(last_city="深圳"))
+
+    assert plan.steps[0].slots["city"] == "北京"
+
+
+def test_stock_provenance_followup_inherits_the_last_successful_symbol():
+    plan = Plan(
+        raw_text="数据源和更新时间是什么",
+        steps=[Step(id="stock", agent_id="info", intent="info.stock",
+                    slots={})],
+    )
+
+    PlannerEngine._apply_focus_meta(
+        plan, Focus(last_stock_symbol="宁德时代", last_intent="info.stock"))
+
+    assert plan.steps[0].slots["symbol"] == "宁德时代"
+
+
+def test_stock_query_after_unrelated_turn_does_not_inherit_stale_symbol():
+    plan = Plan(
+        raw_text="现在什么行情值得关注",
+        steps=[Step(id="stock", agent_id="info", intent="info.stock",
+                    slots={})],
+    )
+
+    PlannerEngine._apply_focus_meta(
+        plan, Focus(last_stock_symbol="宁德时代", last_intent="chitchat.talk"))
+
+    assert "symbol" not in plan.steps[0].slots
+
+
+def test_an_explicit_look_back_reclaims_the_symbol_across_an_unrelated_turn():
+    """C4（QA T44）：**用户明确指了回去，系统却说不知道指的是谁。**
+
+    「只总结刚才查到的行情，不做投资建议」被中间那句「不要把生活指数当成股票指数」
+    隔开，`last_intent` 变成 chitchat ⇒ 上面那条守卫拒绝继承 ⇒ 真栈反问
+    「您想查询哪只股票或指数？」。回顾指代在场时那条限制让路——判据是形态，
+    与 `runtime.session_facts` 的审计闸共用同一张回顾词表。
+    """
+    plan = Plan(
+        raw_text="只总结刚才查到的行情，不做投资建议",
+        steps=[Step(id="stock", agent_id="info", intent="info.stock",
+                    slots={})],
+    )
+
+    PlannerEngine._apply_focus_meta(
+        plan, Focus(last_stock_symbol="宁德时代", last_intent="chitchat.talk"))
+
+    assert plan.steps[0].slots["symbol"] == "宁德时代"
+
+
+def test_a_look_back_never_overwrites_a_symbol_the_user_named_this_turn():
+    """**误伤对照**：「刚才那只不错，帮我看看茅台」里本轮显式标的永远优先。"""
+    plan = Plan(
+        raw_text="刚才那只不错，帮我看看茅台",
+        steps=[Step(id="stock", agent_id="info", intent="info.stock",
+                    slots={"symbol": "茅台"})],
+    )
+
+    PlannerEngine._apply_focus_meta(
+        plan, Focus(last_stock_symbol="宁德时代", last_intent="chitchat.talk"))
+
+    assert plan.steps[0].slots["symbol"] == "茅台"
+
+
+def test_waypoint_plan_inherits_current_destination_from_focus():
+    """裸序号选途经点时，Planner 可能只给 waypoint；目的地应取系统持有的会话焦点。"""
+    plan = Plan(steps=[
+        Step(
+            id="navigate",
+            agent_id="navigation",
+            intent="navigation.navigate_to",
+            slots={"waypoint": "挪瓦咖啡"},
+            context_scopes=["location"],
+        ),
+        Step(
+            id="keep-explicit",
+            agent_id="navigation",
+            intent="navigation.navigate_to",
+            slots={"destination": "深圳湾公园", "waypoint": "便利店"},
+            context_scopes=["location"],
+        ),
+        Step(
+            id="stop-choice",
+            agent_id="navigation",
+            intent="navigation.navigate_to",
+            slots={"stop_category": "咖啡店"},
+            context_scopes=["location"],
+        ),
+    ])
+    focus = Focus(last_destination="南山科技园")
+
+    PlannerEngine._apply_focus_meta(plan, focus)
+
+    assert plan.steps[0].slots["destination"] == "南山科技园"
+    assert plan.steps[1].slots["destination"] == "深圳湾公园"
+    assert plan.steps[2].slots["destination"] == "南山科技园"
+
+
+def test_deictic_detail_inherits_latest_list_item_from_focus():
+    """列表叠加后，裸指代详情必须消费最新列表焦点，而不是向用户追问店名。
+
+    M-A B5-2 真栈抓到：先搜火锅、再搜充电站后说「看看第一个的详情」，Planner 已正确
+    落 nearby.detail，但不产 name 槽；结构化焦点持有最新充电站首项，执行前应确定性回填。
+    """
+    plan = Plan(steps=[
+        Step(
+            id="detail",
+            agent_id="nearby",
+            intent="nearby.detail",
+            slots={},
+            context_scopes=["location"],
+        ),
+        Step(
+            id="explicit",
+            agent_id="nearby",
+            intent="nearby.detail",
+            slots={"name": "用户明确指定的店"},
+            context_scopes=["location"],
+        ),
+    ])
+    focus = Focus(last_intent="charging.find", last_poi="深圳湾超级充电站")
+
+    PlannerEngine._apply_focus_meta(plan, focus)
+
+    assert plan.steps[0].slots["name"] == "深圳湾超级充电站"
+    assert plan.steps[1].slots["name"] == "用户明确指定的店"

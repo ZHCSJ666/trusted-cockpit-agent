@@ -1,0 +1,230 @@
+// 设置仓库（实施计划 M1-5，M2 追加语音面）：AsyncStorage 持久化 + zustand。
+// buildMeta 键集与 hmi/src/settings.tsx:79-90 逐键一致（单测硬拷贝键名钉住，漂移即红）；
+// **语音字段刻意不进 buildMeta**——它们是客户端本地行为（用哪个引擎合成/识别），
+// 不是会话偏好，上行了后端也不看。M4 追加的四项（免唤醒/唤醒词/S2S 挡位/视觉）同理，
+// 唯一例外是 S2S 与视觉在**发送时**要带 meta（挡位与 frame_id），那由发送路由带，不在这里。
+// theme 多一档 'system'（RN 跟随系统）。
+import AsyncStorage from '@react-native-async-storage/async-storage'
+import { createStore } from 'zustand/vanilla'
+
+import {
+  AGENT_CATALOG, ASR_PROVIDER_FALLBACK, DEFAULT_QUICK_COMMANDS, DEFAULT_SETTINGS,
+  asrEngineOptions, asrModeOf, pickAsrEngine,
+} from '@shared/types.ts'
+
+import { MOBILE_QUICK_COMMAND_ORDER } from '../session/quickCommands'
+
+export type ThemePref = 'system' | 'dark' | 'light'
+export type FontScalePref = 'normal' | 'large'
+export type AnswerLength = 'short' | 'standard' | 'detailed'
+export type ModelPref = 'fast' | 'deep' | 'auto'
+export type SpeakPolicy = 'always' | 'silent' | 'auto'
+
+export interface AppSettings {
+  theme: ThemePref
+  fontScale: FontScalePref
+  /** 常亮（M3-4）：车载支架上看行程/导航卡时别熄屏。默认关——它耗电，得用户自己要 */
+  keepAwake: boolean
+  assistantName: string
+  answerLength: AnswerLength
+  model: ModelPref
+  /** Agent 开关（AGENT_CATALOG 全列；false 的经 disabled_agents 透传后端婉拒） */
+  agents: Record<string, boolean>
+  memoryEnabled: boolean
+  /** 定位：仅记住是否允许本应用使用；精确坐标不持久化（同 HMI 语义） */
+  locationEnabled: boolean
+  quickCommands: string[]
+  // ── 语音输入（M2-2）──
+  /** 识别引擎 id（dashscope 实时 / minimax、mimo 整句）；与 asrModel 成对（@shared/types.ts 的 asrEngineOptions）。
+   *  'off'（强制批处理）2026-09-14 退役：存量读到按整句迁移；AsrSession 仍认它作内部批处理路径 */
+  asrProvider: string
+  asrModel: string
+  asrLanguage: string
+  // ── 语音播报（M2-3）──
+  /** 播报三档（方案 §5.2 规则 8，Q11）：总是 / 静音 / 自动=语音提问才播报、打字只显示文字。
+   *  替换 B1 之前的 ttsEnabled && autoplay 两个近义开关（两个同时为真才出声，用户分不清哪个是哪个） */
+  speakPolicy: SpeakPolicy
+  ttsProvider: string
+  voiceId: string
+  // ── M4 进阶语音 ──
+  /** 免唤醒回路总开关。默认关：常开麦是**采集面**，必须用户显式要（架构 §5 红线的同一条判据）。 */
+  handsFree: boolean
+  /** 唤醒词（KWS）。关掉后免唤醒只剩「答完 8s 内可直接接着说」，不常驻监听唤醒词。 */
+  wakeWord: boolean
+  /** 语音链路挡位：classic=三段式（只上行定稿文本）／s2s=端到端（**上行原始音频**）。
+   *  默认 classic 是红线要求，不是偏好——见 CLAUDE.md §5「唯一的受控例外」三条件①。 */
+  voicePipeline: 'classic' | 's2s'
+  /** 端到端挡位的一次性显式同意时刻（ms）；0=从未同意。红线三条件②「用户显式选择」的
+   *  持久化证据——只有开关不算显式（方案 §5.2.2） */
+  s2sConsentAt: number
+  /** 视觉抓帧。默认关；开了也只在端侧命中视觉触发词时抓一帧（红线三条件②）。 */
+  visionEnabled: boolean
+  // ── UX v2（B3）──
+  /** 触感四种（方案 §8：唤醒轻/确认双/判死一/快门轻）。默认开——§8「设置项默认开」。
+   *  判据在 core/presence/hapticCue.ts，执行在 core/haptics.ts，接线在 usePresence 的 effect。 */
+  hapticsEnabled: boolean
+  // ── UX v2.1（B1）──
+  // `uxV2Presence` / `uxV2Dock` 两个 v1 回滚开关已删（打磨批 E，裁决 J1）：B4 起所有验证只跑 v2
+  // 路径，v1 分支是没人验证的代码。旧存量里读到这两个键一律丢弃（mergeStoredSettings）。
+  /** 产品身份（方案 §6.0）。B1 只占位，B4 才有 UI 与行为差异；**窗口尺寸不决定它** */
+  deviceRole: 'handheld' | 'mount' | 'trusted-tablet'
+  // ── UX v2（B4）──
+  /** 手动行车档（方案 §6 触发②）。Edge 标 true 也进；两者取或（判据在 core/presence/drivingMode.ts） */
+  drivingManual: boolean
+  /** 实验室：强制减少动效——系统开关的 App 内等价物，判据取或（core/a11y/reduceMotion.ts） */
+  reduceMotionForce: boolean
+  /** 提示音（方案 §8 / Q6）：唤醒确认两音 + 需要确认时一次。默认开；行车档强制开
+   *  ——判据 core/presence/soundCue.ts::cueToneAllowed */
+  cueToneEnabled: boolean
+  /** 实验室：减少透明度（§8.1）——Android 无系统开关，App 内给一个；
+   *  开 ⇒ 全部材质回落 G1-tint（语音层不糊），与行车档回落同一条路 */
+  reduceTransparency: boolean
+  // ── 打磨批 B ──
+  /** 开发者选项已解锁（prod 包上构建行连点 7 次）。判据在 core/diagnostics.ts::developerOptionsVisible；
+   *  只打开只读取证屏与画廊，不上行（buildMeta 键集不变） */
+  developerUnlocked: boolean
+}
+
+export const DEFAULT_APP_SETTINGS: AppSettings = {
+  theme: 'system',
+  fontScale: 'normal',
+  keepAwake: false,
+  assistantName: '小舟',
+  answerLength: 'standard',
+  model: 'auto',
+  agents: Object.fromEntries(AGENT_CATALOG.map((a) => [a.id, true])),
+  memoryEnabled: true,
+  locationEnabled: false,
+  // 集合同共享 DEFAULT_QUICK_COMMANDS、顺序是 mobile 侧的跨能力顺序（裁决 J2，声明在 quickCommands.ts）
+  quickCommands: [...MOBILE_QUICK_COMMAND_ORDER],
+  // 开关类默认值取自共享契约（hmi/src/types.ts::DEFAULT_SETTINGS），不抄第二份字面量
+  asrProvider: DEFAULT_SETTINGS.asrProvider,
+  asrLanguage: DEFAULT_SETTINGS.asrLanguage,
+  speakPolicy: 'auto',
+  // ⚠ 引擎选型三项**刻意偏离共享契约**（泓舟 2026-08-26 当轮指示：ASR 主用 fun-asr、
+  // 其次 qwen3-asr；TTS 主用 minimax）。HMI 侧的 DEFAULT_SETTINGS 仍是 qwen3/cosyvoice
+  // ——那是 hmi/ 的改动，本计划禁区（§10），要改由泓舟另行决定。**两边不一致是已知的**，
+  // 不是漂移：这里写死字面量并注明来源，比让 App 跟着一个已被推翻的默认值走要好。
+  asrModel: 'fun-asr-realtime',
+  ttsProvider: 'minimax',
+  voiceId: 'female-tianmei',
+  handsFree: false,
+  wakeWord: true,
+  voicePipeline: 'classic',
+  s2sConsentAt: 0,
+  visionEnabled: false,
+  hapticsEnabled: true,
+  deviceRole: 'handheld',
+  drivingManual: false,
+  reduceMotionForce: false,
+  cueToneEnabled: true,
+  reduceTransparency: false,
+  developerUnlocked: false,
+}
+
+/** ASR 主模型失败时的备用模型（同一 provider 内换模型；见 AsrConfig.fallbackModel）。
+ *  泓舟 2026-08-26：fun-asr 主、qwen3-asr 次。 */
+export const ASR_FALLBACK_MODEL = 'qwen3-asr-flash-realtime-2026-02-10'
+
+/** 这一轮要不要出声——判据只此一处（SpeechController.begin 读它） */
+export function speakAllowed(policy: SpeakPolicy, voice: boolean): boolean {
+  return policy === 'always' || (policy === 'auto' && voice)
+}
+
+/** 存量合并（同 hmi settings.load()）：合并默认值向前兼容新增字段；agents 深合并；
+ *  播报三档迁移（方案 §5.2 规则 8）：旧值任一为 false → 静音；否则 → 自动（Q11：不保留「打字也播报」）。 */
+export function mergeStoredSettings(raw: string | null): AppSettings {
+  if (!raw) return DEFAULT_APP_SETTINGS
+  try {
+    const parsed = JSON.parse(raw) as Partial<AppSettings> & {
+      ttsEnabled?: boolean
+      autoplay?: boolean
+      /** 已删的 v1 回滚开关（打磨批 E）：旧存量里可能还有，读到就丢，不进 settings */
+      uxV2Presence?: boolean
+      uxV2Dock?: boolean
+    }
+    const { ttsEnabled, autoplay, uxV2Presence: _legacyPresence, uxV2Dock: _legacyDock, ...rest } = parsed
+    const speakPolicy: SpeakPolicy =
+      rest.speakPolicy ?? (ttsEnabled === false || autoplay === false ? 'silent' : DEFAULT_APP_SETTINGS.speakPolicy)
+    // 裁决 J2：存量列表与**旧默认**逐项相同 ⇒ 换成新顺序；用户自定义过的（多一条 / 少一条 /
+    // 换过序）一律原样保留——那是他自己的输入，系统无权替他改。
+    const stored = Array.isArray(rest.quickCommands) ? rest.quickCommands : null
+    const legacyDefault =
+      !!stored && stored.length === DEFAULT_QUICK_COMMANDS.length && stored.every((c, i) => c === DEFAULT_QUICK_COMMANDS[i])
+    const merged: AppSettings = {
+      ...DEFAULT_APP_SETTINGS,
+      ...rest,
+      quickCommands: !stored || legacyDefault ? [...MOBILE_QUICK_COMMAND_ORDER] : stored,
+      speakPolicy,
+      agents: { ...DEFAULT_APP_SETTINGS.agents, ...(parsed.agents || {}) },
+    }
+    return { ...merged, ...migrateAsrEngine(merged.asrProvider, merged.asrModel) }
+  } catch {
+    return DEFAULT_APP_SETTINGS
+  }
+}
+
+/** ASR 存量迁移 / 自愈（同 hmi settings.load，判据同 @shared/types.ts）：退役的 'off'（=录完再识别）落到整句方式；
+ *  (provider, model) 必须是目录里的一对——切过引擎后留着上一家的 model，在 start 帧上只表现为「连不上」。 */
+export function migrateAsrEngine(provider: string, model: string): { asrProvider: string; asrModel: string } {
+  const mode = provider === 'off' ? 'utterance' : asrModeOf(ASR_PROVIDER_FALLBACK, provider)
+  const engine = pickAsrEngine(asrEngineOptions(ASR_PROVIDER_FALLBACK, mode), { provider, model })
+  return engine ? { asrProvider: engine.provider, asrModel: engine.model } : { asrProvider: provider, asrModel: model }
+}
+
+/** 切到端到端前要不要弹一次性同意（判据只此一处：设置页与任何未来入口都问它） */
+export function needsS2sConsent(s: AppSettings): boolean {
+  return s.s2sConsentAt <= 0
+}
+
+/** 透传后端的会话级偏好（hmi/src/settings.tsx:79-90 逐键对照；值全 string） */
+export function buildMeta(s: AppSettings): Record<string, string> {
+  const disabled = Object.entries(s.agents)
+    .filter(([, on]) => !on)
+    .map(([id]) => id)
+  return {
+    answer_length: s.answerLength,
+    model_pref: s.model,
+    assistant_name: s.assistantName,
+    memory_enabled: String(s.memoryEnabled),
+    disabled_agents: disabled.join(','),
+  }
+}
+
+const SETTINGS_KEY = 'xiaozhou.settings.v1'
+
+interface SettingsState {
+  settings: AppSettings
+  hydrated: boolean
+  update(patch: Partial<AppSettings>): void
+  toggleAgent(id: string): void
+}
+
+export const settingsStore = createStore<SettingsState>((set, get) => ({
+  settings: DEFAULT_APP_SETTINGS,
+  hydrated: false,
+  update(patch) {
+    const next = { ...get().settings, ...patch }
+    set({ settings: next })
+    void AsyncStorage.setItem(SETTINGS_KEY, JSON.stringify(next)).catch(() => {})
+  },
+  toggleAgent(id) {
+    const s = get().settings
+    get().update({ agents: { ...s.agents, [id]: !s.agents[id] } })
+  },
+}))
+
+/** App 启动时水合一次；失败按默认值（fail-open：设置丢了不该挡住对话） */
+export async function hydrateSettings(): Promise<void> {
+  try {
+    const raw = await AsyncStorage.getItem(SETTINGS_KEY)
+    settingsStore.setState({ settings: mergeStoredSettings(raw), hydrated: true })
+  } catch {
+    settingsStore.setState({ hydrated: true })
+  }
+}
+
+/** 会话状态机的 getMeta 注入点：始终读最新设置 */
+export function currentMeta(): Record<string, string> {
+  return buildMeta(settingsStore.getState().settings)
+}

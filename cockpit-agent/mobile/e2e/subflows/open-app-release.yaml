@@ -1,0 +1,33 @@
+# 常驻 prod release 的启动路径（AR06 / A06-2）。
+#
+# 与 dev-client 那条的**全部**区别都在这里，一条都不能混：
+#  · 按包名启动主 Activity，**不发任何开发深链**——prod 包里没有 DevLauncher，
+#    发 `xiaozhou://expo-development-client/...` 只会被当成一条认不出的路由；
+#  · 不预检 Metro、不要求 `adb reverse`：这条流的全部意义就是「离开 Metro 也能跑」；
+#  · 断言里带一条**阴性**：屏上不能出现 dev-client 的开发服务器文案。
+#    没有这条阴性时，装错包（dev-client）也能绿——因为 dev launcher 之后的主屏长得一样。
+#
+# 包身份（SHA-256 / 签名 / variant / 内嵌 bundle）不在这里验：那是 `scripts/verify_apk.ps1`
+# 与设置页 build-label 的活（A06-V07），flow 只负责「这个包能不能独立跑起来」。
+appId: com.xiaozhou.companion
+---
+- stopApp
+# ⚠⚠ **不用 `launchApp`**（2026-09-10 实测逆推出来的）：
+#   Maestro 2.9 的 `launchApp` 会动整个**权限矩阵**——不写 `permissions` 时逐条 `pm grant`（定位/
+#   相机/录音/悬浮窗…）；写 `permissions: all: unchanged` 反而逐条 `pm revoke`（`unchanged`
+#   不是它认的值）。本机 OPPO 两边都被 SecurityException 拓掉（driver 没有
+#   GRANT_/REVOKE_RUNTIME_PERMISSIONS），所以“没出事”是**设备拦的，不是流程对**。
+#   换一台能授的机器，这一步会静默地把 AR02 的拒绝/撤销用例前提改掉，而流照样全绿。
+# ⇒ 改用 App 自己的 scheme 冷启动：同样是起 MainActivity，但 Maestro 不碰权限。
+#   这**不是开发深链**（不是 expo-development-client），只是路由入口。权限态只能由专门场景设、回读、还原。
+- openLink: "xiaozhou:///"
+
+# JS bundle 从包内读，比 dev 的现编快得多；仍取「输入框出现」而不是写死秒数
+- extendedWaitUntil:
+    visible:
+      id: "composer-input"
+    timeout: 60000
+
+# 阴性：dev-client 的选择开发服务器界面绝不能出现在常驻包上
+- assertNotVisible: ".*[Dd]evelopment server.*"
+- assertNotVisible: ".*Fetching development servers.*"

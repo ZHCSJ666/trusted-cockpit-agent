@@ -1,0 +1,20 @@
+{
+  "at": "2026-10-11T17:30:24.688176+00:00",
+  "unit_tests": {
+    "passed": 167,
+    "log": "results/navigation_question_unit_tests.log"
+  },
+  "browser_checks": 5,
+  "browser": "results/navigation_question_acceptance.json",
+  "before": "results/navigation_question_before.json",
+  "note": "Reproduced deterministic manual misrouting on user server before edit. Real browser verifies literal question and manual-to-navigation switch. User-owned backend on 8787 is not restarted; restart start.py to load updated code. Original frozen engine/250-case report untouched.",
+  "sha256": {
+    "cockpit-agent/interview/chat_intents.py": "1659866ea3f7e8cf62ca0a182ff984d05545923e8c6fcc5dd083dbdba9fd3c7f",
+    "cockpit-agent/interview/runtime.py": "b9f94b9e9cd45d273c42bf32396d64dae1a054e28d05c3f10a0f64ae6628185d",
+    "cockpit-agent/interview/services.py": "860e404ed9db692d24b3ddccd26a6744113b2eb6136a0b15bbe4d97c312fd104",
+    "tests/test_navigation_questions.py": "9b45e6d7235b97fd3d94d0887fc116300b27b1d82a102fc47f72a3c9756822fb",
+    "tests/test_expanded_services.py": "ff8f021e7b0a87a39400dc9441b569da5fc35c638e286959d9237b22ca769578",
+    "tests/navigation_question_browser.py": "421d4d03bc938308b9442e448ce7ff7f50e70880cf44898576b4fd2fd046c9cd",
+    "run_tests.py": "53ba022c73faad12f201f001d16c67ad7d46987375e684d3a33766d045ef6be1"
+  }
+}

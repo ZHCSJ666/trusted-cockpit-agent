@@ -1,0 +1,471 @@
+// 出行族卡片：poi_list（dest/waypoint 变体）/ poi_detail / place_list / place_detail /
+// route_plan（estimate/cancelled 变体）（M1-4 首批）+ charging_route / trip_itinerary（M3-1）。
+// 行点按=合成与语音「第N个」同语义的一句话经普通 send（types.ts:52-58）；
+// place 详情透传高德 POI id（不按名重搜取到别的分店——nearby 重构的老账）。
+import { useState } from 'react'
+import { Pressable, Text, View } from 'react-native'
+
+import { router } from 'expo-router'
+
+import { placeMenuAction } from '@shared/merchantUi.mjs'
+import type {
+  ChargingRouteCard,
+  PlaceDetailCard,
+  PlaceListCard,
+  PoiDetailCard,
+  PoiListCard,
+  RoutePlanCard,
+  TripItineraryCard,
+} from '@shared/types.ts'
+
+import { navToText, poiPickText, tripStopText } from '../../core/cards/cardActions'
+import { durationLabel, etaClock } from '../../core/cards/cardMeta'
+import { MAP_AVAILABLE } from '../../core/map/available'
+import { cardGeometry, geometryParams } from '../../core/map/geometry'
+import { Pill } from '../../ui/Pill'
+import type { Palette } from '../../ui/theme'
+import type { IconName } from '../../ui/Icon'
+import { CardButtons, CardIcon, CardShell, Chip, KV, ProvBadge, cardText, type SendFn } from './parts'
+
+function ItemRow({
+  p,
+  idx,
+  title,
+  sub,
+  chips,
+  action,
+  onPress,
+}: {
+  p: Palette
+  idx: number
+  title: string
+  sub?: string
+  chips?: string[]
+  /** 行内直达按钮（如品牌门店的「看菜单」），点它不触发整行的 onPress */
+  action?: { label: string; onPress: () => void }
+  onPress?: () => void
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      style={{ flexDirection: 'row', gap: 8, paddingVertical: 4, alignItems: 'flex-start' }}
+    >
+      <Text style={{ color: p.accent, fontSize: p.font(13), width: 20, fontWeight: '700' }}>
+        {idx + 1}
+      </Text>
+      <View style={{ flex: 1, gap: 2 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          <Text style={{ color: p.fg1, fontSize: p.font(14), fontWeight: '600', flex: 1 }} numberOfLines={1}>
+            {title}
+          </Text>
+          {/* 2026-09-11 两档制：行内直达键走 Pill（外框 48、视觉 36；原 paddingVertical 3 ≈ 22dp） */}
+          {action ? (
+            <Pill p={p} tone="accent" fontSize={12} fontWeight="600" paddingHorizontal={10} label={action.label} onPress={action.onPress} />
+          ) : null}
+        </View>
+        {sub ? (
+          <Text style={{ color: p.fg3, fontSize: p.font(11) }} numberOfLines={1}>
+            {sub}
+          </Text>
+        ) : null}
+        {chips?.length ? (
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4 }}>
+            {chips.map((c, i) => (
+              <Chip key={i} p={p} text={c} />
+            ))}
+          </View>
+        ) : null}
+      </View>
+    </Pressable>
+  )
+}
+
+/** 「地图」入口（M3-3；2026-09-11 改读几何判据）。两个条件缺一不出现：地图能力可用 /
+ *  这张卡真的画得出来（`cardGeometry` 非 null：带坐标的点或折线）。**不可用时入口根本不渲染**——
+ *  卡片信息面零损失，用户看不到一个按了会失望的按钮，这就是计划说的「可降级」。
+ *  路线卡的标签写「查看路线」：它进去看到的是折线 + 起终点，不只是几个点。 */
+export function MapEntry({ p, card }: { p: Palette; card: unknown }) {
+  const g = MAP_AVAILABLE ? cardGeometry(card) : null
+  if (!g) return null
+  return (
+    <Pill
+      p={p}
+      testID="card-map-entry"
+      tone="accent"
+      fontSize={12}
+      paddingHorizontal={12}
+      accessibilityLabel={g.path.length ? '在地图上查看路线' : '在地图上查看'}
+      label={g.path.length ? '查看路线' : '地图'}
+      onPress={() => router.push({ pathname: '/map', params: geometryParams(g) })}
+    />
+  )
+}
+
+export function PoiList({ p, card, onSend }: { p: Palette; card: PoiListCard; onSend: SendFn }) {
+  const purpose = card.purpose
+  const title =
+    card.title ||
+    (purpose === 'dest_choice'
+      ? '选择充电目的地'
+      : purpose === 'waypoint_choice'
+        ? `顺路停靠 · 去${card.destination || ''}`
+        : `候选 · ${card.keyword || 'POI'}`)
+  const hint =
+    purpose === 'dest_choice'
+      ? '点选或说「第N个」回填目的地'
+      : purpose === 'waypoint_choice'
+        ? '点选或说「第N个」加为途经点'
+        : '点选或说「第N个」开始导航'
+  const sendFor = (name: string) => poiPickText(card, name)
+  return (
+    <CardShell p={p} icon={purpose === 'dest_choice' ? 'flag' : 'location'} title={title}>
+      {(card.items || []).map((it, i) => (
+        <ItemRow
+          key={it.id || i}
+          p={p}
+          idx={i}
+          title={it.name}
+          sub={it.address}
+          chips={[
+            ...(it.rating ? [`★${it.rating}`] : []),
+            ...(it.distance_km !== undefined ? [`${it.distance_km}km`] : []),
+          ]}
+          onPress={() => onSend(sendFor(it.name))}
+        />
+      ))}
+      <Text style={{ color: p.fg3, fontSize: p.font(11) }}>{hint}</Text>
+    </CardShell>
+  )
+}
+
+export function PoiDetail({ p, card, onSend }: { p: Palette; card: PoiDetailCard; onSend: SendFn }) {
+  return (
+    <CardShell p={p} icon="pin" title="地点详情">
+      <Text style={{ color: p.fg1, fontSize: p.font(16), fontWeight: '700' }}>{card.name}</Text>
+      <KV p={p} k="地址" v={card.address} />
+      <KV p={p} k="类型" v={card.category} />
+      <KV p={p} k="评分" v={card.rating ? `★${card.rating}` : ''} />
+      <MapEntry p={p} card={card} />
+      <CardButtons p={p} onSend={onSend} buttons={[{ label: '导航去这里', send_text: navToText(card.name) }]} />
+    </CardShell>
+  )
+}
+
+export function PlaceList({ p, card, onSend }: { p: Palette; card: PlaceListCard; onSend: SendFn }) {
+  return (
+    <CardShell
+      p={p}
+      icon="location"
+      title={`周边 · ${card.category || card.keyword || '发现'}`}
+      right={<ProvBadge p={p} prov={card._prov} />}
+    >
+      {(card.items || []).map((it, i) => (
+        <ItemRow
+          key={it.id || i}
+          p={p}
+          idx={i}
+          title={it.name}
+          sub={it.address}
+          chips={[
+            ...(it.rating ? [`★${it.rating}`] : []),
+            ...(it.cost ? [`¥${it.cost}/人`] : []),
+            ...(it.distance_km !== undefined ? [`${it.distance_km}km`] : []),
+            ...(it.open_today ? [it.open_today] : []),
+          ]}
+          // 品牌门店（瑞幸/麦当劳）补「看菜单」直达：发现→看单→点单三步全可点按。
+          // 句式由共享的 placeMenuAction 决定（与范例库闭环），App 不自己拼——
+          // M3-1 真机首轮发现 App 缺这个按钮而 HMI 有，那条链在手机上是断的。
+          action={(() => {
+            const menu = placeMenuAction(it.name)
+            return menu ? { label: menu.label, onPress: () => onSend(menu.send_text) } : undefined
+          })()}
+          onPress={() => onSend(`看${it.name}的详情`, it.id ? { nearby_poi_id: it.id } : undefined)}
+        />
+      ))}
+      {/* 空态（v3 P4，§5 拍板「空态改写建议」）：只给一句结论。画板上的「扩大到 5 公里 / 换一批」两个 chip 没做——
+          nearby.search 的 radius 槽 2026-08-14 已摘除（零消费），provider 的 page 也没有调用方，点了只会原样再搜一遍。
+          同理，下面提示行原来的「「换一批」看更多」也删了：那是一句做不到的承诺 */}
+      {(card.items || []).length ? (
+        <>
+          <MapEntry p={p} card={card} />
+          <Text style={{ color: p.fg3, fontSize: p.font(11) }}>点选看详情；说「导航去第N个」直接导航</Text>
+        </>
+      ) : (
+        <Text style={[cardText(p, 'bodyM'), { color: p.fg2 }]}>附近没找到{card.category || card.keyword || '结果'}。</Text>
+      )}
+    </CardShell>
+  )
+}
+
+export function PlaceDetail({ p, card, onSend }: { p: Palette; card: PlaceDetailCard; onSend: SendFn }) {
+  return (
+    <CardShell p={p} icon="location" title="周边详情" right={<ProvBadge p={p} prov={card._prov} />}>
+      <Text style={{ color: p.fg1, fontSize: p.font(16), fontWeight: '700' }}>{card.name}</Text>
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+        {card.rating ? <Chip p={p} text={`★${card.rating}`} /> : null}
+        {card.cost ? <Chip p={p} text={`¥${card.cost}/人`} /> : null}
+        {(card.tags || '')
+          .split(',')
+          .filter(Boolean)
+          .slice(0, 4)
+          .map((t, i) => (
+            <Chip key={i} p={p} text={t.trim()} />
+          ))}
+      </View>
+      <KV p={p} k="地址" v={card.address} />
+      <KV p={p} k="电话" v={card.tel} />
+      <KV p={p} k="今日营业" v={card.open_today} />
+      <KV p={p} k="每周" v={card.open_week} />
+      <MapEntry p={p} card={card} />
+      <CardButtons p={p} onSend={onSend} buttons={[{ label: '导航去这里', send_text: navToText(card.name) }]} />
+    </CardShell>
+  )
+}
+
+export function RoutePlan({ p, card, onSend }: { p: Palette; card: RoutePlanCard; onSend: SendFn }) {
+  // 卡片标题必须与本轮真实动作一致（I-016/I-022）：只算不导≠已在导航；已取消要说清作废
+  const title = card.cancelled ? '导航已结束' : card.estimate ? '路线测算（未开始导航）' : '路线已规划'
+  return (
+    <CardShell p={p} icon="route-map" title={title}>
+      <Text style={{ color: card.cancelled ? p.fg3 : p.fg1, fontSize: p.font(15), fontWeight: '600' }}>
+        {card.origin ? `${card.origin} → ` : ''}
+        {card.destination}
+      </Text>
+      {card.waypoints?.length ? (
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4 }}>
+          {card.waypoints.map((w, i) => (
+            <Chip key={i} p={p} text={`途经 ${w.name}`} tone="accent" />
+          ))}
+        </View>
+      ) : null}
+      <View style={{ flexDirection: 'row', gap: 6 }}>
+        {card.distance_km !== undefined ? <Chip p={p} text={`${card.distance_km}km`} /> : null}
+        {durationLabel(card.duration_min) ? <Chip p={p} text={`约${durationLabel(card.duration_min)}`} /> : null}
+        {etaClock(card.eta_ts) ? <Chip p={p} text={`预计 ${etaClock(card.eta_ts)} 到`} /> : null}
+      </View>
+      {/* 2026-09-11：后端带几何（origin_loc / destination_loc / waypoints 坐标 / path）时给「查看路线」——
+          用户原话「导航去 xxx 应该能有入口进入地图并把途经路线渲染出来」。没几何就没入口（同 M3-3 可降级） */}
+      {card.cancelled ? null : <MapEntry p={p} card={card} />}
+      {card.estimate && !card.cancelled ? (
+        <CardButtons p={p} onSend={onSend} buttons={[{ label: '开始导航', send_text: navToText(card.destination) }]} />
+      ) : null}
+    </CardShell>
+  )
+}
+
+// ─────────────────────────── M3-1 增量 ───────────────────────────
+
+/** 充电路线卡：出发地 → 沿途补电点（带 at_km）→ 目的地。
+ *  stops 为空**不是空状态**而是一条结论——「全程无需补电」，照 HMI 同判据渲染；
+ *  渲染成「暂无数据」会把一个肯定回答说成查询失败。 */
+export function ChargingRoute({ p, card }: { p: Palette; card: ChargingRouteCard; onSend: SendFn }) {
+  const dur = durationLabel(card.duration_min)
+  const stops = card.stops || []
+  return (
+    <CardShell
+      p={p}
+      icon="charging-station"
+      title="充电路线规划"
+      right={
+        card.distance_km ? <Chip p={p} text={`${card.distance_km}km${dur ? ` · ${dur}` : ''}`} /> : undefined
+      }
+    >
+      {stops.length ? (
+        <View style={{ gap: 6 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+            <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: p.accent }} />
+            <View>
+              <Text style={{ color: p.fg1, fontSize: p.font(13), fontWeight: '600' }}>出发地</Text>
+              {card.soc ? (
+                <Text style={{ color: p.fg3, fontSize: p.font(11) }}>当前电量 {card.soc}</Text>
+              ) : null}
+            </View>
+          </View>
+          {stops.map((s, i) => (
+            <View key={i} style={{ gap: 4 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, paddingLeft: 4 }}>
+                <View style={{ width: 1, height: 18, backgroundColor: p.line }} />
+                {s.at_km != null ? (
+                  <Text style={{ color: p.fg3, fontSize: p.font(11) }}>约 {s.at_km}km 处</Text>
+                ) : null}
+              </View>
+              <View
+                style={{
+                  flexDirection: 'row',
+                  gap: 10,
+                  alignItems: 'flex-start',
+                  padding: 12,
+                  borderRadius: 14,
+                  backgroundColor: p.amberSoft,
+                  borderWidth: 1,
+                  borderColor: p.amberSoft,
+                }}
+              >
+                <CardIcon p={p} name="bolt" size={18} color={p.amber} />
+                <View style={{ flex: 1 }}>
+                  <Text style={{ color: p.fg1, fontSize: p.font(13), fontWeight: '600' }} numberOfLines={1}>
+                    {s.name}
+                  </Text>
+                  {s.address ? (
+                    <Text style={{ color: p.fg3, fontSize: p.font(11) }} numberOfLines={1}>
+                      {s.address}
+                    </Text>
+                  ) : null}
+                </View>
+              </View>
+            </View>
+          ))}
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, paddingLeft: 4 }}>
+            <View style={{ width: 1, height: 16, backgroundColor: p.line }} />
+          </View>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+            <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: p.green }} />
+            <Text style={{ color: p.fg1, fontSize: p.font(13), fontWeight: '600' }}>{card.destination}</Text>
+          </View>
+          <MapEntry p={p} card={card} />
+        </View>
+      ) : (
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+          <CardIcon p={p} name="check" size={24} color={p.green} />
+          <View>
+            <Text style={{ color: p.green, fontSize: p.font(14), fontWeight: '600' }}>全程无需补电</Text>
+            <Text style={{ color: p.fg3, fontSize: p.font(11), marginTop: 2 }}>当前电量足以完成全程</Text>
+          </View>
+        </View>
+      )}
+    </CardShell>
+  )
+}
+
+// 打磨批 C（评审 P15）：停靠点类型 → 线性图标名（共享台账的 landmark / dining / hotel / pin + 本地 bolt），不再用 emoji
+const TRIP_STOP_ICON: Record<string, IconName> = {
+  attraction: 'landmark',
+  meal: 'dining',
+  hotel: 'hotel',
+  charging: 'bolt',
+  custom: 'pin',
+}
+
+/** 行程卡：结构化多日行程——按天列停靠点 + 段间补电。
+ *  **只有 grounded 的停靠点才给「导航」按钮**：没接地的点连地址都还没定，
+ *  给按钮等于承诺一个我们发不出去的指令。 */
+export function TripItinerary({ p, card, onSend }: { p: Palette; card: TripItineraryCard; onSend: SendFn }) {
+  const days = card.itinerary || []
+  const [closed, setClosed] = useState<Record<number, boolean>>({}) // 缺省全展开，同 HMI
+  const toggle = (d: number) => setClosed((prev) => ({ ...prev, [d]: !prev[d] }))
+  return (
+    <CardShell
+      p={p}
+      icon="itinerary"
+      title={`${card.destination} · ${card.days}日行程`}
+      right={
+        <Chip
+          p={p}
+          text={card.status === 'confirmed' ? '已确认' : card.theme ? `《${card.theme}》主题` : '自驾 · AI 规划'}
+        />
+      }
+    >
+      {card.cities?.length && card.cities.length > 1 ? (
+        <Text style={{ color: p.fg3, fontSize: p.font(11) }}>{card.cities.join(' → ')}</Text>
+      ) : null}
+      {days.map((day, di) => {
+        // 天色板取 data/series（深色值与 HMI Cards.tsx 的天色板同值；浅色有自己的深色档）。
+        // 原来写死深色值，浅色主题下「D1」是浅青字压浅青底读不出（v3 浅色真机轮）
+        const color = p.series[di % p.series.length]
+        const charges = (day.legs || []).flatMap((l) => l.charging_stops || [])
+        const isOpen = !closed[day.day_index]
+        return (
+          <View key={di} style={{ borderTopWidth: di ? 1 : 0, borderColor: p.line, paddingTop: di ? 8 : 0, gap: 6 }}>
+            {charges.length ? (
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: 8,
+                  paddingHorizontal: 12,
+                  paddingVertical: 6,
+                  borderRadius: 10,
+                  backgroundColor: p.amberSoft,
+                }}
+              >
+                <CardIcon p={p} name="bolt" size={14} color={p.amber} />
+                <Text style={{ color: p.amber, fontSize: p.font(11), flex: 1 }} numberOfLines={2}>
+                  途中补电 {charges.length} 次：{charges.map((c) => c.name).join('、')}
+                </Text>
+              </View>
+            ) : null}
+            <Pressable
+              onPress={() => toggle(day.day_index)}
+              style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}
+            >
+              <View
+                style={{
+                  width: 30,
+                  height: 20,
+                  borderRadius: 6,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  backgroundColor: `${color}20`,
+                  borderWidth: 1,
+                  borderColor: `${color}40`,
+                }}
+              >
+                <Text style={{ color, fontSize: p.font(11), fontWeight: '700' }}>D{day.day_index}</Text>
+              </View>
+              <Text style={{ color: p.fg1, fontSize: p.font(13), fontWeight: '600', flex: 1 }} numberOfLines={1}>
+                {day.city ? `${day.city} · ` : ''}
+                {day.theme || `第${day.day_index}天`}
+              </Text>
+              {day.weather?.text ? (
+                <Text style={{ color: p.fg3, fontSize: p.font(11) }} numberOfLines={1}>
+                  {day.weather.temp_low && day.weather.temp_high
+                    ? `${day.weather.text} ${day.weather.temp_low}-${day.weather.temp_high}℃`
+                    : day.weather.text}
+                </Text>
+              ) : null}
+              <Text style={{ color: p.fg3, fontSize: p.font(11) }}>{(day.stops || []).length}个点</Text>
+              <Text style={{ color: p.fg3, fontSize: p.font(12) }}>{isOpen ? '▾' : '▸'}</Text>
+            </Pressable>
+            {isOpen
+              ? (day.stops || []).map((s, i) => (
+                  <View
+                    key={i}
+                    style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingLeft: 38, paddingVertical: 3 }}
+                  >
+                    <CardIcon p={p} name={TRIP_STOP_ICON[s.type] || 'pin'} size={16} color={p.fg2} />
+                    <View style={{ flex: 1 }}>
+                      <Text
+                        style={{ color: s.grounded ? p.fg1 : p.fg2, fontSize: p.font(12) }}
+                        numberOfLines={1}
+                      >
+                        {s.name}
+                      </Text>
+                      <Text style={{ color: p.fg3, fontSize: p.font(11) }} numberOfLines={1}>
+                        {s.grounded ? s.poi?.address || '' : '待确认地点'}
+                      </Text>
+                    </View>
+                    {/* 2026-09-11 两档制：行内「导航」走 Pill（原 paddingVertical 3 ≈ 22dp） */}
+                    {s.grounded ? (
+                      <Pill
+                        p={p}
+                        tone="accent"
+                        fontSize={12}
+                        paddingHorizontal={10}
+                        accessibilityLabel={tripStopText(day.day_index, s.name)}
+                        label="导航"
+                        onPress={() => onSend(tripStopText(day.day_index, s.name))}
+                      />
+                    ) : null}
+                  </View>
+                ))
+              : null}
+          </View>
+        )
+      })}
+      <MapEntry p={p} card={card} />
+      <Text style={{ color: p.fg3, fontSize: p.font(11) }}>
+        说「下一站」或「导航去第 2 天的XX」
+      </Text>
+    </CardShell>
+  )
+}

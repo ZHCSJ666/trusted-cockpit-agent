@@ -1,0 +1,1119 @@
+# 四模式路由评测语料（chitchat 直答 / info.search 联网 / info.news 新闻 / research.run 深调研）。
+# 设计：docs/design/2026-07-12-mode-routing-and-answer-quality.md §P0-1
+#
+# 与 route_hints_cases.yaml 的分工：那份只测 RouteHintEngine 确定性层；本份测**主路径端到端
+# 口径**（Planner LLM + route_hints 后验的最终 intent），另带一个可离线复跑的确定性子集。
+#
+# schema:
+#   text:              输入话术
+#   tags:              [分桶, ...]；分桶 ∈ mode_typical|mode_boundary|mode_adversarial|
+#                      mode_followup|mode_guardrail（首个 tag 即分桶）
+#   expect_mode:       --live 期望模式；"a|b" 表示两者皆算 PASS（对抗例的合法双落点）。
+#                      取值 chitchat|search|news|research|sports|weather|stock|none|clarify
+#                      |other:<intent>（多值时 _mode_of 归一见 eval_mode_routing.py）
+#   expect_intents:    可选，--live 期望最终 intent 列表（集合比较、不计顺序；给出时优先于 expect_mode）
+#   live:              可选，false=只进离线确定性子集（如依赖 edge 能力、云 catalog 缺席的用例）
+#   history:           可选 [{role, text}]，跟进态注入 WorkingSet.history
+#   initial_intents:   可选；给出（连同 expect_det_intents）则该用例进「离线确定性子集」：
+#                      模拟 LLM 已规划出的 intents，直调 RouteHintEngine 断言（顺序敏感，
+#                      同 route_hints_cases 口径）。live 与 det 期望可不同（det 只看 hints 层）。
+#   expect_det_intents: 确定性子集的期望最终 intent 列表
+#   source:            溯源/备注
+#
+# 注意：expect_det_intents 描述的是**目标态**（含 P0-4 将新增的 info.search/info.news hints）。
+# 在 hints 落地前离线子集会有预期内 FAIL（钉的就是这个缺口）；落地后转 PASS 属预期 improvement。
+
+# ══ mode_typical：四模式典型句（各 ~10，避开 manifest examples 原句） ══════════════
+
+- text: 给我讲个笑话
+  tags: [mode_typical, chitchat]
+  expect_mode: chitchat
+
+- text: 我今天有点累，陪我说说话
+  tags: [mode_typical, chitchat]
+  expect_mode: chitchat
+
+- text: 你叫什么名字呀
+  tags: [mode_typical, chitchat]
+  expect_mode: chitchat
+
+- text: 光合作用是什么原理
+  tags: [mode_typical, chitchat, knowledge]
+  expect_mode: chitchat
+
+- text: 为什么天空是蓝色的
+  tags: [mode_typical, chitchat, knowledge]
+  expect_mode: chitchat
+
+- text: 三国演义的作者是谁
+  tags: [mode_typical, chitchat, knowledge]
+  expect_mode: chitchat
+
+- text: 帮我想一句结婚祝福语
+  tags: [mode_typical, chitchat, creative]
+  expect_mode: chitchat
+
+- text: 好无聊啊随便聊点什么
+  tags: [mode_typical, chitchat]
+  expect_mode: chitchat
+
+- text: 一光年大概是多少公里
+  tags: [mode_typical, chitchat, knowledge]
+  expect_mode: chitchat
+
+- text: 你觉得人为什么要工作
+  tags: [mode_typical, chitchat, opinion]
+  expect_mode: chitchat
+
+- text: 搜一下固态电池最新进展
+  tags: [mode_typical, search]
+  expect_mode: search
+  initial_intents: []
+  expect_det_intents: [info.search]
+
+- text: 帮我查一下iPhone现在什么价格
+  tags: [mode_typical, search, freshness]
+  expect_mode: search
+  initial_intents: []
+  expect_det_intents: [info.search]
+
+- text: 昨晚的苹果发布会都发布了什么
+  tags: [mode_typical, search, freshness]
+  expect_mode: search
+
+- text: 2026年诺贝尔物理学奖颁给谁了
+  tags: [mode_typical, search, freshness]
+  expect_mode: search
+
+- text: 现在黄金什么价
+  tags: [mode_typical, search, freshness]
+  expect_mode: search
+
+- text: 帮我查一下特斯拉FSD在中国的落地进展
+  tags: [mode_typical, search]
+  expect_mode: search
+  initial_intents: []
+  expect_det_intents: [info.search]
+
+- text: 马拉松世界纪录现在是多少
+  tags: [mode_typical, search, freshness]
+  expect_mode: search
+
+- text: 搜索量子计算商业化现状
+  tags: [mode_typical, search]
+  expect_mode: search
+  initial_intents: []
+  expect_det_intents: [info.search]
+
+- text: 今年的高考作文题是什么
+  tags: [mode_typical, search, freshness]
+  expect_mode: search
+
+- text: 星舰最近一次试飞成功了吗
+  tags: [mode_typical, search, freshness]
+  expect_mode: search
+
+- text: 今天有什么新闻
+  tags: [mode_typical, news]
+  expect_mode: news
+  initial_intents: []
+  expect_det_intents: [info.news]
+
+- text: 来点科技新闻
+  tags: [mode_typical, news]
+  expect_mode: news
+  initial_intents: []
+  expect_det_intents: [info.news]
+
+- text: 看看今天的头条
+  tags: [mode_typical, news]
+  expect_mode: news
+  initial_intents: []
+  expect_det_intents: [info.news]
+
+- text: 有什么国际新闻吗
+  tags: [mode_typical, news]
+  expect_mode: news
+  initial_intents: []
+  expect_det_intents: [info.news]
+
+- text: 最近有啥大事
+  tags: [mode_typical, news]
+  expect_mode: news|search
+  source: "泛「大事」两落点皆可（registry_resolve 语料同款句已标 info）"
+
+- text: 刷刷新闻
+  tags: [mode_typical, news]
+  expect_mode: news
+  initial_intents: []
+  expect_det_intents: [info.news]
+
+- text: 新能源汽车的新闻
+  tags: [mode_typical, news, topic_form]
+  expect_mode: news
+  initial_intents: []
+  expect_det_intents: [info.news]
+
+- text: 英伟达最新动态
+  tags: [mode_typical, news, topic_form]
+  expect_mode: news
+  initial_intents: []
+  expect_det_intents: [info.news]
+
+- text: 讲讲今天的要闻
+  tags: [mode_typical, news]
+  expect_mode: news
+  initial_intents: []
+  expect_det_intents: [info.news]
+
+- text: 财经资讯有什么值得看的
+  tags: [mode_typical, news]
+  expect_mode: news|search
+
+- text: 深入调研一下固态电池产业链
+  tags: [mode_typical, research]
+  expect_mode: research
+  initial_intents: []
+  expect_det_intents: [research.run]
+
+- text: 帮我全面对比一下增程和纯电的优劣
+  tags: [mode_typical, research]
+  expect_mode: research
+  initial_intents: []
+  expect_det_intents: [research.run]
+
+- text: 系统了解一下具身智能这个方向
+  tags: [mode_typical, research]
+  expect_mode: research
+  initial_intents: []
+  expect_det_intents: [research.run]
+
+- text: 彻底搞懂钠离子电池的商业化前景
+  tags: [mode_typical, research]
+  expect_mode: research
+  initial_intents: []
+  expect_det_intents: [research.run]
+
+- text: 好好研究下人形机器人赛道
+  tags: [mode_typical, research]
+  expect_mode: research
+  initial_intents: []
+  expect_det_intents: [research.run]
+
+- text: 调研一下车规级芯片的国产化进度
+  tags: [mode_typical, research]
+  expect_mode: research
+  initial_intents: []
+  expect_det_intents: [research.run]
+
+- text: 深度分析一下低空经济的机会
+  tags: [mode_typical, research]
+  expect_mode: research
+  initial_intents: []
+  expect_det_intents: [research.run]
+
+- text: 我想全面了解一下核聚变的最新进展
+  tags: [mode_typical, research]
+  expect_mode: research
+  initial_intents: []
+  expect_det_intents: [research.run]
+
+- text: 帮我出一份氢能源汽车的完整调研报告
+  tags: [mode_typical, research]
+  expect_mode: research
+  source: "「调研报告」不在 hint 词形内，考 LLM 对 desc 的理解"
+
+- text: 研究一下宁德时代的麒麟电池强在哪
+  tags: [mode_typical, research]
+  expect_mode: research
+  source: "裸「研究一下」刻意不进 hint（防误伤），考 LLM；desc/examples 应兜住"
+
+# ══ mode_boundary：新闻vs搜索 / 搜索vs调研 / 直答vs搜索 ══════════════════════════
+
+- text: 英伟达最新消息
+  tags: [mode_boundary, news_vs_search, topic_form]
+  expect_mode: news
+  initial_intents: []
+  expect_det_intents: [info.news]
+  source: "「X最新消息」=浏览一批该主题资讯 → news（要具体答案会带问句）"
+
+- text: 特斯拉这次降价是怎么回事
+  tags: [mode_boundary, news_vs_search]
+  expect_mode: search
+  source: "「怎么回事」=要一个解释性答案 → search"
+
+- text: 看看AI行业最近的新闻
+  tags: [mode_boundary, news_vs_search]
+  expect_mode: news
+  source: "间隔超 hint 窗口（>6字），考 LLM"
+
+- text: 苹果新品发布会讲了什么
+  tags: [mode_boundary, news_vs_search]
+  expect_mode: search
+
+- text: 给我读读今天的国际要闻
+  tags: [mode_boundary, news_vs_search]
+  expect_mode: news
+  initial_intents: []
+  expect_det_intents: [info.news]
+
+- text: 比亚迪出海最近有什么动作
+  tags: [mode_boundary, news_vs_search]
+  expect_mode: news|search
+
+- text: 美联储这次降息了没有
+  tags: [mode_boundary, news_vs_search, freshness]
+  expect_mode: search
+
+- text: 有没有关于低空经济的新闻
+  tags: [mode_boundary, news_vs_search]
+  expect_mode: news
+  initial_intents: []
+  expect_det_intents: [info.news]
+
+- text: 昨晚科技圈发生了什么大事
+  tags: [mode_boundary, news_vs_search, freshness]
+  expect_mode: news|search
+
+- text: 小米汽车最新销量数据
+  tags: [mode_boundary, news_vs_search, freshness]
+  expect_mode: search|news
+
+- text: 固态电池现在发展到什么阶段了
+  tags: [mode_boundary, search_vs_research]
+  expect_mode: search
+  source: "单问题快答 → search（要系统了解才升调研）；若 LLM 落 research 记 FAIL 作信号"
+
+- text: 深入了解一下固态电池
+  tags: [mode_boundary, search_vs_research]
+  expect_mode: research
+  initial_intents: []
+  expect_det_intents: [research.run]
+
+- text: 增程和纯电哪个更适合北方冬天
+  tags: [mode_boundary, search_vs_research]
+  expect_mode: search|research
+  source: "有界比较问句：search 为优、research 可接受（需要当代车型事实，绝不允许 chitchat
+    凭记忆直答）；实测该句在 run 间 search/research 摇摆，双容忍防 flapping 污染回归 diff"
+
+- text: 帮我全面梳理一下智能驾驶的技术路线
+  tags: [mode_boundary, search_vs_research]
+  expect_mode: research
+  initial_intents: []
+  expect_det_intents: [research.run]
+
+- text: 麒麟电池和4680电池有什么区别
+  tags: [mode_boundary, search_vs_research]
+  expect_mode: search
+
+- text: 帮我查一下磷酸铁锂和三元锂的区别
+  tags: [mode_boundary, search_vs_research]
+  expect_mode: search
+  initial_intents: []
+  expect_det_intents: [info.search]
+
+- text: 系统梳理一下自动驾驶的法规现状
+  tags: [mode_boundary, search_vs_research]
+  expect_mode: research
+  initial_intents: []
+  expect_det_intents: [research.run]
+
+- text: 具身智能是不是下一个风口，帮我研究研究
+  tags: [mode_boundary, search_vs_research]
+  expect_mode: research
+
+- text: 查一下固态电池
+  tags: [mode_boundary, search_vs_research]
+  expect_mode: search
+  initial_intents: []
+  expect_det_intents: [info.search]
+  source: "与 route_hints_cases「搜一下固态电池」呼应：快查不被调研劫持"
+
+- text: 新能源补贴政策帮我彻底弄懂
+  tags: [mode_boundary, search_vs_research]
+  expect_mode: research
+  initial_intents: []
+  expect_det_intents: [research.run]
+
+- text: 地球为什么是圆的
+  tags: [mode_boundary, chitchat_vs_search, knowledge]
+  expect_mode: chitchat
+
+- text: 增程式电动车是什么原理
+  tags: [mode_boundary, chitchat_vs_search, knowledge]
+  expect_mode: chitchat
+
+- text: 珠穆朗玛峰有多高
+  tags: [mode_boundary, chitchat_vs_search, knowledge]
+  expect_mode: chitchat
+
+- text: 现在人民币兑美元汇率是多少
+  tags: [mode_boundary, chitchat_vs_search, freshness]
+  expect_mode: search
+
+- text: 什么是钙钛矿电池
+  tags: [mode_boundary, chitchat_vs_search, knowledge]
+  expect_mode: chitchat|search
+  source: "常青概念但领域较新，两落点皆可接受"
+
+- text: 苹果公司的创始人是谁
+  tags: [mode_boundary, chitchat_vs_search, knowledge]
+  expect_mode: chitchat
+
+- text: 苹果现在的CEO是谁
+  tags: [mode_boundary, chitchat_vs_search, freshness]
+  expect_mode: search|chitchat
+  source: "「现在」信号倾向 search；模型知识内答对也可接受"
+
+- text: 圆周率小数点后十位是多少
+  tags: [mode_boundary, chitchat_vs_search, knowledge]
+  expect_mode: chitchat
+
+- text: 一年有多少个星期
+  tags: [mode_boundary, chitchat_vs_search, knowledge]
+  expect_mode: chitchat
+
+- text: 最近有什么好看的电影上映
+  tags: [mode_boundary, chitchat_vs_search, freshness]
+  expect_mode: search|news
+
+# ══ mode_adversarial：时效伪装闲聊 / 常青伪装时效 / 动词陷阱 ═══════════════════════
+
+- text: 昨晚欧冠决赛谁赢了
+  tags: [mode_adversarial, freshness_disguised]
+  expect_mode: sports|search
+  source: "时效伪装闲聊的旗舰用例：绝不允许 chitchat 直答"
+
+- text: 现在油价多少钱一升
+  tags: [mode_adversarial, freshness_disguised]
+  expect_mode: search
+
+- text: 黄金今天什么价格
+  tags: [mode_adversarial, freshness_disguised]
+  expect_mode: search
+
+- text: 世界首富现在是谁
+  tags: [mode_adversarial, freshness_disguised]
+  expect_mode: search
+
+- text: 最新的iPhone是哪一款
+  tags: [mode_adversarial, freshness_disguised]
+  expect_mode: search
+
+- text: GPT现在最强的版本是哪个
+  tags: [mode_adversarial, freshness_disguised]
+  expect_mode: search
+
+- text: 国足最近一场比赛赢了吗
+  tags: [mode_adversarial, freshness_disguised]
+  expect_mode: sports|search
+
+- text: 比特币现在多少钱
+  tags: [mode_adversarial, freshness_disguised]
+  expect_mode: search|stock
+
+- text: 下周有什么新电影上映
+  tags: [mode_adversarial, freshness_disguised]
+  expect_mode: search|news
+
+- text: 水的沸点是多少度
+  tags: [mode_adversarial, timeless]
+  expect_mode: chitchat
+
+- text: 光速是多少
+  tags: [mode_adversarial, timeless]
+  expect_mode: chitchat
+
+- text: 为什么冬天白天变短
+  tags: [mode_adversarial, timeless]
+  expect_mode: chitchat
+
+- text: 秦始皇哪一年统一六国
+  tags: [mode_adversarial, timeless]
+  expect_mode: chitchat
+
+- text: 给我讲讲相对论是怎么回事
+  tags: [mode_adversarial, timeless]
+  expect_mode: chitchat
+
+- text: 解释一下什么是通货膨胀
+  tags: [mode_adversarial, timeless]
+  expect_mode: chitchat
+
+- text: 月亮为什么有阴晴圆缺
+  tags: [mode_adversarial, timeless]
+  expect_mode: chitchat
+
+- text: 一公里等于多少英里
+  tags: [mode_adversarial, timeless]
+  expect_mode: chitchat
+
+- text: 搜一下你叫什么名字
+  tags: [mode_adversarial, verb_trap]
+  expect_mode: search
+  initial_intents: []
+  expect_det_intents: [info.search]
+  source: "显式搜索动词占优先（钉确定性行为：用户说搜就搜）"
+
+- text: 查一下我老婆叫什么名字
+  tags: [mode_adversarial, verb_trap, personal]
+  expect_mode: chitchat
+  initial_intents: []
+  expect_det_intents: []
+  source: "个人事实走记忆召回，不上网搜——search hint guard 须含「我老婆/我的」"
+
+- text: 搜索引擎是怎么工作的
+  tags: [mode_adversarial, verb_trap, knowledge]
+  expect_mode: chitchat
+  initial_intents: []
+  expect_det_intents: []
+  source: "「搜索引擎」名词开头不是搜索指令——hint pattern 须 (?!引擎)"
+
+- text: 查理和巧克力工厂是谁写的
+  tags: [mode_adversarial, verb_trap, knowledge]
+  expect_mode: chitchat
+  initial_intents: []
+  expect_det_intents: []
+  source: "裸「查」刻意不进 hint 动词表（查理≠查询）"
+
+- text: 搜狐最近的新闻
+  tags: [mode_adversarial, verb_trap]
+  expect_mode: news
+  source: "双 hint 互斥带「搜」字留给 LLM（news guard 含搜/查）"
+
+- text: 提醒我晚上看新闻联播
+  tags: [mode_adversarial, verb_trap]
+  expect_mode: "other:reminder.create"
+  initial_intents: []
+  expect_det_intents: [reminder.create]
+  source: "「提醒我」56 级先接住；news hint guard 含提醒/联播"
+
+- text: 播放新闻联播
+  tags: [mode_adversarial, verb_trap]
+  live: false
+  initial_intents: [media.play]
+  expect_det_intents: [media.play]
+  source: "媒体域在 edge，云 catalog 缺席故不跑 live；det 验证 news hint guard 含播/联播"
+
+- text: 检索一下宁德时代最新财报要点
+  tags: [mode_adversarial, verb_trap]
+  expect_mode: search
+  initial_intents: []
+  expect_det_intents: [info.search]
+
+# ══ mode_followup：跟进态（history 前置） ══════════════════════════════════════
+
+- text: 展开第三点
+  tags: [mode_followup, research_active]
+  expect_mode: research
+  initial_intents: []
+  expect_det_intents: [research.run]
+  history:
+    - {role: user, text: 深入调研一下固态电池}
+    - {role: assistant, text: 已完成调研：固态电池现状报告共5节，要点是……}
+
+- text: 第二点再详细讲讲
+  tags: [mode_followup, research_active]
+  expect_mode: research
+  initial_intents: []
+  expect_det_intents: [research.run]
+  history:
+    - {role: user, text: 深入调研一下固态电池}
+    - {role: assistant, text: 已完成调研：固态电池现状报告共5节，要点是……}
+
+- text: 这部分展开说说
+  tags: [mode_followup, research_active]
+  expect_mode: research
+  initial_intents: []
+  expect_det_intents: [research.run]
+  history:
+    - {role: user, text: 深入调研一下固态电池}
+    - {role: assistant, text: 已完成调研：固态电池现状报告共5节，要点是……}
+
+- text: 上面那点再深入一下
+  tags: [mode_followup, research_active]
+  expect_mode: research
+  initial_intents: []
+  expect_det_intents: [research.run]
+  history:
+    - {role: user, text: 深入调研一下固态电池}
+    - {role: assistant, text: 已完成调研：固态电池现状报告共5节，要点是……}
+
+# 裁定变更（2026-08-02，泓舟）：新闻列表后的「第N条/这条 详细讲讲」= **就地展开**，
+# 不再升级成分钟级异步深调研——用户要的是「这条多说两句」，开一张后台调研单是过度升级。
+# 「第N点/节/部」（报告章节量词）仍归 research，deep-research#1 的量词集已相应收窄。
+# 同一裁定同时解掉对抗语料 cs.more.news 与本文件之间的自相矛盾。
+- text: 详细讲讲第3条
+  tags: [mode_followup, news_active]
+  expect_mode: "news|search"
+  history:
+    - {role: user, text: 今天有什么新闻}
+    - {role: assistant, text: 今天值得关注的新闻有10条：1. …… 2. …… 3. ……}
+  source: "2026-08-02 裁定：「条」是列表项量词，就地展开；原为 research.run 深挖桥接"
+
+- text: 这条新闻详细说说
+  tags: [mode_followup, news_active]
+  expect_mode: "news|search"
+  history:
+    - {role: user, text: 今天有什么新闻}
+    - {role: assistant, text: 今天值得关注的新闻有10条：1. …… 2. …… 3. ……}
+  source: "2026-08-02 裁定：「条」是列表项量词，就地展开；原为 research.run 深挖桥接"
+
+- text: 再来点财经新闻
+  tags: [mode_followup, news_active]
+  expect_mode: news
+  initial_intents: []
+  expect_det_intents: [info.news]
+  history:
+    - {role: user, text: 今天有什么新闻}
+    - {role: assistant, text: 今天值得关注的新闻有10条：1. …… 2. …… 3. ……}
+
+- text: 换个话题，陪我聊聊天吧
+  tags: [mode_followup]
+  expect_mode: chitchat
+  history:
+    - {role: user, text: 今天有什么新闻}
+    - {role: assistant, text: 今天值得关注的新闻有10条：1. …… 2. …… 3. ……}
+
+- text: 那明天呢
+  tags: [mode_followup, fragile_context]
+  expect_mode: weather
+  history:
+    - {role: user, text: 今天杭州天气怎么样}
+    - {role: assistant, text: 杭州今天多云，28到33度，空气不错。}
+  source: "指代续接考 history 利用（无焦点态注入，允许波动）"
+
+- text: 那帮我深入调研一下它
+  tags: [mode_followup]
+  expect_mode: research
+  initial_intents: []
+  expect_det_intents: [research.run]
+  history:
+    - {role: user, text: 查一下麒麟电池是什么}
+    - {role: assistant, text: 麒麟电池是宁德时代发布的第三代CTP技术电池……}
+
+# ══ mode_guardrail：其他域不被四模式吸走（含确定性反例） ═══════════════════════════
+
+- text: 查一下明天杭州的天气
+  tags: [mode_guardrail, weather]
+  expect_mode: weather
+  initial_intents: [info.forecast]
+  expect_det_intents: [info.forecast]
+  source: "search hint guard 须含天气/预报——已正确路由的 forecast 不被劫持"
+
+- text: 查一下我的电量还能跑多远
+  tags: [mode_guardrail, vehicle]
+  expect_mode: "chitchat|none|other:charging.status"
+  initial_intents: []
+  expect_det_intents: []
+  source: "车辆状态：真栈被端侧 battery.query 拦下不上云；本评测全句直发云端时
+    chitchat 兜底或落 charging.status（充电域能答续航，合理落点）都算对；
+    绝不允许上网搜（search hint guard 含电量/续航）"
+
+- text: 搜一下附近的加油站
+  tags: [mode_guardrail, nearby]
+  expect_mode: "other:nearby.search|other:navigation.search_poi"
+  initial_intents: []
+  expect_det_intents: []
+  source: "search hint guard 含附近/加油站→让位（本例的本职）。2026-07-30：加油站从 nearby
+    hint 类目收窄移除——无专属 owner，发现面(nearby)与地点定位(navigation)都成立，
+    **歧义类目交回模型不由正则钉死**，故 det 断言从 [nearby.search] 改为无 hint 施加"
+
+# 2026-07-30 地盘收口：充电桩发现改判归 charging.find（读真实 SOC + 空闲优先排序 + 可作
+# 途经点），nearby hint 的充电类目随之收窄移除。这两条是「退役/收窄的是规则，不是对它的
+# 回归保护」——原断言在 route_hints_cases 是「hint 施加后应得 X」，规则没了就只能改端到端口径。
+- text: 附近有没有充电站
+  tags: [mode_guardrail, charging]
+  expect_mode: other:charging.find
+  expect_intents: [charging.find]
+  source: "2026-07-30 改判（原 route_hints_cases 断言 nearby.search）：充电桩发现归 charging"
+- text: 找个充电站
+  tags: [mode_guardrail, charging]
+  expect_mode: other:charging.find
+  expect_intents: [charging.find]
+  source: "2026-07-30 改判：双臂裸跑两档一致——摘掉 nearby hint 后模型自己就落 charging.find"
+
+- text: 查一下我的待办
+  tags: [mode_guardrail, reminder]
+  expect_mode: "other:reminder.list"
+  source: "search hint guard 含待办；reminder.list hint(56) 接住"
+
+- text: 帮我查一下茅台股价
+  tags: [mode_guardrail, stock]
+  expect_mode: stock
+  initial_intents: [info.stock]
+  expect_det_intents: [info.stock]
+
+- text: 明天早上八点提醒我开会
+  tags: [mode_guardrail, reminder]
+  expect_mode: "other:reminder.create"
+  initial_intents: []
+  expect_det_intents: [reminder.create]
+
+- text: 世界杯下一场比赛什么时候开打
+  tags: [mode_guardrail, sports]
+  expect_mode: sports
+
+- text: 帮我导航到虹桥火车站
+  tags: [mode_guardrail, navigation]
+  expect_mode: "other:navigation.navigate_to"
+
+- text: 附近有什么好吃的川菜馆
+  tags: [mode_guardrail, nearby]
+  expect_mode: "other:nearby.search"
+  initial_intents: []
+  # 2026-07-30：nearby 的两条 route_hint 已退役（跨两档全覆盖双臂裸跑），故 det 层不再有
+  # 任何 hint 施加。**端到端期望（expect_mode）不变**——退役的是规则不是落域，模型自己会。
+  expect_det_intents: []
+
+- text: 帮我规划一个杭州两日游
+  tags: [mode_guardrail, trip]
+  expect_mode: "other:trip.plan"
+
+- text: 查一下这周末适不适合洗车
+  tags: [mode_guardrail, weather]
+  expect_mode: weather|search
+  initial_intents: [info.indices]
+  expect_det_intents: [info.indices]
+  source: "生活指数：search hint guard 须含洗车——已路由的 indices 不被劫持"
+
+- text: 今天上证指数怎么样
+  tags: [mode_guardrail, stock]
+  expect_mode: stock
+
+- text: 车道保持辅助怎么打开
+  tags: [mode_guardrail, manual]
+  expect_mode: "other:manual.query|chitchat"
+
+- text: 打开空调然后来点科技新闻
+  tags: [mode_guardrail, multi_intent]
+  expect_mode: "news|multi:info.news,scene.activate"
+  initial_intents: []
+  expect_det_intents: [info.news]
+  source: "真栈里空调子句由端侧 A2 混拆本地执行、云侧只见新闻子句；本评测全句直发云端，
+    云侧正确行为=接住新闻部分（车控在云 catalog 缺席；模型把空调映射到 scene.activate
+    并列 news 也算对——新闻意图没丢）"
+
+- text: 帮我查一下去机场的路线
+  tags: [mode_guardrail, navigation]
+  expect_mode: "other:navigation.navigate_to|other:navigation.search_poi"
+  initial_intents: []
+  expect_det_intents: []
+  source: "search hint guard 须含路线/导航——不抢导航域"
+
+- text: 搜一下周杰伦的歌
+  tags: [mode_guardrail, media]
+  live: false
+  initial_intents: []
+  expect_det_intents: []
+  source: "媒体域在 edge：search hint guard 须含的歌/歌曲——det 断言不劫持；live 无媒体 catalog 不跑"
+
+- text: 帮我查一下车的说明书里怎么除雾
+  tags: [mode_guardrail, manual]
+  expect_mode: "other:manual.query"
+  initial_intents: []
+  expect_det_intents: []
+  source: "search hint guard 须含说明书/手册——manual_rag 的地盘"
+
+# ══ vision 端到端护栏（M5 P2）：vision route_hint 于 2026-07-29 退役后，这四句的回归
+#    保护从「施加 hint 后应得 vision.describe」改成「planner 端到端应落 vision.describe」。
+#    **退役的是规则，不是对它的回归保护**——原用例在 route_hints_cases.yaml，hint 没了
+#    那套断言就失去了意义（施加一个不存在的 hint 恒等于什么都没做）。 ═════════════
+
+- text: 那是什么
+  tags: [mode_guardrail, vision]
+  expect_mode: other:vision.describe
+  expect_intents: [vision.describe]
+  source: "vision hint 退役（M5 P2）后的端到端护栏；双臂裸跑 ×4 轮 12/12 全对"
+
+- text: 帮我看看这个是什么
+  tags: [mode_guardrail, vision]
+  expect_mode: other:vision.describe
+  expect_intents: [vision.describe]
+  source: "vision hint 退役（M5 P2）后的端到端护栏；双臂裸跑 ×4 轮 12/12 全对"
+
+- text: 看看前面那个建筑是什么
+  tags: [mode_guardrail, vision]
+  expect_mode: other:vision.describe
+  expect_intents: [vision.describe]
+  source: "vision hint 退役（M5 P2）后的端到端护栏；双臂裸跑 ×4 轮 12/12 全对"
+
+- text: 帮我看看前面
+  tags: [mode_guardrail, vision]
+  expect_mode: other:vision.describe
+  expect_intents: [vision.describe]
+  source: "vision hint 退役（M5 P2）后的端到端护栏；双臂裸跑 ×4 轮 12/12 全对"
+
+# ══ mcp-bridge shop.order 回归护栏（M5 P2）══════════════════════════════════
+#    这条 hint 是 2026-07-26 总体验收「shop.order 与 nearby.search 掷硬币」的修复产物，
+#    但**上线以来零回归保护**——hint_retirement 干跑盘点报「32 条里唯一没有命中语料的」。
+#    根因不是没人写：mcp-bridge 的能力是启动期从 servers.yaml 合成的，静态 manifest 里
+#    capabilities 为空，离线评测里这条 hint **结构性不可证伪**（补出的步会因「intent 不在
+#    能力集」被丢掉）。eval_live 现按同一份准入清单离线合成能力后，它才第一次可测。
+#    ⚠ shop.order 的 require_confirm=true——动它须过专项安全回归（治理⑥）。
+
+- text: 来一杯大杯拿铁
+  tags: [mode_guardrail, shop]
+  expect_mode: other:shop.order
+  expect_intents: [shop.order]
+  source: "点单句式：下单动词+量词杯+品类共现（M5 P2 补：该 hint 上线以来零回归保护）"
+
+- text: 帮我点一杯美式
+  tags: [mode_guardrail, shop]
+  expect_mode: other:shop.order
+  expect_intents: [shop.order]
+  source: "同上，动词换「点」（M5 P2 补：该 hint 上线以来零回归保护）"
+
+- text: 附近哪里有咖啡店
+  tags: [mode_guardrail, shop]
+  expect_mode: other:nearby.search
+  expect_intents: [nearby.search]
+  source: "反向护栏：发现类语义由 guard 让路给 nearby（M5 P2 补：该 hint 上线以来零回归保护）"
+
+- text: 推荐个好喝的咖啡馆
+  tags: [mode_guardrail, shop]
+  expect_mode: other:nearby.search
+  expect_intents: [nearby.search]
+  source: "反向护栏：推荐/好喝 在 guard 里（M5 P2 补：该 hint 上线以来零回归保护）"
+
+- text: 去惠州怎么充电
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:charging.plan
+  expect_intents: [charging.plan]
+  source: "charging.plan 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: 快没电了，附近找个快充
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:charging.find
+  expect_intents: [charging.find]
+  source: "charging.find 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: 车快没电了，帮我找个充电桩
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:charging.find
+  expect_intents: [charging.find]
+  source: "charging.find 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: 糟了快没电了，赶紧找个充电桩
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:charging.find
+  expect_intents: [charging.find]
+  source: "charging.find 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: 别查了
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:research.cancel
+  expect_intents: [research.cancel]
+  source: "research.cancel 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: 取消那个调研
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:research.cancel
+  expect_intents: [research.cancel]
+  source: "research.cancel 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: 固态电池那个调研不用查了
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:research.cancel
+  expect_intents: [research.cancel]
+  source: "research.cancel 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: 那个调研查得怎么样了
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:research.status
+  expect_intents: [research.status]
+  source: "research.status 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: 还在查吗
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:research.status
+  expect_intents: [research.status]
+  source: "research.status 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: 葡萄牙那一场看看详情
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:info.sports
+  expect_intents: [info.sports]
+  source: "info.sports 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: 这场比赛你预测谁会赢
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:info.sports
+  expect_intents: [info.sports]
+  source: "info.sports 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: 看看它的详情
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:nearby.detail
+  expect_intents: [nearby.detail]
+  source: "nearby.detail 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: 我今天有什么安排
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:reminder.list
+  expect_intents: [reminder.list]
+  source: "reminder.list 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: 取消第二条提醒
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:reminder.cancel
+  expect_intents: [reminder.cancel]
+  source: "reminder.cancel 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: 取消第二条
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:reminder.cancel
+  expect_intents: [reminder.cancel]
+  source: "reminder.cancel 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+# ⚠ 2026-08-29（QA 余项 ③）补两条：上面两条**都自带域词**（「提醒」）或是纯序数，
+# 而退役判据的 4 条命中语料同样如此 ⇒ **点名事项、不点名域**的那种取消句
+# 从退役那天起就没有任何尺子量得到。真栈受控对照（每臂 6 次干净会话）：
+# 带域词 18/18 落对，不带域词 3/12——错法四种，最恶性的两种是写
+# （`reminder.create` 反向建提醒 / `luckin.order_cancel` 跨域写）。
+# 判据是**句里有没有点名域**，与标题形状无关（长编号标题带上域词照样 6/6）。
+- text: 取消带伞
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:reminder.cancel
+  expect_intents: [reminder.cancel]
+  source: "退役语料面缺口（QA 余项 ③，2026-08-29）——不点名域的取消句"
+
+- text: 取消明天的评审会
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:reminder.cancel
+  expect_intents: [reminder.cancel]
+  source: "退役语料面缺口（QA 余项 ③，2026-08-29）——不点名域 + 日期限定"
+
+- text: 把接孩子的提醒改到五点
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:reminder.update
+  expect_intents: [reminder.update]
+  source: "reminder.update 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: 买牛奶那条推迟到明天九点
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:reminder.update
+  expect_intents: [reminder.update]
+  source: "reminder.update 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: 改第二条到晚上八点
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:reminder.update
+  expect_intents: [reminder.update]
+  source: "reminder.update 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: 完成第二条
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:reminder.complete
+  expect_intents: [reminder.complete]
+  source: "reminder.complete 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+# reminder.create 的 replace hint 于 2026-08-02 退役（意图落域对抗测试：它在踩掉
+# planner 已经规划对的计划）。退役的是规则不是对它的回归保护——18 条命中句里取
+# 三类代表形态（绝对时点 / 地理触发 / 周期）留在这里守「没有规则也要落对」。
+- text: 明天早上八点提醒我带充电线
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:reminder.create
+  expect_intents: [reminder.create]
+  source: "reminder.create 的 route_hint 已退役（2026-08-02）——回归保护改端到端口径"
+
+- text: 到公司提醒我拿文件
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:reminder.create
+  expect_intents: [reminder.create]
+  source: "reminder.create 的 route_hint 已退役（2026-08-02）——回归保护改端到端口径"
+
+- text: 每天早上八点提醒我吃药
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:reminder.create
+  expect_intents: [reminder.create]
+  source: "reminder.create 的 route_hint 已退役（2026-08-02）——回归保护改端到端口径"
+
+# 2026-08-10 补齐上面那句「三类代表形态」留下的缺口。当初迁出时只取了绝对时点 /
+# 地理触发 / 周期，snooze、「离开X」、「到X之前」三个词形在端到端侧一直是空的
+# （route_hints_cases.yaml 两处注释把这笔记成明账）。三条都用 hint 退役前的原句，
+# 与上面三条同口径：**没有规则也要落对**。
+# 三者在路由层全部是 reminder.create（manifest capability 描述与 examples 都明写
+# snooze / 到X / 离开X 归 create）；「改期原条目」是 Agent 内部行为，不是另一个 intent
+# （agents/reminder/src/agent.py `_AGAIN_RE` → create 路径里收编 fired 条目）。
+- text: 过10分钟再提醒我
+  tags: [mode_guardrail, retired_hint, reminder_wordform]
+  expect_mode: other:reminder.create
+  expect_intents: [reminder.create]
+  source: "create hint 退役后 snooze 词形的端到端等价用例（缺口与补齐记在 findings §20.5，2026-08-10）"
+
+- text: 离开公司提醒我买菜
+  tags: [mode_guardrail, retired_hint, reminder_wordform]
+  expect_mode: other:reminder.create
+  expect_intents: [reminder.create]
+  source: "create hint 退役后「离开X」词形的端到端等价用例（缺口与补齐记在 findings §20.5，2026-08-10）"
+
+- text: 到公司之前提醒我交周报
+  tags: [mode_guardrail, retired_hint, reminder_wordform]
+  expect_mode: other:reminder.create
+  expect_intents: [reminder.create]
+  source: "create hint 退役后「到X之前」词形的端到端等价用例（缺口与补齐记在 findings §20.5，2026-08-10）"
+
+- text: 开启午休模式
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:scene.activate
+  expect_intents: [scene.activate]
+  source: "scene.activate 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: 来个钓鱼模式
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:scene.activate
+  expect_intents: [scene.activate]
+  source: "scene.activate 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: 露营模式
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:scene.activate
+  expect_intents: [scene.activate]
+  source: "scene.activate 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: 开启午休模式，温度改成26
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:scene.activate
+  expect_intents: [scene.activate]
+  source: "scene.activate 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: 退出露营模式
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:scene.deactivate
+  expect_intents: [scene.deactivate]
+  source: "scene.deactivate 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: 把钓鱼模式的温度改成24
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:scene.update
+  expect_intents: [scene.update]
+  source: "scene.update 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: 去掉钓鱼模式里的香氛
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:scene.update
+  expect_intents: [scene.update]
+  source: "scene.update 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: 删掉钓鱼模式
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:scene.delete
+  expect_intents: [scene.delete]
+  source: "scene.delete 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: 导航第3天
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:trip.navigate
+  expect_intents: [trip.navigate]
+  source: "trip.navigate 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: 导航去第2天换一个
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:trip.modify
+  expect_intents: [trip.modify]
+  source: "trip.modify 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: ('不用查了', ['research.cancel'])
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:research.cancel
+  expect_intents: [research.cancel]
+  source: "research.cancel 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: ('调研有结果了吗', ['research.status'])
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:research.status
+  expect_intents: [research.status]
+  source: "research.status 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: ('安排去杭州的行程', ['info.weather', 'trip.plan'])
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:trip.plan
+  expect_intents: [trip.plan]
+  source: "trip.plan 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: ('帮我看看附近有什么咖啡店', ['nearby.search'])
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:nearby.search
+  expect_intents: [nearby.search]
+  source: "nearby.search 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: ('帮我看看我附近有什么好吃的', ['nearby.search'])
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:nearby.search
+  expect_intents: [nearby.search]
+  source: "nearby.search 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+- text: ('附近有没有停车场', ['nearby.search'])
+  tags: [mode_guardrail, retired_hint]
+  expect_mode: other:nearby.search
+  expect_intents: [nearby.search]
+  source: "nearby.search 的 route_hint 已退役（M5 P2）——回归保护改端到端口径"
+
+# ── 真实商户 MCP（2026-08-12 复合下单/取消 workflow 激活）──
+
+- text: 麦当劳有什么吃的
+  tags: [mode_typical, merchant_mcp]
+  expect_mode: other:mcd.menu
+  expect_intents: [mcd.menu]
+  source: "mcd v1 激活（真机 tools/list 核实）；餐品/营养知识独立于 nearby 发现"
+
+- text: 巨无霸多少大卡
+  tags: [mode_typical, merchant_mcp]
+  expect_mode: other:mcd.nutrition
+  expect_intents: [mcd.nutrition]
+  source: "营养问法——list-nutrition-foods 的核心价值场景；2026-08-13 改名 mcd.nutrition"
+
+- text: 我的麦当劳订单到哪了
+  tags: [mode_typical, merchant_mcp]
+  expect_mode: other:mcd.order_status
+  expect_intents: [mcd.order_status]
+  source: "mcd 订单查询（query-order）"
+
+- text: 我瑞幸的单子怎么样了
+  tags: [mode_typical, merchant_mcp]
+  expect_mode: other:luckin.order_status
+  expect_intents: [luckin.order_status]
+  source: "luckin 订单查询（queryOrderDetailInfo）；查瑞幸 App 下的单"
+
+- text: 附近有麦当劳吗
+  tags: [mode_boundary, merchant_mcp]
+  expect_mode: other:nearby.search
+  expect_intents: [nearby.search]
+  source: "边界：门店发现归 nearby（高德），mcd 域刻意不接 stores——防新域吸走发现类话术"
+
+- text: 麦当劳国贸店帮我点一份巨无霸套餐
+  tags: [mode_typical, merchant_mcp, write]
+  expect_mode: other:mcd.order
+  expect_intents: [mcd.order]
+  source: "品牌下单归真实麦当劳 workflow，不落 demo shop.order 或营养查询"
+
+- text: 瑞幸迪美店来杯热的生椰拿铁半糖
+  tags: [mode_typical, merchant_mcp, write]
+  expect_mode: other:luckin.order
+  expect_intents: [nearby.search, luckin.order]
+  source: "已给门店名也先由 nearby.search 取得同一公开 POI 的可信 name/lng/lat，再进入 luckin.order"
+
+- text: 找最近的瑞幸点一杯少冰厚乳拿铁
+  tags: [mode_typical, merchant_mcp, composition, write]
+  expect_mode: other:luckin.order
+  expect_intents: [nearby.search, luckin.order]
+  source: "未给门店时先 nearby.search，再把同一 POI 的 name/lng/lat 接入 luckin.order"
+
+- text: 把刚下的瑞幸订单取消掉
+  tags: [mode_typical, merchant_mcp, write]
+  expect_mode: other:luckin.order_cancel
+  expect_intents: [luckin.order_cancel]
+  source: "瑞幸取消是独立二次确认写能力，不得回落成下单或查单"
+
+- text: 附近有没有瑞幸门店
+  tags: [mode_boundary, merchant_mcp]
+  expect_mode: other:nearby.search
+  expect_intents: [nearby.search]
+  source: "只发现门店不创建订单"
+
+- text: 来一杯演示咖啡店的大杯美式
+  tags: [mode_boundary, merchant_mcp, demo]
+  expect_mode: other:shop.order
+  expect_intents: [shop.order]
+  source: "无真实品牌且点名演示咖啡店，保持 demo shop.order；不碰真实商户账号"

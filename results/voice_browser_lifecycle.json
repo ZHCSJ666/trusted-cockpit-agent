@@ -1,0 +1,17 @@
+{
+  "passed": true,
+  "checks": [
+    "final recognition automatically dispatches through actual guarded API",
+    "explicit barge-in cancels TTS and accepts next utterance",
+    "continuous mode resumes recognition after TTS completes",
+    "spoken stop exits locally without backend action",
+    "microphone rejection exits loop with explicit message",
+    "unsupported recognition keeps text input and disables microphone"
+  ],
+  "page_errors": [],
+  "api_mocked": false,
+  "speech_recognition_events": "synthetic",
+  "speech_synthesis": "stubbed",
+  "microphone_hardware_tested": false,
+  "acoustic_quality_tested": false
+}

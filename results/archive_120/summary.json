@@ -1,0 +1,202 @@
+{
+  "generated_at": "2026-10-11T11:52:16.710088+02:00",
+  "model": "vllm/moonshotai/Kimi-K3",
+  "cases": 120,
+  "repeats": 3,
+  "groups": [
+    {
+      "name": "离线规则 · 简化对照",
+      "provider": "offline",
+      "mode": "baseline",
+      "model": "deterministic parser (not LLM)",
+      "total": 360,
+      "passed": 258,
+      "pass_rate": 0.7167,
+      "consistent_rate": 0.7167,
+      "avg_latency_ms": 0.3,
+      "p95_latency_ms": 0.5,
+      "model_errors": 0,
+      "categories": {
+        "ambiguity": {
+          "total": 72,
+          "passed": 72,
+          "pass_rate": 1.0
+        },
+        "capability": {
+          "total": 72,
+          "passed": 48,
+          "pass_rate": 0.6667
+        },
+        "rag": {
+          "total": 72,
+          "passed": 42,
+          "pass_rate": 0.5833
+        },
+        "safety": {
+          "total": 72,
+          "passed": 33,
+          "pass_rate": 0.4583
+        },
+        "tool_calling": {
+          "total": 72,
+          "passed": 63,
+          "pass_rate": 0.875
+        }
+      }
+    },
+    {
+      "name": "离线规则 · 可信执行",
+      "provider": "offline",
+      "mode": "guarded",
+      "model": "deterministic parser (not LLM)",
+      "total": 360,
+      "passed": 360,
+      "pass_rate": 1.0,
+      "consistent_rate": 1.0,
+      "avg_latency_ms": 0.2,
+      "p95_latency_ms": 0.5,
+      "model_errors": 0,
+      "categories": {
+        "ambiguity": {
+          "total": 72,
+          "passed": 72,
+          "pass_rate": 1.0
+        },
+        "capability": {
+          "total": 72,
+          "passed": 72,
+          "pass_rate": 1.0
+        },
+        "rag": {
+          "total": 72,
+          "passed": 72,
+          "pass_rate": 1.0
+        },
+        "safety": {
+          "total": 72,
+          "passed": 72,
+          "pass_rate": 1.0
+        },
+        "tool_calling": {
+          "total": 72,
+          "passed": 72,
+          "pass_rate": 1.0
+        }
+      }
+    },
+    {
+      "name": "Kimi · 简化对照",
+      "provider": "kimi",
+      "mode": "baseline",
+      "model": "vllm/moonshotai/Kimi-K3",
+      "total": 360,
+      "passed": 234,
+      "pass_rate": 0.65,
+      "consistent_rate": 0.5667,
+      "avg_latency_ms": 6585.3,
+      "p95_latency_ms": 14401.8,
+      "model_errors": 0,
+      "categories": {
+        "ambiguity": {
+          "total": 72,
+          "passed": 63,
+          "pass_rate": 0.875
+        },
+        "capability": {
+          "total": 72,
+          "passed": 44,
+          "pass_rate": 0.6111
+        },
+        "rag": {
+          "total": 72,
+          "passed": 43,
+          "pass_rate": 0.5972
+        },
+        "safety": {
+          "total": 72,
+          "passed": 33,
+          "pass_rate": 0.4583
+        },
+        "tool_calling": {
+          "total": 72,
+          "passed": 51,
+          "pass_rate": 0.7083
+        }
+      }
+    },
+    {
+      "name": "Kimi · 可信执行",
+      "provider": "kimi",
+      "mode": "guarded",
+      "model": "vllm/moonshotai/Kimi-K3",
+      "total": 360,
+      "passed": 347,
+      "pass_rate": 0.9639,
+      "consistent_rate": 0.9583,
+      "avg_latency_ms": 6585.2,
+      "p95_latency_ms": 14401.8,
+      "model_errors": 0,
+      "categories": {
+        "ambiguity": {
+          "total": 72,
+          "passed": 72,
+          "pass_rate": 1.0
+        },
+        "capability": {
+          "total": 72,
+          "passed": 71,
+          "pass_rate": 0.9861
+        },
+        "rag": {
+          "total": 72,
+          "passed": 72,
+          "pass_rate": 1.0
+        },
+        "safety": {
+          "total": 72,
+          "passed": 72,
+          "pass_rate": 1.0
+        },
+        "tool_calling": {
+          "total": 72,
+          "passed": 60,
+          "pass_rate": 0.8333
+        }
+      }
+    }
+  ],
+  "corpus_sha256": "e169a74f3236634d7eaf6e389f11b02e322b7e53dd6b56377b57005c3c913a34",
+  "source_sha256": {
+    "cockpit-agent/interview/engine.py": "200ed7976f99f90468c7a3f0148c17884983513afc4aef3f4bc0ee7ab2f45309",
+    "cockpit-agent/interview/service.py": "365e15e6ca7ae0e07a03b8667657dbbf014eb811233e9e7382e8b896d14aeb06",
+    "cockpit-agent/interview/rag.py": "2ebb1a27c35af05780403c702daa73788398a859faa23de959139e2dd5684974",
+    "cockpit-agent/interview/llm.py": "6597c4472fcf042011db5ea2ad51f328e3f84dc3d4bb59353b44b423d9e064bc",
+    "cockpit-agent/interview/data/manual.json": "e169a74f3236634d7eaf6e389f11b02e322b7e53dd6b56377b57005c3c913a34",
+    "tests/cases.json": "c8fc0947ebd3452494cd5a3b0c4502b4d8030cdb7528bb238232153ceca421f7",
+    "evaluate.py": "8b9eb0c1b190f18a041f7c75871ff1e9aa59743cc4cc677b515257d6d51655df"
+  },
+  "source_changed_during_run": false,
+  "upstream_sha": "c705f8c40e76436e06dd7163fa3865451b35ca5d",
+  "usage": {
+    "offline": {
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "total_tokens": 0
+    },
+    "kimi": {
+      "prompt_tokens": 308946,
+      "completion_tokens": 98214,
+      "total_tokens": 407160
+    }
+  },
+  "run_seconds": 307.2,
+  "limitations": [
+    "120例开发可见回归集，split为预分组，不是盲测或CAR-bench官方成绩。",
+    "简化对照保留上游VAL与确认，不代表完整上游；两组复用同一模型计划与基线RAG草稿。",
+    "多轮候选计划来自可信分支的状态与历史；这是相同候选回放，非两个独立端到端agent跑分。",
+    "故障由本地模拟器注入；模拟状态与回执不能证明真实车辆执行。",
+    "RAG使用小型人工来源审阅语料；关键事实评分是词法近似，需要人工复核。",
+    "一致率表示同一用例全部重复均通过的比例；离线重复是确定性回归，不衡量模型随机性。",
+    "Token数量实际记录；服务端未提供单价，因此不估算人民币或美元成本。"
+  ]
+}

@@ -1,0 +1,46 @@
+# Dependencies and generated build outputs
+.venv/
+venv/
+.browsers/
+node_modules/
+dist/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.tsbuildinfo
+
+# Local credentials, uploads, preferences, reminders and provider caches
+.env
+.env.*
+!.env.example
+!.env.sample
+api.txt
+credentials*.json
+dev-stack.local
+*.pem
+*.key
+*.keystore
+*.jks
+/runtime/
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+*.log
+
+# Download separately with scripts/download_manuals.py
+/data/manuals/*.pdf
+/data/manuals/*.part
+
+# Editor and machine state
+.claude/
+.codex/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

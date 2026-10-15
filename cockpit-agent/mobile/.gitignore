@@ -1,0 +1,53 @@
+# Learn more https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files
+
+# dependencies
+node_modules/
+
+# Expo
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Native
+.kotlin/
+*.orig.*
+*.jks
+*.keystore
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Metro
+.metro-health-check*
+
+# debug
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# macOS
+.DS_Store
+*.pem
+
+# local env files
+.env*.local
+
+# typescript
+*.tsbuildinfo
+
+example
+
+# generated native folders
+/ios
+/android
+
+# M4 端侧语音模型（VAD）——scripts/fetch_mobile_voice_assets.ps1 取件，切勿提交（体积 + 许可，
+# 同 hmi/public/models 的处置）。KWS 的三个模型与 sherpa AAR 由 modules/kws/.gitignore 管。
+assets/models/*
+!assets/models/.gitkeep
+
+# 真机取证截图（B1-14 状态画廊深浅两套等）：体积大、每批重拍、不是读数的载体，
+# 不入库；具体路径与当批读数写在 docs/design/ 的实施记录里。
+e2e/artifacts/

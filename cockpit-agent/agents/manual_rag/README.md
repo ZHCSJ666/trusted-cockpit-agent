@@ -1,0 +1,198 @@
+# manual-rag Agent (ecosystem / first_party)
+
+车书助手：从**指定车型的真实用户手册**检索可核验文本与图片，再由 LLM 仅依据片段生成
+简短回答。v2 同时处理无标点操作方法问句、受控图标俗称和同页原图；mock 只保留给 CI
+和无私有手册资产的离线开发。
+
+2026-09-26（0.4.0）：车主口语问法召回——「xxx 有哪些模式 / 怎么开启 / 有几个档位、后备箱能放几个行李」
+这类问法此前在生产上 86.8% 零命中（collector 562 轮里 488 轮）。检索 v3 重写查询理解（问句壳取自
+`runtime.question_shape`、档/挡折叠、主题 / 证据 / 只排序三类词、四道范围闸），并在词法没把握时让 LLM 在
+手册目录（封闭集合）里选章节。设计、证据与读数：
+[`docs/design/2026-09-26-manual-rag-colloquial-recall.md`](../../docs/design/2026-09-26-manual-rag-colloquial-recall.md)。
+索引包与云端模型资产不变。
+
+2026-09-26（0.4.1 → 0.4.3）：二批——词法首页的覆盖率够线、主题词却不在它的章节路径里（「运动模式到底在哪切换」
+撞上讲特殊路况的页）也再按目录路由，合并时词法首页钉第一；仪表灯语境的一句多问（「胎压黄灯亮了，还能继续开吗？
+应该补到多少？」）后续问句承接主语再查。真栈上同一句还修了规划器描述（补回「胎压」）、规划器写的槽（灯态边界、
+被否决时回原话）与答案形态（首句即答案、分句槽只给本步问题）。同一设计文档 §8，终版 release `5a2f4c9d`。
+
+历史生产状态（2026-09-05）：release `9a3b6f2f08657464c5049a5abf8f6e989e398bce` 使用v2
+shared-model只读图文包，5/5 endpoint healthy、统一verify通过。精确代码全量为
+7861 passed / 34 skipped / 5 warnings / 0 failed。
+
+整本范围在上述历史 release 闭合：独立自然化章节批187/187，受控视觉35/35；此前
+`位置灯/左转向/右转向/后雾灯/近光灯`五个三字caption稳定缺口均已修复。0.3.3另将LLM
+RuntimeError收口为一次有界重试；配额/参数/鉴权类不重试，仍失败则保留已检索的真实PDF卡并
+给出诚实降级话术，编程异常继续显式失败。
+
+上述历史 release 补跑用户点名问法：`雨刮器怎么打开`与“小人背宝剑”各3/3，均返回预期PDF页和
+图片，零action/确认、车态diff={}。原36题整批不能直接复跑：其中7条旧表述未通过联网前的
+question-shape/FastIntent安全预检；这7条未发送，也不得把其余结果拼成当前36/36。
+
+| intent | 说明 |
+|---|---|
+| `manual.query` | 胎压、保养、充电、功能操作、应急处置等车型手册问答 |
+
+## v2 / Jev 后续边界（未实现）
+
+JV05 从 09-26 的词法 + 目录路由 + 复合问句主语承接基线起步；先拆文本候选/资源引用与最终附图，再单独评测重排。
+保留范围闸、词法首页保留、视觉精确命中、车型/版本/hash 与数值护栏；off 对正文/页码/顺序/图片逐项等价。
+挂确认时手册答案/卡片完整性由 CA2-02–04 的步骤范围与 ResultBundle 承接，不能靠检索重排修展示。
+详见 [实施方案 §5](../../docs/design/2026-09-26-cockpit-agent-v2-implementation-plan.md#5-jev-工作包细化)。
+本目录车书 v2 是已有知识包版本；项目运行时 v2 的契约与模拟车态首版已实现，Jev 仍是后续规划。
+
+
+## 运行链路
+
+```text
+PDF + resources/visual_assets.yaml
+    -> scripts/build_manual_index.py -> models/manual_rag/*.mrag
+    -> 检索用哪句话：原话优先；指代主语 / 规划器已拆出的本步分句才用 question 槽
+    -> 已登记的安全告警：guarded_evidence -> 指纹/片段完整核验 -> 直接呈现原文和原页卡
+         已登记但证据不匹配 -> 明确弃权；未登记/非告警 -> 以下原检索与生成链
+    -> ManualIndexRetriever
+         范围闸：外车型 / 本车没有的对象 / 未知专名与型号码 -> 零命中
+         查询理解：问句壳剥离（runtime.question_shape）+ 档挡折叠 + 受控同义词 / 意图扩展
+         中文 n-gram BM25 + 章节/短语重排；闸只看主题词覆盖率，排序再计证据词
+         + 受控视觉 caption/aliases 精确匹配
+         + 仪表灯语境的一句多问：后续问句承接第一个分句的主语再查（只留提到主语的页）
+    -> 词法首页没把握（零命中 / 主题覆盖率 < 0.7 / 主题词不在它的章节路径里）/ 含手册不认识的实词
+         -> 目录路由（LLM 只从目录编号里选 ≤3 节，不见正文）-> 章节轮转取页
+         -> 合并：覆盖率够线时词法首页钉第一，其后共选页，再路由页与其余词法页交替
+    -> Chunk(source_type=manual, section_path, PDF page, vehicle_model, images, coverage, section_hit)
+    -> grounded prompt / 视觉目录确定性回答 -> speech + 图文 manual card
+```
+
+确定性护栏：
+
+- 索引绑定源 PDF SHA-256、车型、手册版本和内容 SHA-256，并须与 tracked
+  `resources/manual_catalog.yaml` 的人工批准指纹一致；任一不一致即启动失败；
+- 显式 real 配置缺文件/损坏/错车型时 fail-fast，绝不回 mock；
+- 未出现的显著 Latin 产品名或多词协议名（如 `CarPlay`、`Android Auto`）零命中；
+- 低相关查询零命中且不调 LLM；
+- 真实手册答案里的带单位/小数数值必须能在本轮引用片段核对，否则整段弃权；
+- 结果统一声明 `_speech_verbatim=true`，避免后续多步聚合再改写数值角色、出处或弃权说明；这是呈现合同，不是执行授权，见 [原文保护](../../docs/design/2026-09-28-result-speech-fidelity.md)；
+- 已登记的胎压告警改用指纹绑定的原文证据，完整保留灯状态/处置、参数和温度条件；只有明确询问复位时才增加完整复位段。
+  原文保护不代表所有上游生成已正确，机制与发布验收见 [来源条件护栏](../../docs/design/2026-09-28-manual-source-evidence-guard.md)；
+- 安全告警继续由 `runtime/safety_signal.py` 的确定性分级建议前置；
+- 卡片带章节、PDF 页码、车型、源/内容 hash 和 `_prov.mode=real`。
+- `.mrag` 内每个图片 blob 与视觉 manifest 均有 SHA-256；启动期全量校验，运行期读图复验；
+- 卡片最多 2 张、单图 640 KiB、总计 768 KiB，只允许 PNG/JPEG；图片不进入 LLM prompt；
+- “背宝剑小人”等俗称只接受 `visual_assets.yaml` 的人工审定映射，未知描述不模糊猜测；
+- 检索声明 `resources/retrieval.yaml` 是 schema v2：外车型 / 本车没有的对象两张表启动期逐条核对确实不在
+  手册里，矛盾即拒绝启动；`standalone` 扩展必须配主语约束；
+- 目录路由只产目录编号（代码校验存在、至多 3 个），被范围闸拦下、剥壳后没有实字、带仪表灯 / 图标语境的
+  问法不路由；路由失败即回落词法结果；只有「含手册不认识的实词 + 路由判其他车型」才作废词法近似；
+  零命中（词法与路由都没有材料）不调生成模型；
+- `runtime.question_shape` 保证“雨刮器怎么打开”等无标点方法问句不执行；PlanningGuide/
+  exemplar 负责泛化，manifest route hint 只兜生产已复现的高风险窄句形。
+
+## 私有索引资产
+
+`resources/source_evidence.yaml` 只登记已有手册的 document/source/content 指纹、页码、字符区间与片段 SHA-256，
+不复制私有正文。真实 Provider 的可选 `guarded_evidence` 返回核验后的完整片段和原页卡；已登记主题证据失配时
+返回不可用，Agent 明确弃权并标 `grounding_rejected=source_evidence`，不会转回模型生成。配置格式错误则启动失败。
+现阶段只登记胎压告警；其它主题、普通问题和未登记手册沿用原路径。新增主题必须分别核对来源条件与反例。
+`source_evidence_guard/ids` 是诊断字段，不是车辆观测、执行授权或故障已排除的证明。
+
+专项复用基线 runner，新增语料不改变原 20 例基线；自定义语料必须是已提交文件，并在发送前通过问句/端侧零意图预检：
+
+```powershell
+python scripts/dev_stack.py target show
+python scripts/probe_v2_baseline.py --corpus test/eval_corpus/v2_runtime/manual_source_evidence.yaml `
+  --expected-sha <full-release-sha> --provider minimax --model MiniMax-M3 --repeat 3 --out .artifacts/manual-source-evidence/live.json
+```
+
+`source_evidence` 断言从线上卡片按本地受控指纹重建完整片段，与最终话术逐段核对，同时禁止 manual-rag 模型调用。
+格式空白归一不允许省掉条件；仍需读最终话术，不把机器断言当整段安全验收。
+
+源 PDF、抽取正文与图片不进入 Git。生成包放 `models/manual_rag/`，该目录只跟踪说明和
+`.gitkeep`，包体全部 ignored。在线镜像不安装 PDF 解析器；`pypdf`/`PyYAML` 只属于离线建库。
+
+当前本机使用的输入基线：
+
+| 字段 | 值 |
+|---|---|
+| document | `SU7用户手册` |
+| vehicle_model | `xiaomi-su7-2024` |
+| revision | `2024-04-15` |
+| PDF pages | 278 |
+| source SHA-256 | `ef16d204c2ad711b2aa6c2a5f2a6607cfc2d47ed3f5d5a4e1db4085f75e4705d` |
+| output | `models/manual_rag/xiaomi-su7-2024.v2.mrag` |
+| output SHA-256 | `648cdf3d1d5001f199fce12e3983f3d016d929f772d0eb8aa058512dcd4400ed` |
+| visual manifest SHA-256 | `be594128e827afb207dc611f389a14a1d626d542df0ae17b77dc0da4c8676511` |
+| visual coverage | 350 个图片放置 / 299 个去重 blob；17 个明确跳过 |
+
+## 构建索引
+
+请在隔离虚拟环境或临时 target 中安装构建期依赖，不要污染系统 Python：
+
+```powershell
+python -m venv .artifacts/venvs/manual-rag
+.artifacts/venvs/manual-rag/Scripts/python -m pip install -r agents/manual_rag/requirements-ingest.txt
+.artifacts/venvs/manual-rag/Scripts/python -X utf8 scripts/build_manual_index.py `
+  --pdf 'D:\path\to\2024-小米SU7-Pro-Max-用户手册.pdf' `
+  --output 'models\manual_rag\xiaomi-su7-2024.v2.mrag' `
+  --expected-sha256 'ef16d204c2ad711b2aa6c2a5f2a6607cfc2d47ed3f5d5a4e1db4085f75e4705d'
+```
+
+默认拒绝覆盖已有包；确认输入后才使用 `--force`。相同 PDF、视觉目录与参数的输出应逐字节
+相同。当前 17 个 skipped 中 7 个为 pypdf 无法解码的 LZW，10 个为超过受控像素上限的
+FlateDecode 大图；它们不会被伪装成已支持图片。
+
+## Provider 配置
+
+```text
+KNOWLEDGE_VENDOR=local
+MANUAL_INDEX_PATH=/app/models/manual_rag/xiaomi-su7-2024.v2.mrag
+KNOWLEDGE_VEHICLE_MODEL=xiaomi-su7-2024
+```
+
+- `KNOWLEDGE_VENDOR=mock`：仅 CI/离线演示；
+- `local|manual|file`：真实只读包，缺失或任一文本/视觉 hash 校验失败即启动失败；旧
+  `.json.gz` 兼容读取但 `images=[]`；
+- `pgvector`：仍未实现，显式选择会 fail-fast；当多车型规模或真实 badcase 证明词法召回
+  达到上限时，再以现有 retrieval corpus 为 A/B 尺子迁移。
+
+根 `.env` 是唯一运行时配置源；不要在本目录复制 `.env`。本机 Docker build 会把工作区中
+已核验的 ignored 索引复制到 `/app/models/manual_rag/`；但当前 cloud release 的
+`source.tar` 只来自目标 commit，**不会携带 ignored 资产**。cloud profile 已接入现有
+shared-model bootstrap：索引先按固定 SHA 安装到 `/opt/car-agent/shared/models/manual_rag/`，
+再以只读 volume 挂载；bootstrap、基础设施批准锚与 deploy 仍须逐次授权并验证。
+
+## 验证
+
+```powershell
+python -X utf8 -m pytest -q agents/manual_rag `
+  scripts/tests/test_build_manual_index.py scripts/tests/test_eval_manual_rag.py
+python -X utf8 scripts/eval_manual_rag.py `
+  --index models/manual_rag/xiaomi-su7-2024.v2.mrag `
+  --cases test/eval_corpus/manual_rag_retrieval.yaml `
+  --output .artifacts/manual-rag/xiaomi-su7-2024-retrieval.json
+
+# 需要项目运行依赖 + requirements-ingest.txt 中的 pypdf
+python -X utf8 scripts/eval_manual_rag_full_coverage.py `
+  --pdf 'D:\path\to\2024-小米SU7-Pro-Max-用户手册.pdf' `
+  --output .artifacts/manual-rag-full-coverage/offline-full.json
+```
+
+车主口语问法（collector 真实问法 + 四类补充，43 条；`route: expected` 两条要靠目录路由）：
+
+```powershell
+python -X utf8 scripts/eval_manual_rag.py `
+  --index models/manual_rag/xiaomi-su7-2024.v2.mrag `
+  --cases test/eval_corpus/manual_rag_colloquial.yaml `
+  --output .artifacts/manual-rag/colloquial-lexical.json
+# 真栈（含目录路由）：probe_manual_rag_full_coverage.py --kind colloquial
+```
+
+真实评测必须同时核对 top 页和关键正文；“页号碰对”不算通过。当前实现与证据边界见
+`docs/design/2026-09-03-xiaomi-su7-manual-rag-v2-implementation-plan.md`；v1 历史见同目录
+`2026-09-03-xiaomi-su7-manual-rag-implementation-plan.md`。
+
+里程碑 `e2e_strict_stack` 会直接加载完整 36 题 corpus，而不是再维护一份三题子集；每题须
+同时满足 `manual` 单域卡、approved real provenance、预期页/正文/图片或正确零命中、零 action。
+整本 evaluator 另行报告 278页源重建、269页锚、160个索引路径、187个outline叶子、35个受控
+视觉语义和原36题；生产探针是 `scripts/probe_manual_rag_full_coverage.py`，不进入自动CI车道。
+完整口径与当前证据见
+`docs/design/2026-09-04-xiaomi-su7-manual-rag-full-coverage-validation-plan.md`。

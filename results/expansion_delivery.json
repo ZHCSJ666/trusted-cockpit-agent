@@ -1,0 +1,91 @@
+{
+  "checked_at": "2026-10-11T16:10:48.260582+00:00",
+  "version": "2.0.0",
+  "unit_integration_tests": {
+    "passed": true,
+    "count": 133,
+    "base": 55,
+    "expanded_runtime": 37,
+    "api": 11,
+    "services": 30
+  },
+  "real_api_acceptance": {
+    "passed": true,
+    "checks": 11,
+    "file": "results/expansion_acceptance.json"
+  },
+  "browser": {
+    "passed": true,
+    "checks": 9,
+    "file": "results/expansion_ui.json"
+  },
+  "voice_lifecycle": {
+    "passed": true,
+    "checks": 6,
+    "synthetic_audio_events": true,
+    "microphone_hardware_tested": false
+  },
+  "frontend": {
+    "typecheck": "passed",
+    "build": "passed",
+    "bundle": [
+      "index-CX1yRJpX.js"
+    ]
+  },
+  "presentation": {
+    "slides": 9,
+    "pdf_pages": 9,
+    "cases": 250,
+    "headline_model_groups": 2,
+    "footer_overlaps": [],
+    "path": "docs/面试汇报.pdf"
+  },
+  "original_250_source_snapshot": {
+    "cockpit-agent/interview/engine.py": true,
+    "cockpit-agent/interview/service.py": true,
+    "cockpit-agent/interview/rag.py": true,
+    "cockpit-agent/interview/llm.py": true,
+    "cockpit-agent/interview/data/manual.json": true,
+    "tests/cases.json": true,
+    "evaluate.py": true
+  },
+  "credential_scan": {
+    "matching_files": [],
+    "secret_copied": false
+  },
+  "source_sha256": {
+    "cockpit-agent/interview/__init__.py": "093d26f5c1e32aff361e223a36498ca6cf6ef711f85bfec5b26d21d8cafd7c39",
+    "cockpit-agent/interview/api_tests.py": "34ae3a5153a2d397b17320f59374300a7ff9f591061a87803e1e08360feb3af9",
+    "cockpit-agent/interview/app.py": "95f04f7e8cfb2a346d0e038a0dbaa1944c348684f9170cf216b24a2c83eb7718",
+    "cockpit-agent/interview/engine.py": "200ed7976f99f90468c7a3f0148c17884983513afc4aef3f4bc0ee7ab2f45309",
+    "cockpit-agent/interview/engine_tests.py": "c71ca25544ba2b8342fdccb5f3d256d6965608bfaaa388f5c513e26153a63bec",
+    "cockpit-agent/interview/expanded_engine.py": "849063a3e164d9051ca3c6e3d731ad9215c4ccfb0ab8a85d516e79c1ce9e59b7",
+    "cockpit-agent/interview/expanded_tests.py": "eba4c609fd6e3229381b0ed0e23e94d0d0daebadaf110f4c33b6ba970379d34d",
+    "cockpit-agent/interview/integration_tests.py": "fceaadc17d71293d3b5476650be48e8195828f6987bde5de49ca1ff2640b356b",
+    "cockpit-agent/interview/llm.py": "0c9c43313fea1460beebe3c23b7f2aadae735de18b2900149c0719cdf9fd5220",
+    "cockpit-agent/interview/media.py": "770da497cb7d85cdc16319012780b3ce0e2a08be9c17d7ac3c3f94534ae9e0ad",
+    "cockpit-agent/interview/rag.py": "2ebb1a27c35af05780403c702daa73788398a859faa23de959139e2dd5684974",
+    "cockpit-agent/interview/runtime.py": "b25f0fc3c6a884f390261284cc5a2d332fd8e740318ceec5b0a4b88249a02f6c",
+    "cockpit-agent/interview/service.py": "365e15e6ca7ae0e07a03b8667657dbbf014eb811233e9e7382e8b896d14aeb06",
+    "cockpit-agent/interview/services.py": "ddcc03afc1a5094689e61c4bfd707de7146885b15bcfb7c8ece010759c79d38c",
+    "cockpit-agent/hmi/src/studio/Studio.tsx": "1cfcce34a1e746f3f9dc80aa8fb73f7e20cd8aa49ab881407cfb27b2b17c7b80",
+    "cockpit-agent/hmi/src/studio/WorkspacePanels.tsx": "12c2a00714ab5040737f35f27ecc9b89a1824c571c9feb0b0719b53253f39722",
+    "cockpit-agent/hmi/src/studio/studio.css": "8bce6f78453ee83140822bca7bfd08a677764b87e5119d0c65aafb286775851b",
+    "cockpit-agent/hmi/src/studio/workspace.css": "94e8373ae5109a5def7f40331dd7e84db68e56e862af1a0d91bd61f3c4337ed2",
+    "cockpit-agent/hmi/src/studio/workspaceTypes.ts": "3967195b6f2b08acd4e12539e30a7d5291f6ebfac375d450041356bda7f74b7f",
+    "cockpit-agent/hmi/package-lock.json": "5d54e440b10b91ac55c42196b27738516013108b50b158763e832a30c6bbb035",
+    "requirements-lock.txt": "7226fac0e2cc1cb7e26c1793e82ce3a814d333580138c0b53a84ef19e6bbd6f6",
+    "data/manuals/catalog.json": "e12161f79ab5c9fec58037c472f327ac4e5dee9dfd93adb07ba83fddde9f8ef3"
+  },
+  "known_limitations": [
+    "public providers may time out; real outage retained in expansion_acceptance_network_failure.json",
+    "map routes have no live traffic or charging occupancy",
+    "browser speech only; supplied API has no tested ASR/TTS endpoint",
+    "camera/microphone hardware and acoustics not tested",
+    "all vehicle effects simulated; no Android or full distributed cluster",
+    "full manual retrieval is lexical, not proof of complete safety coverage"
+  ],
+  "existing_server_8787": "left untouched; restart it to load expanded Python APIs",
+  "owned_preview_port": 8788,
+  "owned_preview_stopped": true
+}

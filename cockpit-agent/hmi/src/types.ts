@@ -1,0 +1,1172 @@
+// 共享类型与能力目录。HMI 的"单一事实源"：消息结构、设置模型、Agent 清单、默认值。
+
+export type Action = {
+  type: string
+  payload?: Record<string, unknown>
+  require_confirm?: boolean
+}
+
+export type Msg = {
+  id: string
+  role: 'user' | 'assistant'
+  text: string
+  actions?: Action[]
+  needConfirm?: boolean
+  // QA 卡 Q1-B/C：这条待确认对应的挂起 id（后端 final 下发）。点确认/取消时原样回传，
+  // 后端据它定位是哪一条挂起——**没有它，多条挂起并存时「这一下」只能靠猜**
+  // （I-013 全局确认命中旧请求）。空 = 位置授权征询等纯前端确认，不上行。
+  operationId?: string
+  followUp?: string
+  pending?: boolean // 助手"思考中"占位（开放域慢响应时立刻给反馈）
+  streaming?: boolean // 正在流式接收 speech_delta
+  error?: boolean
+  rejected?: boolean // R4.4：云端判非受话 → 静默忽略、标灰留痕（Android 按住说话那一轮用；免唤醒那一轮 2026-10-10 起直接删掉）
+  // 2026-10-10：续问窗里没喊唤醒词就收进来的那句用户话——云端判定之前显示成待定（紧随其后的助手占位还在 pending 时），
+  // 判受话即转正、判非受话连同占位从记录里删掉（设计 2026-10-10-handsfree-followup-rejection §4.3）
+  provisional?: boolean
+  uiCard?: UiCard
+  resultBundles?: ResultBundle[] // immutable server snapshots; never an execution channel
+  // 复杂任务过程区（脱敏「步骤+思考摘要」）：进行中默认简短摘要，完成后默认折叠可展开。
+  process?: ProcessStep[]
+  processActive?: boolean // 过程进行中（未出最终答案）
+  driving?: boolean // 行车态（由 Edge 按 VAL 标注）：行车极简、不可展开
+  // 观测贯通（badcase 排查）：本轮请求的 trace_id，HMI 生成随 meta 上行；
+  // 助手气泡角标可点按复制，粘进可观测台搜索框直达该轮全链路详情
+  traceId?: string
+  // 主动播报的**种类**（网关把 NATS payload 的 type 透传成 advisory）：
+  // scene_suggest=场景建议 / scene_verify=执行反馈 / reminder_fired=提醒到点 / 其余=报告或提示。
+  // 没有它的话，凡是带卡的主动播报都会被标成「任务完成」（异步深调研的标题）——场景建议顶着
+  // 「任务完成」很违和。
+  proactiveKind?: string
+}
+
+export type ResultEntry = {
+  step_id: string
+  goal_ids: string[]
+  intent: string
+  status: string
+  answer: string
+  card_ref?: string
+  operation_id?: string
+  answer_state: 'inline' | 'reference' | 'unavailable'
+  result_ref: string
+  verification: string
+  pending_edge?: boolean
+  // CA2-10：执行结果证据（回执 / 状态满足 / 观测归属 / 已核实分开）；缺省 = 这一步没声明状态核验
+  evidence?: VerificationEvidence
+}
+
+export type VerificationEvidence = {
+  ack: 'acknowledged' | 'unknown'
+  state: 'satisfied' | 'unsatisfied' | 'unknown'
+  observed: 'attributed' | 'unchanged' | 'missing' | 'unattributed'
+  verified: boolean
+  reasons: string[]
+  source_kind: string
+  authenticated: boolean
+}
+
+export type ResultBundle = {
+  version: 1
+  task_id: string
+  revision: number
+  goals: Array<{ goal_id: string; origin_exchange_id: string; source_sha256: string; start: number; end: number; coverage: string }>
+  results: ResultEntry[]
+  coverage_status: string
+  display_text: string
+  cards: Record<string, UiCard>
+}
+
+// 过程区单步：phase=understand|plan|execute|synthesize；summary 为后端按步骤结果合成的脱敏摘要。
+export type ProcessStep = {
+  phase: string
+  label: string
+  summary?: string
+  status?: string // running | done | start
+  step_id?: string // execute 步骤：按它合并 running→done
+}
+
+// ─── UI 卡片类型 ───
+
+export type CardGroup = { type: 'card_group'; items: UiCard[] }
+
+// 卡内动作只合成一句明确的自然语言，经 App.send 走普通
+// `is_confirmation=false` 上行链。它不是业务写接口；真正的创建/取消仍由
+// 全局 ConfirmBubble 的 `is_confirmation=true` 二次确认触发。
+export type CardButton = {
+  label: string
+  send_text: string
+}
+
+// 数据真实性标记（后端保留键 `_prov`，契约 docs/conventions.md §9.3）：
+// mock=模拟数据醒目提示 / degraded=真实但降级路径 / cached=缓存 / real=不打扰角标（来源·取数时间）。
+// 治理 P1 试点：weather / place_list·place_detail / search_result 三族，其余分批推广。
+export type Provenance = {
+  mode: 'real' | 'cached' | 'degraded' | 'mock'
+  vendor?: string
+  fetched_at?: string   // 数据获取时刻（ISO8601），非渲染时刻
+  note?: string         // degraded/cached 的原因或缓存龄
+  data_time?: string    // 手册版本等来源自身日期
+  data_time_label?: string
+}
+
+export type UiCard =
+  | CardGroup
+  | WeatherCard
+  | ForecastCard
+  | StockCard
+  | NewsCard
+  | SearchCard
+  | SearchAnswerCard
+  | NewsDigestCard
+  | SearchResultCard
+  | NewsBriefCard
+  | ResearchReportCard
+  | SportsScoresCard
+  | SportsScorersCard
+  | RoutePlanCard
+  | ChargingRouteCard
+  | TripItineraryCard
+  | PoiListCard
+  | PoiDetailCard
+  | PlaceListCard
+  | PlaceDetailCard
+  | ReminderListCard
+  | ReminderCard
+  | SceneCard
+  | SceneListCard
+  | IntentChoiceCard
+  | VisionAnswerCard
+  | ManualCard
+  | PaymentQrCard
+  | PaymentReceiptCard
+  | ParkingFeeCard
+  | McpOrderCard
+  | McpResultCard
+  | MerchantCheckoutCard
+
+// M4 P4 看一看卡：单帧图片问答的结果。**simulated 恒为真**——PoC 没有车外摄像头，
+// 画面来自设备摄像头，卡片角标必须如实说（同 sim.adas / MCP 演示商户的诚实标注惯例）。
+export type VisionAnswerCard = {
+  type: 'vision_answer'
+  answer: string
+  question?: string
+  simulated?: boolean
+}
+
+export type ManualImage = {
+  asset_id: string
+  caption: string
+  description?: string
+  page_start: number
+  media_type: 'image/png' | 'image/jpeg'
+  data_uri: string
+  sha256: string
+  width: number
+  height: number
+  bbox?: number[]
+  role?: 'illustration' | 'warning_icon' | 'icon'
+  match_kind?: 'visual_alias' | 'visual_caption' | 'page_evidence'
+}
+
+export type ManualChunk = {
+  content: string
+  source?: string
+  score?: number
+  document_id?: string
+  vehicle_model?: string
+  page_start?: number
+  page_end?: number
+  section_path?: string[]
+  asset_ids?: string[]
+}
+
+// 真实车型手册证据卡。图片只能是后端 hash 校验后的 PNG/JPEG data URI；渲染端仍经
+// manualCard.mjs 二次过滤。卡片不带可执行按钮，保持 response_only。
+export type ManualCard = {
+  type: 'manual'
+  source_type?: 'manual' | 'mock' | 'web' | ''
+  sources?: string[]
+  chunks?: ManualChunk[]
+  images?: ManualImage[]
+  document?: {
+    document_id?: string
+    title?: string
+    publisher?: string
+    vehicle_model?: string
+    revision?: string
+    source_sha256?: string
+    content_sha256?: string
+    visual_assets_sha256?: string
+    visual_asset_count?: number
+    visual_skipped_asset_count?: number
+  }
+  _prov?: Provenance
+}
+
+// 支付付款码卡（§9.17，2026-08-11 批 2）：qr_svg 是网关生成的 data URI（<img> 直渲，
+// 前端零 QR 依赖）；expires_at_ms 驱动本地倒计时，到期置灰。mock 渠道必带 _prov。
+export type PaymentQrCard = {
+  type: 'payment_qr'
+  payment_id: string
+  amount: string          // 展示金额（如 "15元"）——来源=网关订单快照
+  merchant?: string
+  order_id?: string
+  status?: string
+  store_name?: string
+  scene?: string
+  qr_content?: string
+  qr_svg?: string         // data:image/svg+xml;base64,…；空则回落为安全链接打开/复制动作
+  pay_url?: string
+  expires_at_ms?: number
+  merchant_note?: string  // merchant_hosted：「订单状态以商家为准」类说明
+  account?: string
+  account_label?: string
+  buttons?: CardButton[]
+  _prov?: Provenance
+}
+
+// 支付回执卡：worker 确认收款后经统一主动引擎推送（§9.8 user_contract 档）；
+// parking 历史上也直接发过——此前 HMI 一直渲染 null（存量欠账，批 2 清偿）。
+export type PaymentReceiptCard = {
+  type: 'payment_receipt'
+  receipt_id: string
+  order_id?: string
+  amount?: string
+  scene?: string
+  _prov?: Provenance
+}
+
+// 停车费查询卡（parking.query_fee 一直在发，HMI 渲染 null 的存量欠账，批 2 清偿）
+export type ParkingFeeCard = {
+  type: 'parking_fee'
+  order_id?: string
+  plate?: string
+  amount: string
+}
+
+// MCP 桥订单/结果卡（§9.9；桥从 M3 起就在发、HMI 一直渲染 null 的存量欠账，批 3 清偿）。
+// demo/demo_label 是「演示商户」三重冗余的第二重——此前它在前端根本没有渲染出口。
+export type McpOrderCard = {
+  type: 'mcp_order'
+  confirmation_context?: string
+  server?: string
+  tool?: string
+  merchant?: string
+  brand?: string
+  order_id?: string
+  orderId?: string
+  sku?: string
+  size?: string
+  amount_cents?: number
+  payable_cents?: number
+  payable_amount_cents?: number
+  amount?: string
+  status?: string
+  store_name?: string
+  store?: string | { name?: string; storeName?: string }
+  item_name?: string
+  product_name?: string
+  quantity?: number
+  items?: MerchantLineItem[]
+  products?: MerchantLineItem[]
+  buttons?: CardButton[]
+  duplicate?: boolean
+  demo?: boolean
+  demo_label?: string
+  // CA2-17：共享服务账号的标注（桥按 servers.yaml 的 account: service 统一打，前端只渲染）
+  account?: string
+  account_label?: string
+  _prov?: Provenance
+}
+
+export type McpResultCard = {
+  type: 'mcp_result'
+  // readonly=true：这一轮调的是只读工具（servers.yaml 的 write: false），
+  // 结果里没有订单。渲染成信息卡而不是订单卡（QA I-022）。
+  readonly?: boolean
+  server?: string
+  tool?: string
+  merchant?: string
+  brand?: string
+  order_id?: string
+  orderId?: string
+  amount_cents?: number
+  payable_cents?: number
+  payable_amount_cents?: number
+  amount?: string
+  status?: string
+  buttons?: CardButton[]
+  demo?: boolean
+  demo_label?: string
+  // CA2-17：共享服务账号的标注（桥按 servers.yaml 的 account: service 统一打，前端只渲染）
+  account?: string
+  account_label?: string
+  _prov?: Provenance
+  [key: string]: unknown
+}
+
+export type MerchantLineItem = {
+  id?: string
+  name?: string
+  label?: string
+  subtitle?: string
+  send_text?: string
+  // 商品图（2026-08-13）：桥侧已过 servers.yaml::image_hosts 精确白名单，
+  // 渲染端仍再挡一次协议（merchantImageUrl）。缺省=这家商户没给图，渲染纯文字。
+  image_url?: string
+  item_name?: string
+  product_name?: string
+  quantity?: number
+  qty?: number
+  specs?: string | string[]
+  specifications?: string | string[]
+  specification?: string | string[]
+  additionDesc?: string
+  size?: string
+  amount_cents?: number
+}
+
+// 真实商户复合 workflow 卡：同一渲染器兼容新契约
+// `merchant_checkout` 与设计阶段的 choices/preview 卡名。checkout_token 可在
+// 卡数据中存在但绝不渲染；它也不是确认授权。
+export type MerchantCheckoutCard = {
+  type: 'merchant_checkout' | 'merchant_choices' | 'merchant_order_preview'
+  stage?: 'choices' | 'preview' | 'order' | 'cancel'
+  account?: string
+  account_label?: string
+  confirmation_context?: string
+  merchant?: string
+  merchant_name?: string
+  brand?: string
+  title?: string
+  choice_kind?: 'store' | 'product'
+  store_name?: string
+  storeName?: string
+  store?: string | { name?: string; storeName?: string }
+  order_id?: string
+  orderId?: string
+  amount?: string
+  amount_cents?: number
+  payable?: string
+  payable_amount?: string
+  payable_cents?: number
+  payable_amount_cents?: number
+  discount?: string
+  discount_cents?: number
+  fulfillment?: string
+  pickup_mode?: string
+  take_way?: string
+  item_name?: string
+  product_name?: string
+  quantity?: number
+  items?: MerchantLineItem[]
+  products?: MerchantLineItem[]
+  options?: Array<{ label?: string; name?: string; subtitle?: string; send_text?: string; image_url?: string }>
+  buttons?: CardButton[]
+  status?: string
+  checkout_token?: string
+  // 菜单卡分类导航（demo-3ukshz #2）：桥侧从官方 categories 生成，chip 点按发 send_text
+  categories?: Array<{ label?: string; send_text?: string }>
+  // 菜单卡诚实总量：卡上只展示一页，total 是当前范围的在售总数
+  total?: number
+  // 预览卡规格 chips（demo-3ukshz #3）：只含下单链消费得动的组（_SPEC_GROUPS 四族）
+  spec_options?: Array<{
+    name?: string
+    selected?: string
+    options?: Array<{ label?: string; price_delta_cents?: number }>
+  }>
+  _prov?: Provenance
+  [key: string]: unknown
+}
+
+// R4.4 路由歧义澄清卡：一句提问 + 2~3 个消歧选项（点/说「第N个」→ 回发 send_text 作新指令）
+export type IntentChoiceCard = {
+  type: 'intent_choice'
+  question: string
+  options: Array<{ label: string; send_text: string }>
+}
+
+// 路线规划卡：出发地 → 途经点（餐厅等）→ 目的地（导航确认途经点后）
+export type RoutePlanCard = {
+  type: 'route_plan'
+  // estimate=true 表示这一轮**只算不导**（navigation.estimate，QA 卡 Q8 / I-016）。
+  // 卡片标题与按钮据此改写——「卡片类型必须与本轮真实动作一致」（I-022 同族）：
+  // 一张写着「已规划好路线」的卡配一个没有发生的导航，用户没法分辨这两件事。
+  estimate?: boolean
+  // cancelled=true：这一趟导航已经结束（navigation.cancel，QA I-017）。
+  // 聊天流里历史卡片改不了，但**这一轮**必须出一张说清「作废了」的卡——
+  // 否则用户看到的最后一张路线卡永远是还在导航的样子。
+  cancelled?: boolean
+  origin?: string
+  destination: string
+  // 2026-09-11 路线几何（Android 地图页画路线用；HMI 舞台仍画示意图）：全部**可选**——
+  // provider 没给几何时字段不出现，客户端据此决定给不给「查看路线」入口。
+  origin_loc?: { lat: number; lng: number }
+  destination_loc?: { lat: number; lng: number }
+  waypoints: Array<{ name: string; address?: string; lat?: number; lng?: number }>
+  // 抽样后的折线（≤ 240 点），每项 [lat, lng]
+  path?: Array<[number, number]>
+  distance_km?: number
+  duration_min?: number
+  eta_ts?: number
+}
+
+// 充能路线卡：出发地 → 沿途途经充电点 → 目的地
+export type ChargingRouteCard = {
+  type: 'charging_route'
+  destination: string
+  distance_km?: number
+  duration_min?: number
+  // 2026-09-11：stops 可带坐标、卡可带折线（同 RoutePlanCard，全部可选）
+  stops: Array<{ name: string; address?: string; at_km?: number; lat?: number; lng?: number }>
+  origin_loc?: { lat: number; lng: number }
+  destination_loc?: { lat: number; lng: number }
+  path?: Array<[number, number]>
+  soc?: string
+  // CA2-19 S1：电量说明由服务端给（「模拟车读数」「约2分钟前的读数」；读不到时 soc 为空、这里是「没读到」）
+  soc_note?: string
+}
+
+// 行程卡（P0 重构）：结构化多日行程——按天列停靠点（接地真实 POI）+ 段间驾驶/充电
+export type TripStop = {
+  stop_id: string
+  type: string                 // attraction|meal|hotel|charging|custom
+  name: string
+  poi?: { name?: string; address?: string; lat?: number; lng?: number; rating?: number } | null
+  dwell_min?: number
+  grounded: boolean
+}
+
+export type TripLeg = {
+  from_stop_id: string
+  to_stop_id: string
+  distance_km: number
+  drive_min: number
+  charging_stops: Array<{ name: string; address?: string; at_km?: number }>
+  soc_before?: number
+  soc_after?: number
+}
+
+export type TripDay = {
+  day_index: number
+  theme?: string
+  city?: string // G9 多城市：这天在哪座城（空=单城市行程）
+  stops: TripStop[]
+  legs: TripLeg[]
+  weather?: { date?: string; text?: string; temp_high?: string; temp_low?: string } | null // #3 天气联动
+}
+
+export type TripItineraryCard = {
+  type: 'trip_itinerary'
+  destination: string
+  days: number
+  theme?: string // G4 主题行程（《太平年》）；空=普通行程
+  cities?: string[] // G9 多城市保序；空=单城市
+  preferences?: string[]
+  status?: string
+  itinerary: TripDay[]
+}
+
+// ── 2026-06-22 信息卡重设计：卡片只给证据（来源/要点/时效/置信度），气泡给结论，不复读 ──
+export type Confidence = 'high' | 'medium' | 'low'
+
+export type SearchResultCard = {
+  type: 'search_result'
+  _prov?: Provenance
+  query: string
+  sources: Array<{ title: string; url: string; source: string; published?: string }>
+  freshness?: string
+  confidence?: Confidence
+}
+
+export type NewsBriefCard = {
+  type: 'news_brief'
+  topic: string
+  items: Array<{ title: string; url?: string; source: string; publish_time?: string; summary?: string }>
+  freshness?: string
+}
+
+// 深度调研报告卡（独立 deep-research Agent 产出）：分节可读报告——气泡给一段式语音简报，
+// 卡片给分节结论 + 引用 + 置信度 + 未覆盖 gaps（泊车/手机可读）。
+export type ResearchReportCard = {
+  type: 'research_report'
+  question: string
+  summary?: string
+  sections: Array<{ heading: string; body: string; citations?: number[]; confidence?: Confidence }>
+  sources: Array<{ idx?: number; title: string; url?: string; source?: string; published?: string }>
+  overall_confidence?: Confidence
+  gaps?: string[]
+  freshness?: string
+}
+
+export type SportsFixture = {
+  league: string
+  round: string
+  home: string
+  away: string
+  home_logo?: string
+  away_logo?: string
+  home_flag?: string   // 国旗 emoji（后端按队名注入，国家队用；俱乐部走 logo）
+  away_flag?: string
+  score: string
+  home_goals: string
+  away_goals: string
+  status: 'finished' | 'live' | 'scheduled' | 'other'
+  status_text: string
+  elapsed?: string
+  kickoff?: string
+  // 进球时间线（仅"某场详情"追问时带）：射手 + 分钟 + 主客侧 + 进球/点球/乌龙球
+  goals?: Array<{ minute: string; team: 'home' | 'away' | ''; player: string; detail: string }>
+}
+
+export type SportsScoresCard = {
+  type: 'sports_scores'
+  title: string
+  fixtures: SportsFixture[]
+  freshness?: string
+  source?: string
+}
+
+export type SportsScorersCard = {
+  type: 'sports_scorers'
+  title: string
+  season: string
+  scorers: Array<{ rank: number; player: string; team: string; goals: number }>
+  freshness?: string
+  source?: string
+}
+
+export type WeatherCard = {
+  type: 'weather'
+  _prov?: Provenance
+  city: string
+  temp: string
+  text: string
+  feels_like: string
+  humidity: string
+  wind_dir: string
+  wind_scale: string
+  precip?: string
+  pressure?: string
+  visibility?: string
+  cloud?: string
+  dew_point?: string
+  update_time: string
+  // 焦点日（问「明天/后天天气」时后端下发）：卡片主视觉展示该日预报，今天实况降为次行
+  focus?: {
+    date: string
+    label: string
+    text_day: string
+    text_night: string
+    temp_high: string
+    temp_low: string
+    wind_dir: string
+    wind_scale: string
+    humidity: string
+    precip: string
+    uv_index: string
+  }
+  forecast?: Array<{
+    date: string
+    text_day: string
+    text_night: string
+    temp_high: string
+    temp_low: string
+    wind_dir: string
+    wind_scale: string
+    humidity: string
+    precip: string
+    uv_index: string
+    sunrise: string
+    sunset: string
+  }>
+  air_quality?: {
+    aqi: string
+    category: string
+    pm2p5: string
+    primary_pollutant: string
+  }
+  indices?: Array<{ name: string; level: string; text: string }>
+  alerts?: Array<{ title: string; level: string; type: string; text: string; pub_time: string }>
+  alerts_available?: boolean
+}
+
+export type ForecastCard = {
+  type: 'forecast'
+  city: string
+  days: Array<{
+    date: string
+    text_day: string
+    text_night: string
+    temp_high: string
+    temp_low: string
+    wind_dir: string
+    wind_scale: string
+  }>
+}
+
+export type StockCard = {
+  type: 'stock_quote'
+  name: string
+  symbol: string
+  price: string
+  change: string
+  change_pct: string
+  market_time: string
+  market?: string // 市场标签（上证·A股/深证·A股/港股/美股）——后端权威，缺失时前端按代码保守分类
+  candles?: StockCandle[]
+}
+
+export type StockCandle = {
+  date: string
+  open: string
+  high: string
+  low: string
+  close: string
+  volume: string
+}
+
+export type NewsCard = {
+  type: 'news_list'
+  topic: string
+  summary?: string
+  items: Array<{
+    title: string
+    summary: string
+    source: string
+    publish_time: string
+  }>
+}
+
+export type SearchCard = {
+  type: 'search_list'
+  query: string
+  summary?: string
+  items: Array<{
+    title: string
+    url: string
+    snippet: string
+    source: string
+  }>
+}
+
+// ws2 search-news-redesign：结论式搜索卡片
+export type SearchAnswerCard = {
+  type: 'search_answer'
+  query: string
+  answer: string
+  sources: Array<{ title: string; url: string; source: string }>
+  items?: SearchCard['items']  // 向后兼容
+}
+
+// ws2 search-news-redesign：摘要式新闻卡片
+export type NewsDigestCard = {
+  type: 'news_digest'
+  topic: string
+  summary: string
+  headlines: Array<{ title: string; source: string }>
+  items?: NewsCard['items']  // 向后兼容
+}
+
+export type PoiListCard = {
+  type: 'poi_list'
+  keyword?: string
+  // 'dest_choice' = 充电目的地候选（回填目的地槽位）；'waypoint_choice' = 顺路停靠候选（落途经点）
+  purpose?: string
+  title?: string
+  destination?: string   // waypoint_choice：导航目的地，供「第N个」拼「导航去{destination}途经{name}」
+  items: Array<{
+    id: string
+    name: string
+    rating?: number
+    distance_km?: number
+    address: string
+  }>
+}
+
+export type PoiDetailCard = {
+  type: 'poi_detail'
+  id: string
+  name: string
+  address: string
+  lat: number
+  lng: number
+  rating: number
+  category: string
+}
+
+// 周边发现列表卡（nearby.search）：多类目富数据——评分/人均/距离/营业/特色芯片
+export type PlaceListCard = {
+  type: 'place_list'
+  _prov?: Provenance
+  category?: string            // 餐饮/酒店/景点/影院…（卡头与文案用）
+  keyword?: string
+  items: Array<{
+    id: string
+    name: string
+    category?: string
+    rating?: number
+    cost?: string              // 人均（字符串，可能空）
+    distance_km?: number
+    address: string
+    tags?: string              // 特色标签（逗号分隔）
+    open_today?: string
+    lat?: number               // 供「导航去第 N 个」handoff
+    lng?: number
+  }>
+}
+
+// 周边发现详情卡（nearby.detail）：评分/人均/电话/营业时间/特色/图片 + 导航·拨打
+export type PlaceDetailCard = {
+  type: 'place_detail'
+  _prov?: Provenance
+  id: string
+  name: string
+  category?: string
+  address: string
+  lat: number
+  lng: number
+  rating?: number
+  cost?: string
+  tel?: string
+  open_today?: string
+  open_week?: string
+  tags?: string
+  photos?: string[]
+}
+
+// 智能提醒（reminder Agent）：单条项契约——time_display 后端本地化，HMI 不做时区运算
+export type ReminderItem = {
+  id: string
+  title: string
+  kind: 'time' | 'todo'
+  status: 'pending' | 'fired' | 'done' | 'cancelled'
+  time_display?: string   // "今天 14:30" / "明天 08:00"
+  fire_at_ms?: number     // agenda 时间轴定位用；todo 无
+  recur_label?: string    // P1a 重复标识（每天/工作日/每周X）；后端权威给出
+}
+
+// 提醒列表卡（reminder.list）：view 驱动右舞台形态（D7；后端按查询范围权威给出）
+export type ReminderListCard = {
+  type: 'reminder_list'
+  view?: 'day' | 'multi'
+  date_label?: string     // day："今天 · 7月11日"；multi："这周"
+  items: ReminderItem[]
+  todos?: ReminderItem[]  // 无时间待办单列
+}
+
+// 提醒单条卡：created=创建回读确认 / updated=改期确认（P1a snooze/update）/ fired=到点触达
+// （fired 带 完成/稍后 按钮，send_text 模式）/ offer=记忆抽到未来事件后的询问式建议
+// （G7，EVA 二轮：「要的」按钮回发正常语音链建提醒，卡片本身零执行权）
+export type ReminderCard = {
+  type: 'reminder_card'
+  context: 'created' | 'updated' | 'fired' | 'offer'
+  item: ReminderItem
+  actions?: Array<{ label: string; send_text: string }>
+}
+
+// 场景卡（scene-orchestrator）：一张卡复用四态——
+// confirm=创建/改动回读待确认 / created=已存下 / activated=已激活 / suggest=触发建议（P3）。
+// danger 标记的动作执行时会走二次确认（VAL 安全门控），卡上先给用户看见。
+export type SceneCard = {
+  type: 'scene_card'
+  context: 'confirm' | 'created' | 'activated' | 'suggest'
+  name: string
+  description?: string
+  actions_preview: Array<{ label: string; danger?: boolean }>
+  buttons?: Array<{ label: string; send_text: string }>
+}
+
+export type SceneItem = {
+  id: string
+  name: string
+  description?: string
+  action_count?: number
+  use_count?: number
+}
+
+// 场景列表卡（scene.list）：区分「我建的」与「内置」；条目可点 → 回发「开启X」
+export type SceneListCard = {
+  type: 'scene_list'
+  mine: SceneItem[]
+  builtin: SceneItem[]
+}
+
+export type Voice = {
+  voice_id: string
+  name: string
+  language: string
+  gender: string
+  description?: string
+  tags?: string[]
+}
+
+// ─── 流式 ASR 引擎目录：设置页两级选择「方式 → 引擎」的数据结构（HMI 与 mobile 共用同一份）───
+// 声明源是网关 `/api/asr/stream/info`（llm-gateway/http_server.py）；下面的 ASR_PROVIDER_FALLBACK 是离线兜底，
+// mobile/test/asrCatalog.test.ts 读网关源码对账两份不漂。一级「方式」按用户能感知的形态分：
+//   realtime  = 边说边上屏（DashScope qwen3 / fun-asr，WS 实时推 PCM）
+//   utterance = 松手后出字（MiniMax speech_to_text / MiMo，整段到齐才能识别；网关 WholeUtteranceASRProvider）
+// 以前的「分块 MiMo」和「关闭」都并进 utterance：分块只是给 MiMo 伪造 partial 的适配器名字，关闭=录完再识别，
+// 和整句体验一致（泓舟 2026-09-14 裁决：关闭不留）。设计 docs/design/2026-09-14-minimax-asr-provider.md §7。
+export type AsrMode = 'realtime' | 'utterance'
+export type AsrProviderInfo = {
+  id: string                             // dashscope | minimax | mimo
+  label: string                          // DashScope 实时 / MiniMax 整句 / MiMo 整句
+  available: boolean                     // 网关凭据是否就绪（只判 key 非空，判不出 key 已失效）
+  mode: AsrMode
+  models: string[]                       // 全小写 id——start 帧只认小写（CamelCase 会 1011 断连）
+  model_labels?: Record<string, string>  // 展示名；缺省用 id
+}
+export const ASR_MODES: { id: AsrMode; label: string; hint: string }[] = [
+  { id: 'realtime', label: '实时', hint: '边说边上屏' },
+  { id: 'utterance', label: '整句', hint: '松手后出字' },
+]
+export const ASR_PROVIDER_FALLBACK: AsrProviderInfo[] = [
+  { id: 'dashscope', label: 'DashScope 实时', available: true, mode: 'realtime',
+    models: ['qwen3-asr-flash-realtime-2026-02-10', 'fun-asr-realtime'],
+    model_labels: { 'qwen3-asr-flash-realtime-2026-02-10': 'Qwen3-ASR', 'fun-asr-realtime': 'Fun-ASR' } },
+  { id: 'minimax', label: 'MiniMax 整句', available: true, mode: 'utterance',
+    models: ['asr-1.0'], model_labels: { 'asr-1.0': 'MiniMax asr-1.0' } },
+  { id: 'mimo', label: 'MiMo 整句', available: true, mode: 'utterance',
+    models: ['mimo-v2.5-asr'], model_labels: { 'mimo-v2.5-asr': 'MiMo v2.5' } },
+]
+/** 二级「引擎」= (provider, model) 对：实时方式下是百炼的两个模型，整句方式下是两家厂商 */
+export type AsrEngineOption = { provider: string; model: string; label: string; available: boolean }
+export function asrEngineOptions(providers: AsrProviderInfo[], mode: AsrMode): AsrEngineOption[] {
+  const out: AsrEngineOption[] = []
+  for (const p of providers) {
+    if (p.mode !== mode) continue
+    for (const m of p.models) {
+      out.push({ provider: p.id, model: m, label: p.model_labels?.[m] ?? m, available: p.available })
+    }
+  }
+  return out
+}
+/** 当前设置落在哪个方式；provider 不在目录里（老存量 'off' / 未知）按 utterance 处理 */
+export function asrModeOf(providers: AsrProviderInfo[], provider: string): AsrMode {
+  return providers.find((p) => p.id === provider)?.mode ?? 'utterance'
+}
+/** 网关目录归一：模型 id 一律小写（目录曾返回展示用 CamelCase）；缺 mode 的旧网关按 id 补齐；
+ *  返回 null 表示形状不对（调用方落回兜底表） */
+export function normalizeAsrProviders(raw: unknown): AsrProviderInfo[] | null {
+  if (!Array.isArray(raw) || raw.length === 0) return null
+  const out: AsrProviderInfo[] = []
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue
+    const p = item as Partial<AsrProviderInfo> & { id?: unknown; models?: unknown }
+    if (typeof p.id !== 'string' || !p.id) continue
+    const fallback = ASR_PROVIDER_FALLBACK.find((f) => f.id === p.id)
+    const models = (Array.isArray(p.models) ? p.models : fallback?.models ?? []).map((m) => String(m).toLowerCase())
+    const labels: Record<string, string> = { ...(fallback?.model_labels ?? {}) }
+    for (const [k, v] of Object.entries(p.model_labels ?? {})) labels[k.toLowerCase()] = String(v)
+    out.push({
+      id: p.id,
+      label: typeof p.label === 'string' && p.label ? p.label : fallback?.label ?? p.id,
+      available: p.available !== false,
+      mode: p.mode === 'realtime' || p.mode === 'utterance' ? p.mode : fallback?.mode ?? 'utterance',
+      models,
+      model_labels: labels,
+    })
+  }
+  return out.length ? out : null
+}
+/** 切换方式 / 修复失配（存量 (provider, model) 对不在目录里）时选引擎：优先偏好的那一对，其次同厂商的首个模型
+ *  （存量 model 是别家 id 时不换厂商），再次该方式下首个可用，最后首个；方式下一个引擎都没有返回 null */
+export function pickAsrEngine(
+  options: AsrEngineOption[], preferred: { provider: string; model: string },
+): AsrEngineOption | null {
+  return options.find((o) => o.provider === preferred.provider && o.model === preferred.model)
+    ?? options.find((o) => o.provider === preferred.provider)
+    ?? options.find((o) => o.available) ?? options[0] ?? null
+}
+
+// 流式 TTS 引擎（provider）——设置页两级选择「引擎→音色」的数据结构。
+// 引擎决定流式能力（cosyvoice/qwen=流式、mimo=经典批处理）与其专属音色集（互不相通）。
+export type TtsProviderInfo = {
+  id: string            // cosyvoice | qwen | mimo
+  label: string         // CosyVoice·流式 / Qwen·方言 / MiMo·经典
+  streaming: boolean    // 是否服务端流式
+  available: boolean    // 后端凭据是否就绪（无 key 的流式引擎标灰）
+  model?: string
+  sample_rate?: number
+  voices: Voice[]
+}
+
+// ─── 设置模型 ───
+// 端到端已接通的：voiceId / ttsEnabled / autoplay / asrLanguage / micMode /
+//   listenSeconds / theme / fontScale / largeTouch / quickCommands / assistantName。
+// 预留（UI+持久化已就绪，经 WS meta 透传，待后端 honor）：
+//   answerLength / model / agents / memoryEnabled。详见 docs/design 任务文档。
+// R4.3 语音回路（UI+持久化就绪，驱动 voiceLoop.mjs FSM；真麦/Worker 集成待 P0 后接线）：
+//   handsFree / wakeWordEnabled / followupWindowS / silenceTailMs（全 opt-in 默认关）。
+
+export type Theme = 'dark' | 'light'
+export type FontScale = 'normal' | 'large'
+export type AsrLanguage = 'zh' | 'en' | 'auto'
+// 流式识别引擎 id（目录见上面 ASR_PROVIDER_FALLBACK；方式 realtime/utterance 由目录派生，不单独存）。
+// 'off' 已退役（2026-09-14）：存量里读到按整句处理（settings.load 迁移）。
+export type AsrProvider = 'dashscope' | 'mimo' | 'minimax'
+export type TtsProvider = 'cosyvoice' | 'qwen' | 'mimo' // 语音播报引擎（cosyvoice/qwen=流式、mimo=经典批处理）
+export type MicMode = 'hold' | 'toggle'
+export type AnswerLength = 'short' | 'standard' | 'detailed'
+export type ModelPref = 'fast' | 'deep' | 'auto'
+export type ListenSeconds = 10 | 15 | 30 | 60
+export type FollowupWindowS = 5 | 8 | 15 // R4.3 免唤醒续问聆听窗（秒）
+export type SilenceTailMs = 500 | 800 | 1200 // R4.3 VAD 静音尾（端点判据，毫秒）
+// M4 语音链路挡位：classic=三段式（ASR→编排→TTS，默认）；s2s=端到端语音直连。
+// **默认必须 classic**：s2s 会把「唤醒窗内的原始音频」上云，是隐私口径变化点（RFC §5.4），
+// 只能由用户显式选择。非语音入口（打字）与逃逸轮永远走 classic。
+export type VoicePipeline = 'classic' | 's2s'
+
+export type Settings = {
+  // 语音播报 TTS
+  ttsEnabled: boolean
+  autoplay: boolean
+  ttsProvider: TtsProvider // 播报引擎（cosyvoice/qwen 流式秒回首音 / mimo 经典批处理）
+  voiceId: string
+  // 语音输入 ASR
+  asrLanguage: AsrLanguage
+  asrProvider: AsrProvider // 识别引擎（dashscope 实时 / minimax 整句 / mimo 整句）
+  asrModel: string // 该引擎下的模型 id（全小写；与 asrProvider 成对，见 asrEngineOptions）
+  micMode: MicMode
+  listenSeconds: ListenSeconds
+  // 免唤醒连续对话 / 唤醒词（R4.3；全部 opt-in 默认关，唤醒前音频不离开浏览器）
+  handsFree: boolean            // L1 免唤醒连续对话：一轮回复后保持聆听窗，VAD 断句自动发送
+  wakeWordEnabled: boolean      // L2 唤醒词：待机说唤醒词进入聆听
+  wakeWord: string              // 选定的唤醒词（display 值，映射到 KWS pinyin token；见 WAKE_WORD_PRESETS）
+  followupWindowS: FollowupWindowS // 续问聆听窗时长（秒）
+  silenceTailMs: SilenceTailMs  // VAD 静音尾（端点判据，毫秒）
+  // M4 端到端语音（S2S）：默认 classic。s2s 挡位下闲聊/常识由语音大模型直答（首音 ~600ms），
+  // 需要执行或查实时信息的请求由模型 escalate 交回确定性主链——车控绝不经 S2S 下发。
+  voicePipeline: VoicePipeline
+  s2sVoice: string              // S2S 音色（provider 侧音色，与 TTS 音色分开——尽量选同系减少割裂感）
+  // M4 P4 声纹多用户：默认关。开启后唤醒后首句识别说话人 → 记忆按乘员隔离。
+  // **只影响记忆归属，不影响任何权限**（声纹不是鉴权因子）；认不出恒回主驾。
+  voiceprintEnabled: boolean
+  // M4 P4 视觉入口：默认关。开启后说「那是什么」会抓一帧车外画面上传识别；
+  // 未命中触发词时一帧都不采集。PoC 用设备摄像头模拟车外摄像头（卡片恒显「模拟」）。
+  visionEnabled: boolean
+  // 显示与主题
+  theme: Theme
+  fontScale: FontScale
+  largeTouch: boolean
+  quickCommands: string[]
+  // 定位：仅记住是否允许本应用使用；精确坐标不持久化
+  locationEnabled: boolean
+  // 助手
+  assistantName: string
+  answerLength: AnswerLength
+  model: ModelPref
+  // 多 LLM 源（全局大脑）：空 = 跟随网关 env 默认；非空 = 用户显式选定的厂商/模型（启动时重放到网关）
+  llmProvider: string
+  llmModel: string
+  // Agent 开关
+  agents: Record<string, boolean>
+  // 记忆
+  memoryEnabled: boolean
+}
+
+// 用户可见的能力开关（对应 agents/ 与端侧快/慢系统）
+export type AgentMeta = { id: string; serverId?: string; label: string; desc: string; icon: string; core?: boolean }
+
+export const AGENT_CATALOG: AgentMeta[] = [
+  // `serverId`：这一项对应服务端 Registry 里的哪个 agent_id（AR05 能力摘要按它对账）。
+  // 只有端侧两项名字不同（UI 叫 vehicle / media，注册名是 edge-vehicle / edge-media）——
+  // **写出来而不是让消费方猜**：猜错的症状是「摘要说不可用」被安在了另一个能力头上。
+  { id: 'vehicle', serverId: 'edge-vehicle', label: '车辆控制', desc: '空调、车窗、座椅、灯光等车身控制（端侧秒回）', icon: '🚘', core: true },
+  { id: 'media', serverId: 'edge-media', label: '媒体音乐', desc: '播放、暂停、切歌（端侧秒回）', icon: '🎵', core: true },
+  { id: 'navigation', label: '导航出行', desc: '搜索 POI、导航、充电站、逆地理编码', icon: '🧭' },
+  { id: 'info', label: '信息助手', desc: '天气、预报、预警、空气质量、联网搜索、新闻、股票', icon: 'ℹ️' },
+  { id: 'trip-planner', label: '行程规划', desc: '多日自驾行程编排', icon: '🗺️' },
+  { id: 'deep-research', label: '深度调研', desc: '多视角联网深调研，出带引用的分节报告', icon: '🔬' },
+  { id: 'nearby', label: '周边发现', desc: '找餐厅/酒店/景点/影院/停车/充电，看评分·人均·营业·电话', icon: '📍' },
+  { id: 'reminder', label: '智能提醒', desc: '说一句话创建日程提醒待办，到点主动叫你', icon: '⏰' },
+  { id: 'scene-orchestrator', label: '场景模式', desc: '一句话造自己的场景（钓鱼模式、观星模式），随叫随到、退出还原', icon: '🎭' },
+  { id: 'parking-payment', label: '停车缴费', desc: '找车位、停车缴费', icon: '🅿️' },
+  { id: 'manual-rag', label: '用车手册', desc: '车辆说明书问答（RAG）', icon: '📖' },
+  { id: 'chitchat', label: '闲聊兜底', desc: '开放域对话与情绪陪伴（系统兜底）', icon: '💬', core: true },
+]
+
+export const VOICE_FALLBACK: Voice[] = [
+  { voice_id: '冰糖', name: '冰糖', language: 'zh', gender: 'female', description: '中文女声', tags: ['中文', '女声'] },
+  { voice_id: '茉莉', name: '茉莉', language: 'zh', gender: 'female', description: '中文女声', tags: ['中文', '女声'] },
+  { voice_id: '苏打', name: '苏打', language: 'zh', gender: 'male', description: '中文男声', tags: ['中文', '男声'] },
+  { voice_id: '白桦', name: '白桦', language: 'zh', gender: 'male', description: '中文男声', tags: ['中文', '男声'] },
+  { voice_id: 'Mia', name: 'Mia', language: 'en', gender: 'female', description: '英文女声', tags: ['英文', '女声'] },
+  { voice_id: 'Chloe', name: 'Chloe', language: 'en', gender: 'female', description: '英文女声', tags: ['英文', '女声'] },
+  { voice_id: 'Milo', name: 'Milo', language: 'en', gender: 'male', description: '英文男声', tags: ['英文', '男声'] },
+  { voice_id: 'Dean', name: 'Dean', language: 'en', gender: 'male', description: '英文男声', tags: ['英文', '男声'] },
+  { voice_id: 'mimo_default', name: 'MiMo 默认', language: 'zh', gender: 'neutral', description: '中国集群默认', tags: ['默认'] },
+]
+
+// 流式 TTS 引擎离线兜底（镜像后端 providers.TTS_STREAM_CATALOG + MiMo 音色）——
+// 探测 /api/tts/stream/info 失败时用此渲染，available 交给探测结果覆盖。
+export const TTS_PROVIDER_FALLBACK: TtsProviderInfo[] = [
+  {
+    id: 'cosyvoice', label: 'CosyVoice·流式', streaming: true, available: true,
+    model: 'cosyvoice-v3-flash', sample_rate: 22050,
+    voices: [
+      { voice_id: 'longxiaochun_v3', name: '龙小淳', language: 'zh', gender: 'female', description: '语音助手·女声', tags: ['助手', '女声'] },
+      { voice_id: 'longanwen_v3', name: '龙安温', language: 'zh', gender: 'female', description: '语音助手·女声', tags: ['助手', '女声'] },
+      { voice_id: 'longanyun_v3', name: '龙安昀', language: 'zh', gender: 'male', description: '语音助手·男声', tags: ['助手', '男声'] },
+      { voice_id: 'longhua_v3', name: '龙华', language: 'zh', gender: 'female', description: '社交陪伴·女声', tags: ['陪伴', '女声'] },
+      { voice_id: 'longze_v3', name: '龙泽', language: 'zh', gender: 'male', description: '社交陪伴·男声', tags: ['陪伴', '男声'] },
+      { voice_id: 'longanyang', name: '龙安洋', language: 'zh', gender: 'male', description: '社交陪伴·男声', tags: ['陪伴', '男声'] },
+      { voice_id: 'longanhuan_v3', name: '龙安欢', language: 'zh', gender: 'female', description: '多方言·女声', tags: ['方言', '女声'] },
+    ],
+  },
+  {
+    id: 'qwen', label: 'Qwen·方言', streaming: true, available: true,
+    model: 'qwen3-tts-flash-realtime', sample_rate: 24000,
+    voices: [
+      { voice_id: 'Cherry', name: 'Cherry', language: 'zh', gender: 'female', description: '中英双语·女声', tags: ['双语', '女声'] },
+      { voice_id: 'Serena', name: 'Serena', language: 'zh', gender: 'female', description: '中英双语·女声', tags: ['双语', '女声'] },
+      { voice_id: 'Ethan', name: 'Ethan', language: 'zh', gender: 'male', description: '中英双语·男声', tags: ['双语', '男声'] },
+      { voice_id: 'Chelsie', name: 'Chelsie', language: 'zh', gender: 'female', description: '中英双语·女声', tags: ['双语', '女声'] },
+      { voice_id: 'Dylan', name: 'Dylan', language: 'zh', gender: 'male', description: '北京话·男声', tags: ['方言', '北京话'] },
+      { voice_id: 'Jada', name: 'Jada', language: 'zh', gender: 'female', description: '上海话·女声', tags: ['方言', '上海话'] },
+      { voice_id: 'Sunny', name: 'Sunny', language: 'zh', gender: 'female', description: '四川话·女声', tags: ['方言', '四川话'] },
+    ],
+  },
+  {
+    id: 'mimo', label: 'MiMo·流式', streaming: true, available: true,
+    model: 'mimo-v2.5-tts', sample_rate: 24000,
+    voices: [
+      { voice_id: '冰糖', name: '冰糖', language: 'zh', gender: 'female', description: '中文女声', tags: ['中文', '女声'] },
+      { voice_id: '茉莉', name: '茉莉', language: 'zh', gender: 'female', description: '中文女声', tags: ['中文', '女声'] },
+      { voice_id: '苏打', name: '苏打', language: 'zh', gender: 'male', description: '中文男声', tags: ['中文', '男声'] },
+      { voice_id: '白桦', name: '白桦', language: 'zh', gender: 'male', description: '中文男声', tags: ['中文', '男声'] },
+      { voice_id: 'Mia', name: 'Mia', language: 'en', gender: 'female', description: '英文女声', tags: ['英文', '女声'] },
+      { voice_id: 'Chloe', name: 'Chloe', language: 'en', gender: 'female', description: '英文女声', tags: ['英文', '女声'] },
+      { voice_id: 'Milo', name: 'Milo', language: 'en', gender: 'male', description: '英文男声', tags: ['英文', '男声'] },
+      { voice_id: 'Dean', name: 'Dean', language: 'en', gender: 'male', description: '英文男声', tags: ['英文', '男声'] },
+    ],
+  },
+  {
+    id: 'minimax', label: 'MiniMax·流式', streaming: true, available: true,
+    model: 'speech-2.8-turbo', sample_rate: 24000,
+    voices: [
+      { voice_id: 'female-tianmei', name: '甜美女声', language: 'zh', gender: 'female', description: '甜美·女声', tags: ['女声'] },
+      { voice_id: 'female-shaonv', name: '少女音', language: 'zh', gender: 'female', description: '少女·女声', tags: ['女声'] },
+      { voice_id: 'female-yujie', name: '御姐音', language: 'zh', gender: 'female', description: '御姐·女声', tags: ['女声'] },
+      { voice_id: 'male-qn-qingse', name: '青涩青年', language: 'zh', gender: 'male', description: '青涩·男声', tags: ['男声'] },
+      { voice_id: 'male-qn-jingying', name: '精英青年', language: 'zh', gender: 'male', description: '精英·男声', tags: ['男声'] },
+      { voice_id: 'presenter_female', name: '女主持', language: 'zh', gender: 'female', description: '主持·女声', tags: ['女声', '主持'] },
+      { voice_id: 'presenter_male', name: '男主持', language: 'zh', gender: 'male', description: '主持·男声', tags: ['男声', '主持'] },
+    ],
+  },
+]
+
+// ─── 多 LLM 源（HMI 设置页两级切换：厂商→模型，全局生效）───
+export type LlmModelInfo = { id: string; label: string }
+export type LlmProviderInfo = {
+  id: string          // mimo | minimax | deepseek | qwen
+  label: string       // MiMo·小米 / MiniMax / DeepSeek / 阿里百炼·通义千问
+  available: boolean  // 后端凭据是否就绪（无 key 置灰）
+  primary?: string
+  models: LlmModelInfo[]
+}
+// 被动健康（运行时硬化 D5）：llm-gateway 调用路径滚动窗口记账，/api/llm/providers 附带
+export type LlmProviderHealth = {
+  window: number; ok: number; err: number; timeout: number; rate_limited: number
+  last_error: string; last_ok_at: number; ewma_latency_ms: number
+}
+export type LlmStatus = {
+  active: { provider: string; model: string }
+  providers: LlmProviderInfo[]
+  health?: Record<string, LlmProviderHealth>
+}
+
+// 离线兜底目录（镜像后端 llm_runtime._PROVIDER_SPECS）——探测 /api/llm/providers 失败时用此渲染。
+export const LLM_PROVIDER_FALLBACK: LlmProviderInfo[] = [
+  { id: 'mimo', label: 'MiMo·小米', available: true, primary: 'mimo-v2.5-pro',
+    models: [{ id: 'mimo-v2.5-pro', label: 'MiMo 2.5 Pro' }, { id: 'mimo-v2.5', label: 'MiMo 2.5 · 快' }] },
+  { id: 'minimax', label: 'MiniMax', available: false, primary: 'MiniMax-M3',
+    models: [{ id: 'MiniMax-M3', label: 'MiniMax-M3' }] },
+  { id: 'deepseek', label: 'DeepSeek', available: false, primary: 'deepseek-v4-pro',
+    models: [{ id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' }, { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' }] },
+  { id: 'qwen', label: '阿里百炼·通义千问', available: false, primary: 'qwen3.7-max',
+    models: [{ id: 'qwen3.7-max', label: '通义千问 3.7 Max' }, { id: 'qwen3.7-plus', label: '通义千问 3.7 Plus' }] },
+]
+
+/** 系统默认示例各自需要哪个能力（AGENT_CATALOG 的 id）。
+ *
+ *  用来回答「这条推荐现在还成立吗」：能力没授权 / 服务不在线 / 用户自己关了，就不该
+ *  继续摆在首页当推荐——点了必然被婉拒，而用户不知道为什么（AR05 §6.2）。
+ *  **只标系统这几条**；用户自定义短语不在表里，一律原样保留（那是用户的输入，
+ *  系统无权替他判定「你这句现在用不了」）。 */
+export const SYSTEM_QUICK_COMMAND_AGENTS: Record<string, string> = {
+  '打开空调26度': 'vehicle',
+  '打开主驾座椅加热': 'vehicle',
+  '播放音乐': 'media',
+  '附近的充电站': 'navigation',
+  '导航去首都机场': 'navigation',
+  '今天天气怎么样': 'info',
+  '讲个笑话': 'chitchat',
+  '我今天有点不开心': 'chitchat',
+}
+
+export const DEFAULT_QUICK_COMMANDS = [
+  '打开空调26度',
+  '打开主驾座椅加热',
+  '播放音乐',
+  '附近的充电站',
+  '导航去首都机场',
+  '今天天气怎么样',
+  '讲个笑话',
+  '我今天有点不开心',
+]
+
+// R4.3 唤醒词预设（issue③）：keywords 为 sherpa-onnx KWS 运行时 pinyin token 串——声母 + 带声调韵母，
+// 逐一对 wenetspeech tokens.txt 核对（换词无需重训模型，仅换本串）。刻意不开放自由输入：
+// 中文→带声调 token 的浏览器端转换不可靠（ü/零声母/y-w 边界易错→唤醒词静默失效，用户难自查）。
+// 真机命中率以泓舟验收为准（同「小舟小舟」的验收口径）。
+export const WAKE_WORD_PRESETS: Array<{ word: string; keywords: string }> = [
+  { word: '小舟小舟', keywords: 'x iǎo zh ōu x iǎo zh ōu @小舟小舟' }, // 小=x iǎo 舟=zh ōu
+  { word: '你好小舟', keywords: 'n ǐ h ǎo x iǎo zh ōu @你好小舟' },   // 你=n ǐ 好=h ǎo
+  { word: '小舟你好', keywords: 'x iǎo zh ōu n ǐ h ǎo @小舟你好' },
+  { word: '你好阿段', keywords: 'n ǐ h ǎo ā d uàn @你好阿段' },        // 阿=ā(零声母) 段=d uàn
+]
+
+/** 唤醒词 display 值 → KWS pinyin token 串；未命中预设回落默认「小舟小舟」。 */
+export function wakeKeywordsFor(word: string): string {
+  return WAKE_WORD_PRESETS.find((p) => p.word === word)?.keywords ?? WAKE_WORD_PRESETS[0].keywords
+}
+
+// M4 S2S 音色（qwen3.5-omni realtime 侧音色；与 TTS 音色是两套引擎，见 RFC §5.2 听感缓解）。
+// 网关 /api/s2s/info 也返回同一组，此处为设置页离线渲染的默认表。
+export const S2S_VOICES = ['Tina', 'Cherry', 'Chelsie', 'Serena', 'Ethan'] as const
+
+export const DEFAULT_SETTINGS: Settings = {
+  ttsEnabled: true,
+  autoplay: true,
+  ttsProvider: 'cosyvoice', // 默认流式引擎（首帧 ~530ms，真栈验证）；无 key 时 HMI 无感回退批处理
+  voiceId: 'longxiaochun_v3', // cosyvoice 默认音色（龙小淳·女·语音助手）
+  asrLanguage: 'zh',
+  asrProvider: 'dashscope', // DashScope 实时 qwen3 真栈验证可用（边说边上屏）；整句引擎（minimax/mimo）松手后才出字
+  asrModel: 'qwen3-asr-flash-realtime-2026-02-10', // 注意全小写 id（CamelCase 会 1011）
+  micMode: 'hold',
+  listenSeconds: 15,
+  handsFree: false,       // R4.3 opt-in：默认关，行为与今天逐字一致
+  wakeWordEnabled: false, // R4.3 opt-in：默认关
+  wakeWord: '小舟小舟',    // 默认唤醒词（真麦已验证命中）
+  followupWindowS: 8,
+  silenceTailMs: 800,
+  voicePipeline: 'classic', // M4 opt-in：默认三段式。s2s 上行原始音频，须用户显式选择
+  s2sVoice: 'Tina',         // qwen3.5-omni 默认音色
+  voiceprintEnabled: false, // M4 P4 opt-in：默认关，行为与 P4 之前逐字一致
+  visionEnabled: false,     // M4 P4 opt-in：默认关（它会采集图像，须用户显式开）
+  theme: 'dark',
+  fontScale: 'normal',
+  largeTouch: false,
+  quickCommands: DEFAULT_QUICK_COMMANDS,
+  locationEnabled: false,
+  assistantName: '小舟',
+  answerLength: 'standard',
+  model: 'auto',
+  llmProvider: '',   // 空 = 跟随网关 env 默认（LLM_PROVIDER）；用户在设置页选定后写入
+  llmModel: '',
+  agents: Object.fromEntries(AGENT_CATALOG.map((a) => [a.id, true])),
+  memoryEnabled: true,
+}

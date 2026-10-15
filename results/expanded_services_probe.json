@@ -1,0 +1,1065 @@
+{
+  "checked_at": "2026-10-11T16:03:34.084576+00:00",
+  "type": "real-provider-smoke-not-benchmark",
+  "cases": [
+    {
+      "tool": "search_places",
+      "args": {
+        "query": "杭州东站",
+        "limit": 5
+      },
+      "status": "answered",
+      "message": "找到：1. 杭州东；2. 杭州东站万象汇；3. 杭州东站万象汇；4. 杭州东站智选假日酒店；5. 杭州东。",
+      "elapsed_ms": 912,
+      "evidence": [
+        {
+          "title": "杭州东",
+          "url": "https://www.openstreetmap.org/node/7160108921",
+          "type": "map"
+        },
+        {
+          "title": "杭州东站万象汇",
+          "url": "https://www.openstreetmap.org/way/584324747",
+          "type": "map"
+        },
+        {
+          "title": "杭州东站万象汇",
+          "url": "https://www.openstreetmap.org/node/10775850706",
+          "type": "map"
+        },
+        {
+          "title": "杭州东站智选假日酒店",
+          "url": "https://www.openstreetmap.org/node/13120538201",
+          "type": "map"
+        },
+        {
+          "title": "杭州东",
+          "url": "https://www.openstreetmap.org/way/533803773",
+          "type": "map"
+        }
+      ],
+      "data": {
+        "places": [
+          {
+            "id": "node/7160108921",
+            "name": "杭州东",
+            "lat": 30.2935486,
+            "lon": 120.2082034,
+            "address": "中国 · 浙江省 · 杭州市 · 彭埠街道 · 天城路 · 185号",
+            "source_url": "https://www.openstreetmap.org/node/7160108921",
+            "provider": "Photon / OpenStreetMap",
+            "kind": "station",
+            "osm_key": "railway",
+            "fetched_at": "2026-10-11T16:03:35.049171+00:00",
+            "data_mode": "live",
+            "cache_age_seconds": 0,
+            "distance_m": 5539
+          },
+          {
+            "id": "way/584324747",
+            "name": "杭州东站万象汇",
+            "lat": 30.2964539,
+            "lon": 120.2129745,
+            "address": "中国 · 浙江省 · 杭州市 · 彭埠街道",
+            "source_url": "https://www.openstreetmap.org/way/584324747",
+            "provider": "Photon / OpenStreetMap",
+            "kind": "retail",
+            "osm_key": "landuse",
+            "fetched_at": "2026-10-11T16:03:35.049171+00:00",
+            "data_mode": "live",
+            "cache_age_seconds": 0,
+            "distance_m": 6088
+          },
+          {
+            "id": "node/10775850706",
+            "name": "杭州东站万象汇",
+            "lat": 30.2968998,
+            "lon": 120.2127272,
+            "address": "中国 · 浙江省 · 杭州市 · 笕桥街道 · 和兴路",
+            "source_url": "https://www.openstreetmap.org/node/10775850706",
+            "provider": "Photon / OpenStreetMap",
+            "kind": "department_store",
+            "osm_key": "shop",
+            "fetched_at": "2026-10-11T16:03:35.049171+00:00",
+            "data_mode": "live",
+            "cache_age_seconds": 0,
+            "distance_m": 6086
+          },
+          {
+            "id": "node/13120538201",
+            "name": "杭州东站智选假日酒店",
+            "lat": 30.2992471,
+            "lon": 120.213917,
+            "address": "中国 · 浙江省 · 杭州市 · 彭埠街道 · 环站东路 · 777",
+            "source_url": "https://www.openstreetmap.org/node/13120538201",
+            "provider": "Photon / OpenStreetMap",
+            "kind": "hotel",
+            "osm_key": "tourism",
+            "fetched_at": "2026-10-11T16:03:35.049171+00:00",
+            "data_mode": "live",
+            "cache_age_seconds": 0,
+            "distance_m": 6302
+          },
+          {
+            "id": "way/533803773",
+            "name": "杭州东",
+            "lat": 30.2937959,
+            "lon": 120.2087334,
+            "address": "中国 · 浙江省 · 杭州市 · 彭埠街道 · 天城路 · 185号",
+            "source_url": "https://www.openstreetmap.org/way/533803773",
+            "provider": "Photon / OpenStreetMap",
+            "kind": "train_station",
+            "osm_key": "building",
+            "fetched_at": "2026-10-11T16:03:35.049171+00:00",
+            "data_mode": "live",
+            "cache_age_seconds": 0,
+            "distance_m": 5596
+          }
+        ],
+        "provider": "Photon / OpenStreetMap",
+        "fetched_at": "2026-10-11T16:03:35.049171+00:00",
+        "provenance": "live_or_recent_provider_cache",
+        "data_mode": "live",
+        "cache_age_seconds": 0,
+        "provider_attempts": [],
+        "along_route": false,
+        "notice": "距离为直线距离；地点状态以现场为准。"
+      }
+    },
+    {
+      "tool": "plan_route",
+      "args": {
+        "destination": "杭州东站"
+      },
+      "status": "executed",
+      "message": "已规划到杭州东的路线，约7.2公里，预计9分钟。不含实时路况。起点为杭州演示位置。",
+      "elapsed_ms": 89,
+      "evidence": [
+        {
+          "title": "路线：OSRM / OpenStreetMap",
+          "url": "https://www.openstreetmap.org/copyright",
+          "type": "route"
+        }
+      ],
+      "data": {
+        "origin": {
+          "name": "杭州（演示起点，非设备定位）",
+          "lat": 30.2741,
+          "lon": 120.1551,
+          "simulated": true
+        },
+        "destination": {
+          "id": "node/7160108921",
+          "name": "杭州东",
+          "lat": 30.2935486,
+          "lon": 120.2082034,
+          "address": "中国 · 浙江省 · 杭州市 · 彭埠街道 · 天城路 · 185号",
+          "source_url": "https://www.openstreetmap.org/node/7160108921",
+          "provider": "Photon / OpenStreetMap",
+          "kind": "station",
+          "osm_key": "railway",
+          "fetched_at": "2026-10-11T16:03:35.049022+00:00",
+          "data_mode": "provider_cache",
+          "cache_age_seconds": 0,
+          "distance_m": 5539
+        },
+        "waypoints": [],
+        "distance_m": 7174.5,
+        "duration_s": 510.9,
+        "provider": "OSRM / OpenStreetMap",
+        "source_url": "https://www.openstreetmap.org/copyright",
+        "fetched_at": "2026-10-11T16:03:35.138056+00:00",
+        "data_mode": "live",
+        "cache_age_seconds": 0,
+        "traffic": "unavailable",
+        "simulated_origin": true,
+        "notice": "公开地图驾驶路线与估算时长，无实时交通、施工或充电空闲数据；只在演示地图展示。"
+      },
+      "geometry_points": 130
+    },
+    {
+      "tool": "get_weather",
+      "args": {
+        "location": "杭州",
+        "days": 3
+      },
+      "status": "answered",
+      "message": "杭州：晴，19.1℃，体感21.3℃。数据时间 2026-10-12T00:00（Asia/Shanghai）。",
+      "elapsed_ms": 878,
+      "evidence": [
+        {
+          "title": "Open-Meteo 天气模型数据",
+          "url": "https://open-meteo.com/",
+          "type": "weather",
+          "retrieved_at": "2026-10-11T16:03:36.016241+00:00"
+        }
+      ],
+      "data": {
+        "location": {
+          "name": "杭州",
+          "lat": 30.29365,
+          "lon": 120.16142,
+          "address": "中国 · 浙江",
+          "source_url": "https://www.geonames.org/1808926/"
+        },
+        "current": {
+          "time": "2026-10-12T00:00",
+          "interval": 900,
+          "temperature_2m": 19.1,
+          "relative_humidity_2m": 90,
+          "apparent_temperature": 21.3,
+          "is_day": 0,
+          "precipitation": 0.0,
+          "weather_code": 0,
+          "wind_speed_10m": 3.1,
+          "description": "晴"
+        },
+        "current_units": {
+          "time": "iso8601",
+          "interval": "seconds",
+          "temperature_2m": "°C",
+          "relative_humidity_2m": "%",
+          "apparent_temperature": "°C",
+          "is_day": "",
+          "precipitation": "mm",
+          "weather_code": "wmo code",
+          "wind_speed_10m": "km/h"
+        },
+        "daily": {
+          "time": [
+            "2026-10-12",
+            "2026-10-13",
+            "2026-10-14"
+          ],
+          "weather_code": [
+            3,
+            0,
+            3
+          ],
+          "temperature_2m_max": [
+            25.6,
+            27.2,
+            25.1
+          ],
+          "temperature_2m_min": [
+            16.1,
+            15.9,
+            18.0
+          ],
+          "precipitation_probability_max": [
+            0,
+            0,
+            12
+          ]
+        },
+        "daily_units": {
+          "time": "iso8601",
+          "weather_code": "wmo code",
+          "temperature_2m_max": "°C",
+          "temperature_2m_min": "°C",
+          "precipitation_probability_max": "%"
+        },
+        "timezone": "Asia/Shanghai",
+        "provider": "Open-Meteo",
+        "fetched_at": "2026-10-11T16:03:36.016241+00:00",
+        "data_mode": "live",
+        "cache_age_seconds": 0
+      }
+    },
+    {
+      "tool": "search_places",
+      "args": {
+        "query": "附近咖啡店",
+        "category": "cafe",
+        "limit": 5
+      },
+      "status": "answered",
+      "message": "找到：1. 星巴克；2. 星巴克；3. 星巴克；4. 星巴克；5. 星巴克；营业/充电空闲状态未接入。主地图接口暂不可用，备用检索仅覆盖部分品牌/已收录地点。",
+      "elapsed_ms": 7019,
+      "evidence": [
+        {
+          "title": "星巴克",
+          "url": "https://www.openstreetmap.org/node/32751743",
+          "type": "map"
+        },
+        {
+          "title": "星巴克",
+          "url": "https://www.openstreetmap.org/node/6759390185",
+          "type": "map"
+        },
+        {
+          "title": "星巴克",
+          "url": "https://www.openstreetmap.org/node/12369451810",
+          "type": "map"
+        },
+        {
+          "title": "星巴克",
+          "url": "https://www.openstreetmap.org/node/12888082734",
+          "type": "map"
+        },
+        {
+          "title": "星巴克",
+          "url": "https://www.openstreetmap.org/node/4524646590",
+          "type": "map"
+        }
+      ],
+      "data": {
+        "places": [
+          {
+            "id": "node/32751743",
+            "name": "星巴克",
+            "lat": 30.2721603,
+            "lon": 120.1575123,
+            "address": "中国 · 浙江省 · 杭州市 · 天水街道 · 体育场路",
+            "source_url": "https://www.openstreetmap.org/node/32751743",
+            "provider": "Photon / OpenStreetMap",
+            "kind": "cafe",
+            "osm_key": "amenity",
+            "fetched_at": "2026-10-11T16:03:43.035221+00:00",
+            "data_mode": "live",
+            "cache_age_seconds": 0,
+            "distance_m": 317,
+            "category": "cafe",
+            "availability": "unknown",
+            "route_corridor_distance_m": null
+          },
+          {
+            "id": "node/6759390185",
+            "name": "星巴克",
+            "lat": 30.2717502,
+            "lon": 120.1582566,
+            "address": "中国 · 浙江省 · 杭州市 · 天水街道 · 延安路天桥",
+            "source_url": "https://www.openstreetmap.org/node/6759390185",
+            "provider": "Photon / OpenStreetMap",
+            "kind": "cafe",
+            "osm_key": "amenity",
+            "fetched_at": "2026-10-11T16:03:43.035221+00:00",
+            "data_mode": "live",
+            "cache_age_seconds": 0,
+            "distance_m": 400,
+            "category": "cafe",
+            "availability": "unknown",
+            "route_corridor_distance_m": null
+          },
+          {
+            "id": "node/12369451810",
+            "name": "星巴克",
+            "lat": 30.2750257,
+            "lon": 120.1597079,
+            "address": "中国 · 浙江省 · 杭州市 · 天水街道 · 展览东路 · 11",
+            "source_url": "https://www.openstreetmap.org/node/12369451810",
+            "provider": "Photon / OpenStreetMap",
+            "kind": "cafe",
+            "osm_key": "amenity",
+            "fetched_at": "2026-10-11T16:03:43.035221+00:00",
+            "data_mode": "live",
+            "cache_age_seconds": 0,
+            "distance_m": 454,
+            "category": "cafe",
+            "availability": "unknown",
+            "route_corridor_distance_m": null
+          },
+          {
+            "id": "node/12888082734",
+            "name": "星巴克",
+            "lat": 30.2762468,
+            "lon": 120.1702017,
+            "address": "中国 · 浙江省 · 杭州市 · 长庆街道 · 慧云横巷",
+            "source_url": "https://www.openstreetmap.org/node/12888082734",
+            "provider": "Photon / OpenStreetMap",
+            "kind": "cafe",
+            "osm_key": "amenity",
+            "fetched_at": "2026-10-11T16:03:43.035221+00:00",
+            "data_mode": "live",
+            "cache_age_seconds": 0,
+            "distance_m": 1470,
+            "category": "cafe",
+            "availability": "unknown",
+            "route_corridor_distance_m": null
+          },
+          {
+            "id": "node/4524646590",
+            "name": "星巴克",
+            "lat": 30.2619986,
+            "lon": 120.1473817,
+            "address": "中国 · 浙江省 · 杭州市 · 北山街道 · 北山街",
+            "source_url": "https://www.openstreetmap.org/node/4524646590",
+            "provider": "Photon / OpenStreetMap",
+            "kind": "cafe",
+            "osm_key": "amenity",
+            "fetched_at": "2026-10-11T16:03:43.035221+00:00",
+            "data_mode": "live",
+            "cache_age_seconds": 0,
+            "distance_m": 1536,
+            "category": "cafe",
+            "availability": "unknown",
+            "route_corridor_distance_m": null
+          }
+        ],
+        "provider": "Photon / OpenStreetMap",
+        "fetched_at": "2026-10-11T16:03:43.035221+00:00",
+        "provenance": "alternate_live_provider",
+        "data_mode": "live",
+        "cache_age_seconds": 0,
+        "provider_attempts": [
+          {
+            "provider": "Overpass",
+            "status": "unavailable"
+          },
+          {
+            "provider": "Photon",
+            "status": "succeeded",
+            "fetched_at": "2026-10-11T16:03:43.035221+00:00",
+            "data_mode": "live",
+            "cache_age_seconds": 0
+          }
+        ],
+        "along_route": false,
+        "notice": "距离为直线距离；地点状态以现场为准。"
+      }
+    },
+    {
+      "tool": "plan_route",
+      "args": {
+        "candidate_index": 2
+      },
+      "status": "executed",
+      "message": "已规划到星巴克的路线，约1.1公里，预计2分钟。不含实时路况。起点为杭州演示位置。",
+      "elapsed_ms": 90,
+      "evidence": [
+        {
+          "title": "路线：OSRM / OpenStreetMap",
+          "url": "https://www.openstreetmap.org/copyright",
+          "type": "route"
+        }
+      ],
+      "data": {
+        "origin": {
+          "name": "杭州（演示起点，非设备定位）",
+          "lat": 30.2741,
+          "lon": 120.1551,
+          "simulated": true
+        },
+        "destination": {
+          "id": "node/6759390185",
+          "name": "星巴克",
+          "lat": 30.2717502,
+          "lon": 120.1582566,
+          "address": "中国 · 浙江省 · 杭州市 · 天水街道 · 延安路天桥",
+          "source_url": "https://www.openstreetmap.org/node/6759390185",
+          "provider": "Photon / OpenStreetMap",
+          "kind": "cafe",
+          "osm_key": "amenity",
+          "fetched_at": "2026-10-11T16:03:43.035221+00:00",
+          "data_mode": "live",
+          "cache_age_seconds": 0,
+          "distance_m": 400,
+          "category": "cafe",
+          "availability": "unknown",
+          "route_corridor_distance_m": null
+        },
+        "waypoints": [],
+        "distance_m": 1089.7,
+        "duration_s": 124.5,
+        "provider": "OSRM / OpenStreetMap",
+        "source_url": "https://www.openstreetmap.org/copyright",
+        "fetched_at": "2026-10-11T16:03:43.125128+00:00",
+        "data_mode": "live",
+        "cache_age_seconds": 0,
+        "traffic": "unavailable",
+        "simulated_origin": true,
+        "notice": "公开地图驾驶路线与估算时长，无实时交通、施工或充电空闲数据；只在演示地图展示。"
+      },
+      "geometry_points": 32
+    },
+    {
+      "tool": "search_places",
+      "args": {
+        "query": "沿途充电站",
+        "category": "charging_station",
+        "along_route": true,
+        "limit": 5
+      },
+      "status": "answered",
+      "message": "找到：1. 特斯拉超级充电站杭州黄龙饭店；营业/充电空闲状态未接入。主地图接口暂不可用，备用检索仅覆盖部分品牌/已收录地点。",
+      "elapsed_ms": 8551,
+      "evidence": [
+        {
+          "title": "特斯拉超级充电站杭州黄龙饭店",
+          "url": "https://www.openstreetmap.org/node/3069937108",
+          "type": "map"
+        }
+      ],
+      "data": {
+        "places": [
+          {
+            "id": "node/3069937108",
+            "name": "特斯拉超级充电站杭州黄龙饭店",
+            "lat": 30.2689809,
+            "lon": 120.1392943,
+            "address": "中国 · 浙江省 · 杭州市 · 北山街道 · 曙光路",
+            "source_url": "https://www.openstreetmap.org/node/3069937108",
+            "provider": "Photon / OpenStreetMap",
+            "kind": "charging_station",
+            "osm_key": "amenity",
+            "fetched_at": "2026-10-11T16:03:51.676086+00:00",
+            "data_mode": "live",
+            "cache_age_seconds": 0,
+            "distance_m": 1621,
+            "category": "charging_station",
+            "availability": "unknown",
+            "route_corridor_distance_m": 1682
+          }
+        ],
+        "provider": "Photon / OpenStreetMap",
+        "fetched_at": "2026-10-11T16:03:51.676086+00:00",
+        "provenance": "alternate_live_provider",
+        "data_mode": "live",
+        "cache_age_seconds": 0,
+        "provider_attempts": [
+          {
+            "provider": "Overpass",
+            "status": "unavailable"
+          },
+          {
+            "provider": "Photon",
+            "status": "succeeded",
+            "fetched_at": "2026-10-11T16:03:51.676086+00:00",
+            "data_mode": "live",
+            "cache_age_seconds": 0
+          }
+        ],
+        "along_route": true,
+        "notice": "沿途搜索按路线20%/50%/80%附近各3.5km取候选，未保证最小绕行。"
+      }
+    },
+    {
+      "tool": "get_news",
+      "args": {
+        "topic": "新能源汽车",
+        "limit": 3
+      },
+      "status": "answered",
+      "message": "新闻：1. “一增一降”让新能源车出行告别焦虑 - 新浪网；2. 【网通社快报】奇瑞集团宣布9月新能源汽车销售超13万辆 - 凤凰网汽车；3. 新能源汽车保险怎么买才不亏？2026新规下3个维度说清+FAQ - 新浪汽车",
+      "elapsed_ms": 538,
+      "evidence": [
+        {
+          "title": "“一增一降”让新能源车出行告别焦虑 - 新浪网",
+          "url": "https://news.google.com/rss/articles/CBMiggFBVV95cUxNWkVWUS04LUs2aVU0d1J3YzhweTNHVHQyTkhjX19maXZOX0U0dUNvRS1VVDBZeDExMmU3Vi1JZXpZNlM0OG5McVlvVTZKZkxuay0wS2NaQkRwbHZvT1ZkRHg1OGpnZkVZcmoxLTh4cmhaVGdXMVo4TS00Njd5OTc1eVZ3?oc=5",
+          "published_at": "Sun, 11 Oct 2026 15:42:39 GMT",
+          "type": "news"
+        },
+        {
+          "title": "【网通社快报】奇瑞集团宣布9月新能源汽车销售超13万辆 - 凤凰网汽车",
+          "url": "https://news.google.com/rss/articles/CBMiTEFVX3lxTE5PMkRNbzN3YmlhYUtKWlZWbmM2T2RINTRqNVp3d3V1Sy03el9nMmVCRmdDamt2LU5jNzhxNmxFMklBc2RMWUg5d1Q0ZnM?oc=5",
+          "published_at": "Sat, 10 Oct 2026 07:58:08 GMT",
+          "type": "news"
+        },
+        {
+          "title": "新能源汽车保险怎么买才不亏？2026新规下3个维度说清+FAQ - 新浪汽车",
+          "url": "https://news.google.com/rss/articles/CBMidEFVX3lxTE9VOXcwMkF1UzBWM250NTZuT3RnUFVORVowU3VNTzU5OVFrdXh2SG5wYnVsTENzZElwSTM2ckk5UnhMUjJOS21IazJpWk1Cc2dvUlF3U1QxRGpKTDdhRTd4MUVrWnFiME5KcF9yZzdpSE4zNGZ1?oc=5",
+          "published_at": "Sat, 10 Oct 2026 16:26:36 GMT",
+          "type": "news"
+        }
+      ],
+      "data": {
+        "items": [
+          {
+            "title": "“一增一降”让新能源车出行告别焦虑 - 新浪网",
+            "url": "https://news.google.com/rss/articles/CBMiggFBVV95cUxNWkVWUS04LUs2aVU0d1J3YzhweTNHVHQyTkhjX19maXZOX0U0dUNvRS1VVDBZeDExMmU3Vi1JZXpZNlM0OG5McVlvVTZKZkxuay0wS2NaQkRwbHZvT1ZkRHg1OGpnZkVZcmoxLTh4cmhaVGdXMVo4TS00Njd5OTc1eVZ3?oc=5",
+            "snippet": "“一增一降”让新能源车出行告别焦虑    新浪网",
+            "published_at": "Sun, 11 Oct 2026 15:42:39 GMT",
+            "source": "新浪网"
+          },
+          {
+            "title": "【网通社快报】奇瑞集团宣布9月新能源汽车销售超13万辆 - 凤凰网汽车",
+            "url": "https://news.google.com/rss/articles/CBMiTEFVX3lxTE5PMkRNbzN3YmlhYUtKWlZWbmM2T2RINTRqNVp3d3V1Sy03el9nMmVCRmdDamt2LU5jNzhxNmxFMklBc2RMWUg5d1Q0ZnM?oc=5",
+            "snippet": "【网通社快报】奇瑞集团宣布9月新能源汽车销售超13万辆    凤凰网汽车",
+            "published_at": "Sat, 10 Oct 2026 07:58:08 GMT",
+            "source": "凤凰网汽车"
+          },
+          {
+            "title": "新能源汽车保险怎么买才不亏？2026新规下3个维度说清+FAQ - 新浪汽车",
+            "url": "https://news.google.com/rss/articles/CBMidEFVX3lxTE9VOXcwMkF1UzBWM250NTZuT3RnUFVORVowU3VNTzU5OVFrdXh2SG5wYnVsTENzZElwSTM2ckk5UnhMUjJOS21IazJpWk1Cc2dvUlF3U1QxRGpKTDdhRTd4MUVrWnFiME5KcF9yZzdpSE4zNGZ1?oc=5",
+            "snippet": "新能源汽车保险怎么买才不亏？2026新规下3个维度说清+FAQ    新浪汽车",
+            "published_at": "Sat, 10 Oct 2026 16:26:36 GMT",
+            "source": "新浪汽车"
+          }
+        ],
+        "provider": "Google News RSS",
+        "fetched_at": "2026-10-11T16:03:52.211420+00:00",
+        "data_mode": "live",
+        "cache_age_seconds": 0,
+        "content_trust": "external_untrusted"
+      }
+    },
+    {
+      "tool": "search_web",
+      "args": {
+        "query": "Volvo EC40 user manual",
+        "limit": 3
+      },
+      "status": "answered",
+      "message": "检索到以下来源：1. Volvo Cars Deutschland | Volvo Autos | Offizielle Volvo Website；2. Konfigurieren Sie Ihren neuen Volvo | Volvo Cars - Deutschland；3. Volvo Car Corporation – Wikipedia",
+      "elapsed_ms": 278,
+      "evidence": [
+        {
+          "title": "Volvo Cars Deutschland | Volvo Autos | Offizielle Volvo Website",
+          "url": "https://www.volvocars.com/de/",
+          "type": "web"
+        },
+        {
+          "title": "Konfigurieren Sie Ihren neuen Volvo | Volvo Cars - Deutschland",
+          "url": "https://www.volvocars.com/de/build/",
+          "type": "web"
+        },
+        {
+          "title": "Volvo Car Corporation – Wikipedia",
+          "url": "https://de.wikipedia.org/wiki/Volvo_Car_Corporation",
+          "type": "web"
+        }
+      ],
+      "data": {
+        "items": [
+          {
+            "title": "Volvo Cars Deutschland | Volvo Autos | Offizielle Volvo Website",
+            "url": "https://www.volvocars.com/de/",
+            "snippet": "Willkommen bei Volvo Cars Deutschland. Entdecken Sie unsere neuen und gebrauchten Volvo Modelle und gestalten Sie ihren Volvo SUV, Kombi oder Limousine.",
+            "published_at": "周日, 11 10月 2026 04:57:00 GMT",
+            "source": "www.volvocars.com"
+          },
+          {
+            "title": "Konfigurieren Sie Ihren neuen Volvo | Volvo Cars - Deutschland",
+            "url": "https://www.volvocars.com/de/build/",
+            "snippet": "Nutzen Sie den Volvo Autokonfigurator und erkunden Sie Modelle und Ausstattungen, Designs und Sicherheitsoptionen. Beginnen Sie mit dem Bau Ihres Volvos.",
+            "published_at": "周日, 11 10月 2026 01:51:00 GMT",
+            "source": "www.volvocars.com"
+          },
+          {
+            "title": "Volvo Car Corporation – Wikipedia",
+            "url": "https://de.wikipedia.org/wiki/Volvo_Car_Corporation",
+            "snippet": "Die Wurzeln der Volvo Car Corporation liegen in dem schwedischen Unternehmen Svenska Kullagerfabriken Aktiebolag (SKF) begründet. 1915 ließ sich SKF das „Volvo Kugellager“ patentieren, und die Marke war geboren.",
+            "published_at": "周日, 11 10月 2026 05:33:00 GMT",
+            "source": "de.wikipedia.org"
+          }
+        ],
+        "provider": "Bing RSS",
+        "fetched_at": "2026-10-11T16:03:52.492018+00:00",
+        "data_mode": "live",
+        "cache_age_seconds": 0,
+        "content_trust": "external_untrusted",
+        "notice": "搜索摘要来自索引，未抓取全文；发布时间缺失时不推断新鲜度。"
+      }
+    },
+    {
+      "tool": "search_manual",
+      "query": "雨刷怎么打开",
+      "status": "answered",
+      "message": "在Volvo EC40 2026 UK手册中检索到第239、330、329页原文。请核对车型适用性及同页警告。",
+      "data": {
+        "document": {
+          "id": "c436eb074c87967eea31",
+          "filename": "Volvo_EC40_2026_UK_en.pdf",
+          "vehicle": "Volvo EC40 2026 UK",
+          "title": "EC40 2026 (25w46) User Manual",
+          "pages": 433,
+          "chunks": 904,
+          "sha256": "1fcca03a413beb0242dd5282a5f645b2b1b5a313610e620e46ec6c28ac4a0939",
+          "source_url": "https://www.volvocars.com/static/support-content/pdfs/uk_en-GB_ec40_2026_UM_8bbd937f411a2582b90516ef58b938ae.pdf",
+          "imported_at": "2026-10-11T16:03:53.325722+00:00"
+        },
+        "passages": [
+          {
+            "document_id": "c436eb074c87967eea31",
+            "title": "EC40 2026 (25w46) User Manual",
+            "vehicle": "Volvo EC40 2026 UK",
+            "page": 239,
+            "text": "The rear wiper can be manually turned on and off.\nRear wiper controls are on the right-hand steering wheel stalk.\nThe rear wiper modes are:\nIntermittent sweep\nContinuous sweep\nActivating the rear wiper and washer\nSelecting the rear wiper mode\n9.3.3. Activating washers\nPush the stalk forwards.\n•\nThe rear wiper and washer activate.\n>\nPress either the intermittent sweep or continuous sweep button on the end of the stalk to select the rear wiper mode.\n•\n  Note\nAutomatic rear wiper while reversing\nThe rear wiper automatically activates if the front windscreen wipers are active while you are reversing. If you change\ngear, the rear wiper will stop wiping the rear windscreen.\nIn low temperatures, the rear wiper won't automatically activate while you are reversing to prevent damage to the wiper\narm.\nThe content of this manual represents the status of the user manual at the time of printing and may not be completely valid in future\ninstances. For more information, refer to the first page for the complete disclaimer note.\n239 / 433",
+            "score": 8.256,
+            "url": "/api/studio/documents/c436eb074c87967eea31/file#page=239",
+            "source_url": "https://www.volvocars.com/static/support-content/pdfs/uk_en-GB_ec40_2026_UM_8bbd937f411a2582b90516ef58b938ae.pdf",
+            "sha256": "1fcca03a413beb0242dd5282a5f645b2b1b5a313610e620e46ec6c28ac4a0939"
+          },
+          {
+            "document_id": "c436eb074c87967eea31",
+            "title": "EC40 2026 (25w46) User Manual",
+            "vehicle": "Volvo EC40 2026 UK",
+            "page": 330,
+            "text": "13.2.9. Activating the wiper service position\nThe wiper service position allows you to clean or replace the front wiper blades. When activated, the wipers\nmove to a more accessible position on the windscreen.\nOnce you have folded the wipers back down, deactivate the service position. This can be done by either of these options:\nThe setting in the centre display.\nStart driving.\nStart using the wipers or washers.\n13.2.10. Corrosion protection\nA good way to reduce the risk of corrosion is to keep your car clean. Your car also has durable corrosion\nprotection.\nMake sure that the blade for the driver side is longer than the blade for the passenger side. Slide the wiper blade onto the\nwiper arm. Ensure that the pin on the wiper arm goes into the hole on the wiper blade. Push the blade into the wiper arm\nuntil you hear a click sound.\nCheck that the blade is firmly attached.\n5\nFold the wiper arms back down against the windscreen.\n6\nDeactivate the wiper service position.\n7\nPress the car symbol \n in the bottom bar and go to Settings.\n1\nGo to Controls → Mirrors and wipers → Wipers → Wiper service position.\n2\nActivate the service position.\n3\nThe wipers move to a more accessible position and can be lifted up from the windscreen for servicing.\n>\n  Important\nFold the wipers down\nBe sure to fold the wipers back down against the windscreen after servicing them. Activation of the wipers when the",
+            "score": 7.934,
+            "url": "/api/studio/documents/c436eb074c87967eea31/file#page=330",
+            "source_url": "https://www.volvocars.com/static/support-content/pdfs/uk_en-GB_ec40_2026_UM_8bbd937f411a2582b90516ef58b938ae.pdf",
+            "sha256": "1fcca03a413beb0242dd5282a5f645b2b1b5a313610e620e46ec6c28ac4a0939"
+          },
+          {
+            "document_id": "c436eb074c87967eea31",
+            "title": "EC40 2026 (25w46) User Manual",
+            "vehicle": "Volvo EC40 2026 UK",
+            "page": 329,
+            "text": "13.2.8. Replacing front wiper blades\nYour front wiper blades' service life is affected by the water, dirt and debris that they sweep off your\nwindscreen. The wiper blades need to be replaced when they show signs of wear.\nActivate the wiper service position via settings in the centre display.\n1\nFold the wipers up and away from the windscreen.\n2\nPress the button on the wiper arm and remove the wiper blade by pulling it upwards.\n3\n4\nThe content of this manual represents the status of the user manual at the time of printing and may not be completely valid in future\ninstances. For more information, refer to the first page for the complete disclaimer note.\n329 / 433",
+            "score": 7.864,
+            "url": "/api/studio/documents/c436eb074c87967eea31/file#page=329",
+            "source_url": "https://www.volvocars.com/static/support-content/pdfs/uk_en-GB_ec40_2026_UM_8bbd937f411a2582b90516ef58b938ae.pdf",
+            "sha256": "1fcca03a413beb0242dd5282a5f645b2b1b5a313610e620e46ec6c28ac4a0939"
+          }
+        ],
+        "warnings": [
+          {
+            "page": 330,
+            "text": "windscreen for servicing.\n>\n  Important\nFold the wipers down\nBe sure to fold the wipers back down against the windscreen after servicing them. Activation of the wipers when the\nce position.\n2\nActivate the service position.\n3\nThe wipers move to a more accessible position and can be lifted up from the windscreen for servicing.\n>\n  Important\nFold the wipers down\nBe sure to fold the wipers back down against the windscreen after servicing them. Activation of the wipers when they are\nin an elevated position can damage the car.\nThe content of this manual represents the status of the user manual at the time of printing and may not be completely valid in future\ninstances. For more information, refer to the first page for the complete disclaimer note.\n330 / 433",
+            "url": "/api/studio/documents/c436eb074c87967eea31/file#page=330"
+          },
+          {
+            "page": 330,
+            "text": "windscreen for servicing.\n>\n  Important\nFold the wipers down\nBe sure to fold the wipers back down against the windscreen after servicing them. Activation of the wipers when they are\nin an elevated position can damage the car.\nThe content of this manual represents the status of the user manual at the time of printing and may not be completely valid in future\ninstances. For more information, refer to the first page for the complete disclaimer note.\n330 / 433",
+            "url": "/api/studio/documents/c436eb074c87967eea31/file#page=330"
+          }
+        ],
+        "retrieval": "BM25 + bilingual query lexicon",
+        "content_trust": "external_untrusted",
+        "notice": "展示相关原文与同页警告候选，不保证穷尽所有跨页条件；扫描PDF暂不支持OCR。"
+      },
+      "evidence": [
+        {
+          "id": "c436eb074c87967eea31:p239",
+          "title": "EC40 2026 (25w46) User Manual · 第239页",
+          "text": "The rear wiper can be manually turned on and off.\nRear wiper controls are on the right-hand steering wheel stalk.\nThe rear wiper modes are:\nIntermittent sweep\nContinuous sweep\nActivating the rear wiper and washer\nSelecting the rear wiper mode\n9.3.3. Activating washers\nPush the stalk forwards.\n•\nThe rear wiper and washer activate.\n>\nPress either the intermittent sweep or continuous sweep button on the end of the stalk to select the rear wiper mode.\n•\n  Note\nAutomatic rear wiper while reversing\nThe rear wiper automatically activates if the front windscreen wipers are active while you are reversi",
+          "conditions": "Volvo EC40 2026 UK",
+          "vehicle": "Volvo EC40 2026 UK",
+          "url": "/api/studio/documents/c436eb074c87967eea31/file#page=239",
+          "source_url": "https://www.volvocars.com/static/support-content/pdfs/uk_en-GB_ec40_2026_UM_8bbd937f411a2582b90516ef58b938ae.pdf",
+          "type": "manual",
+          "page": 239
+        },
+        {
+          "id": "c436eb074c87967eea31:p330",
+          "title": "EC40 2026 (25w46) User Manual · 第330页",
+          "text": "13.2.9. Activating the wiper service position\nThe wiper service position allows you to clean or replace the front wiper blades. When activated, the wipers\nmove to a more accessible position on the windscreen.\nOnce you have folded the wipers back down, deactivate the service position. This can be done by either of these options:\nThe setting in the centre display.\nStart driving.\nStart using the wipers or washers.\n13.2.10. Corrosion protection\nA good way to reduce the risk of corrosion is to keep your car clean. Your car also has durable corrosion\nprotection.\nMake sure that the blade for the driv",
+          "conditions": "Volvo EC40 2026 UK",
+          "vehicle": "Volvo EC40 2026 UK",
+          "url": "/api/studio/documents/c436eb074c87967eea31/file#page=330",
+          "source_url": "https://www.volvocars.com/static/support-content/pdfs/uk_en-GB_ec40_2026_UM_8bbd937f411a2582b90516ef58b938ae.pdf",
+          "type": "manual",
+          "page": 330
+        },
+        {
+          "id": "c436eb074c87967eea31:p329",
+          "title": "EC40 2026 (25w46) User Manual · 第329页",
+          "text": "13.2.8. Replacing front wiper blades\nYour front wiper blades' service life is affected by the water, dirt and debris that they sweep off your\nwindscreen. The wiper blades need to be replaced when they show signs of wear.\nActivate the wiper service position via settings in the centre display.\n1\nFold the wipers up and away from the windscreen.\n2\nPress the button on the wiper arm and remove the wiper blade by pulling it upwards.\n3\n4\nThe content of this manual represents the status of the user manual at the time of printing and may not be completely valid in future\ninstances. For more information,",
+          "conditions": "Volvo EC40 2026 UK",
+          "vehicle": "Volvo EC40 2026 UK",
+          "url": "/api/studio/documents/c436eb074c87967eea31/file#page=329",
+          "source_url": "https://www.volvocars.com/static/support-content/pdfs/uk_en-GB_ec40_2026_UM_8bbd937f411a2582b90516ef58b938ae.pdf",
+          "type": "manual",
+          "page": 329
+        }
+      ]
+    },
+    {
+      "tool": "search_manual",
+      "query": "胎压应当怎样检查",
+      "status": "answered",
+      "message": "在Volvo EC40 2026 UK手册中检索到第353、351、350页原文。请核对车型适用性及同页警告。",
+      "data": {
+        "document": {
+          "id": "c436eb074c87967eea31",
+          "filename": "Volvo_EC40_2026_UK_en.pdf",
+          "vehicle": "Volvo EC40 2026 UK",
+          "title": "EC40 2026 (25w46) User Manual",
+          "pages": 433,
+          "chunks": 904,
+          "sha256": "1fcca03a413beb0242dd5282a5f645b2b1b5a313610e620e46ec6c28ac4a0939",
+          "source_url": "https://www.volvocars.com/static/support-content/pdfs/uk_en-GB_ec40_2026_UM_8bbd937f411a2582b90516ef58b938ae.pdf",
+          "imported_at": "2026-10-11T16:03:53.325722+00:00"
+        },
+        "passages": [
+          {
+            "document_id": "c436eb074c87967eea31",
+            "title": "EC40 2026 (25w46) User Manual",
+            "vehicle": "Volvo EC40 2026 UK",
+            "page": 353,
+            "text": "13.4.5.1. Tyre pressure monitoring\nYour car can detect and indicate if the tyre pressure is low. Tyre pressure monitoring cannot be disabled. If\nthe system is unable to detect any tyre pressure, it will indicate that there's a malfunction.\nFor the tyre pressure monitoring system to provide updated information, you need to drive the car above 35 km/h (22 mph) for\nseveral minutes.\nAn indicator symbol lights up if a low tyre pressure is detected in any of the tyres. It will stay illuminated until the problem is re‐\nsolved and a new reference value for the tyre pressure has been stored.\nIn addition to messages in the driver display, you can also find information about the tyre pressure monitoring in the car status\nview.\nIf the tyre pressure monitoring system is not working correctly, the driver display's indicator symbol will first flash for approx‐\nimately one minute and then remain lit. A message also appears on the driver display. If the fault is permanent, a service is re‐\nquired.[1]\nRemember that the system does not replace the need for regular tyre inspection and maintenance.\nStatus\n  Warning\nIf the tyre pressure is too high or too low, the tyres can sustain severe damage. The tyres can explode while you are\ndriving and cause you to lose control of the car.\n  Tip\nA correct tyre pressure will help you take advantage of your car's full loading capacity.\n  Warning\nNo advance war",
+            "score": 14.769,
+            "url": "/api/studio/documents/c436eb074c87967eea31/file#page=353",
+            "source_url": "https://www.volvocars.com/static/support-content/pdfs/uk_en-GB_ec40_2026_UM_8bbd937f411a2582b90516ef58b938ae.pdf",
+            "sha256": "1fcca03a413beb0242dd5282a5f645b2b1b5a313610e620e46ec6c28ac4a0939"
+          },
+          {
+            "document_id": "c436eb074c87967eea31",
+            "title": "EC40 2026 (25w46) User Manual",
+            "vehicle": "Volvo EC40 2026 UK",
+            "page": 351,
+            "text": "13\nCheck the tyre pressure on the pressure gauge.\n14\nIf it is below 1.3 bar (19 psi) then the tyre is insufficiently sealed. Stop and contact Volvo Assistance for safe recovery.\nIf the tyre pressure is higher than 1.3 bar (19 psi), the tyre must be inflated to the pressure specified on the tyre\npressure label on the driver's side door pillar. If the pressure is too high, release air using the pressure-reducing valve.\n>\nRefit the tyre valve's dust cap.\n15\n  Warning\nMaximum mileage with tyres containing sealing fluid is 200 km (120 miles).\nThe content of this manual represents the status of the user manual at the time of printing and may not be completely valid in future\ninstances. For more information, refer to the first page for the complete disclaimer note.\n351 / 433",
+            "score": 14.558,
+            "url": "/api/studio/documents/c436eb074c87967eea31/file#page=351",
+            "source_url": "https://www.volvocars.com/static/support-content/pdfs/uk_en-GB_ec40_2026_UM_8bbd937f411a2582b90516ef58b938ae.pdf",
+            "sha256": "1fcca03a413beb0242dd5282a5f645b2b1b5a313610e620e46ec6c28ac4a0939"
+          },
+          {
+            "document_id": "c436eb074c87967eea31",
+            "title": "EC40 2026 (25w46) User Manual",
+            "vehicle": "Volvo EC40 2026 UK",
+            "page": 350,
+            "text": "Begin puncture repairs\nthe windscreen. You find it on the compressor.\nLabel, maximum permitted speed\nAttach the sealing fluid bottle to the compressor and then turn it 90 degrees clockwise.\n2\nAttach the air hose to the bottle opening and turn it 90 degrees clockwise.\n3\nUnscrew the dust cap from the tyre and attach the air hose to the tyre's air valve. Screw the connector as far down the\nthread as possible.\n4\nConnect the compressor to the car's 12 V socket and ensure that the socket works and is supplying current.\n5\nStart the compressor by pressing the power button.\n6\nThe compressor pressure increases. The pressure may temporarily reach as high as 7 bar (102 psi) before settling after\nabout 30 seconds.\n>\n  Warning\nNever stand next to the tyre while the compressor is on. If cracks or bumps appear in the tyre, the compressor must\nbe turned off immediately. Stop and contact Volvo Assistance for safe recovery.\nInflate the tyre for 7 minutes.\n7\n  Important\nTo avoid overheating, do not run the compressor for more than 10 minutes.\nShut the compressor off to check the pressure on the pressure gauge. The minimum tyre pressure is 1.8 bar (26 psi) and\nthe maximum tyre pressure is 2.5 bar (36 psi). Use the pressure-reducing valve if the pressure is too high.\nYou need to remove the bottle to access the air release valve. The bottle is equipped with a check valve that prevents fluid\nleakage w",
+            "score": 14.02,
+            "url": "/api/studio/documents/c436eb074c87967eea31/file#page=350",
+            "source_url": "https://www.volvocars.com/static/support-content/pdfs/uk_en-GB_ec40_2026_UM_8bbd937f411a2582b90516ef58b938ae.pdf",
+            "sha256": "1fcca03a413beb0242dd5282a5f645b2b1b5a313610e620e46ec6c28ac4a0939"
+          }
+        ],
+        "warnings": [
+          {
+            "page": 353,
+            "text": "ion and maintenance.\nStatus\n  Warning\nIf the tyre pressure is too high or too low, the tyres can sustain severe damage. The tyres can explode while you are\ndriving and cause you to lose control of the car.\n  Tip\nA correct tyre pressure will help you take advantage of your car's full loading capacity.\n  Warning\nNo advance war\ns\n  Warning\nIf the tyre pressure is too high or too low, the tyres can sustain severe damage. The tyres can explode while you are\ndriving and cause you to lose control of the car.\n  Tip\nA correct tyre pressure will help you take advantage of your car's full loading capacity.\n  Warning\nNo advance warning possible\nThe system cannot give you any advance warning of potential tyre damage.\nEnsure correct tyre pressure immediately\nWhen the low tyre pressure symbol is lit, stop and check the tyre pressures as soon as possible. Driving with underin‐\nflated tyres can cause tyre failure.\nThe content of this",
+            "url": "/api/studio/documents/c436eb074c87967eea31/file#page=353"
+          },
+          {
+            "page": 353,
+            "text": "ar's full loading capacity.\n  Warning\nNo advance war\ns\n  Warning\nIf the tyre pressure is too high or too low, the tyres can sustain severe damage. The tyres can explode while you are\ndriving and cause you to lose control of the car.\n  Tip\nA correct tyre pressure will help you take advantage of your car's full loading capacity.\n  Warning\nNo advance warning possible\nThe system cannot give you any advance warning of potential tyre damage.\nEnsure correct tyre pressure immediately\nWhen the low tyre pressure symbol is lit, stop and check the tyre pressures as soon as possible. Driving with underin‐\nflated tyres can cause tyre failure.\nThe content of this manual represents the status of the user manual at the time of printing and may not be completely valid in future\ninstances. For more information, refer to the first page for the complete disclaimer note.\n353 / 433",
+            "url": "/api/studio/documents/c436eb074c87967eea31/file#page=353"
+          },
+          {
+            "page": 353,
+            "text": "Warning\nNo advance war\ns\n  Warning\nIf the tyre pressure is too high or too low, the tyres can sustain severe damage. The tyres can explode while you are\ndriving and cause you to lose control of the car.\n  Tip\nA correct tyre pressure will help you take advantage of your car's full loading capacity.\n  Warning\nNo advance warning possible\nThe system cannot give you any advance warning of potential tyre damage.\nEnsure correct tyre pressure immediately\nWhen the low tyre pressure symbol is lit, stop and check the tyre pressures as soon as possible. Driving with underin‐\nflated tyres can cause tyre failure.\nThe content of this manual represents the status of the user manual at the time of printing and may not be completely valid in future\ninstances. For more information, refer to the first page for the complete disclaimer note.\n353 / 433",
+            "url": "/api/studio/documents/c436eb074c87967eea31/file#page=353"
+          },
+          {
+            "page": 353,
+            "text": "ar's full loading capacity.\n  Warning\nNo advance warning possible\nThe system cannot give you any advance warning of potential tyre damage.\nEnsure correct tyre pressure immediately\nWhen the low tyre pressure symbol is lit, stop and check the tyre pressures as soon as possible. Driving with underin‐\nflated tyres can cause tyre failure.\nThe content of this manual represents the status of the user manual at the time of printing and may not be completely valid in future\ninstances. For more information, refer to the first page for the complete disclaimer note.\n353 / 433",
+            "url": "/api/studio/documents/c436eb074c87967eea31/file#page=353"
+          },
+          {
+            "page": 353,
+            "text": "apacity.\n  Warning\nNo advance warning possible\nThe system cannot give you any advance warning of potential tyre damage.\nEnsure correct tyre pressure immediately\nWhen the low tyre pressure symbol is lit, stop and check the tyre pressures as soon as possible. Driving with underin‐\nflated tyres can cause tyre failure.\nThe content of this manual represents the status of the user manual at the time of printing and may not be completely valid in future\ninstances. For more information, refer to the first page for the complete disclaimer note.\n353 / 433",
+            "url": "/api/studio/documents/c436eb074c87967eea31/file#page=353"
+          },
+          {
+            "page": 353,
+            "text": "m cannot give you any advance warning of potential tyre damage.\nEnsure correct tyre pressure immediately\nWhen the low tyre pressure symbol is lit, stop and check the tyre pressures as soon as possible. Driving with underin‐\nflated tyres can cause tyre failure.\nThe content of this manual represents the status of the user manual at the time of printing and may not be completely valid in future\ninstances. For more information, refer to the first page for the complete disclaimer note.\n353 / 433",
+            "url": "/api/studio/documents/c436eb074c87967eea31/file#page=353"
+          },
+          {
+            "page": 351,
+            "text": "sing the air release valve.\n  Warning\nIf the pressure is below 1.8 bar (26 psi), the hole in the tyre is too big. Do not continue and contact Volvo\nAssistance for safe recovery.\nUnplug the compressor from the 12 V socket.\n9\nClean the hose before stowing it and make sure that no sealing compound is spilt.\n10\nRefit the tyre valve's dust cap.\n11\nAs soon as possible, drive for 10 minutes [1] and let the fluid seal the tyre. After that, perform a follow-up check.\n12\n  Warning\nSealant will squirt out of the puncture during the first few rotations of the tyre. Make sure that nobody is standing\nnear the car and gets the sealing fluid on them when the car is driven away.\nWith the compressor shut off, connect the air hose to the tyre's air valve.\n13\nCheck the tyre pressure on the pressure gauge.\n14\nIf it is below 1.3 bar (19 psi) then the tyre is insufficiently sealed. Stop and contact Volvo Assistance for safe recovery.\nIf th",
+            "url": "/api/studio/documents/c436eb074c87967eea31/file#page=351"
+          },
+          {
+            "page": 350,
+            "text": "g after\nabout 30 seconds.\n>\n  Warning\nNever stand next to the tyre while the compressor is on. If cracks or bumps appear in the tyre, the compressor must\nbe turned off immediately. Stop and contact Volvo Assistance for safe recovery.\nInflate the tyre for 7 minutes.\n7\n  Important\nTo avoid overheating, do not run the compressor for more than 10 minutes.\nShut the compressor off to check the pressure on the pressure gauge. The minimum tyre pressure is 1.8 bar (26 psi) and\nthe maximum tyre pressure is 2.5 bar (36 psi). Use the pressure-reducing valve if the pressure is too high.\nYou need to remove the bottle to access the air release valve. The bottle is equipped with a check valve that prevents fluid\nleakage w\ngauge. The minimum tyre pressure is 1.8 bar (26 psi) and\nthe maximum tyre pressure is 2.5 bar (36 psi). Use the pressure-reducing valve if the pressure is too high.\nYou need to remove the bottle to access the air r",
+            "url": "/api/studio/documents/c436eb074c87967eea31/file#page=350"
+          }
+        ],
+        "retrieval": "BM25 + bilingual query lexicon",
+        "content_trust": "external_untrusted",
+        "notice": "展示相关原文与同页警告候选，不保证穷尽所有跨页条件；扫描PDF暂不支持OCR。"
+      },
+      "evidence": [
+        {
+          "id": "c436eb074c87967eea31:p353",
+          "title": "EC40 2026 (25w46) User Manual · 第353页",
+          "text": "13.4.5.1. Tyre pressure monitoring\nYour car can detect and indicate if the tyre pressure is low. Tyre pressure monitoring cannot be disabled. If\nthe system is unable to detect any tyre pressure, it will indicate that there's a malfunction.\nFor the tyre pressure monitoring system to provide updated information, you need to drive the car above 35 km/h (22 mph) for\nseveral minutes.\nAn indicator symbol lights up if a low tyre pressure is detected in any of the tyres. It will stay illuminated until the problem is re‐\nsolved and a new reference value for the tyre pressure has been stored.\nIn additio",
+          "conditions": "Volvo EC40 2026 UK",
+          "vehicle": "Volvo EC40 2026 UK",
+          "url": "/api/studio/documents/c436eb074c87967eea31/file#page=353",
+          "source_url": "https://www.volvocars.com/static/support-content/pdfs/uk_en-GB_ec40_2026_UM_8bbd937f411a2582b90516ef58b938ae.pdf",
+          "type": "manual",
+          "page": 353
+        },
+        {
+          "id": "c436eb074c87967eea31:p351",
+          "title": "EC40 2026 (25w46) User Manual · 第351页",
+          "text": "13\nCheck the tyre pressure on the pressure gauge.\n14\nIf it is below 1.3 bar (19 psi) then the tyre is insufficiently sealed. Stop and contact Volvo Assistance for safe recovery.\nIf the tyre pressure is higher than 1.3 bar (19 psi), the tyre must be inflated to the pressure specified on the tyre\npressure label on the driver's side door pillar. If the pressure is too high, release air using the pressure-reducing valve.\n>\nRefit the tyre valve's dust cap.\n15\n  Warning\nMaximum mileage with tyres containing sealing fluid is 200 km (120 miles).\nThe content of this manual represents the status of the ",
+          "conditions": "Volvo EC40 2026 UK",
+          "vehicle": "Volvo EC40 2026 UK",
+          "url": "/api/studio/documents/c436eb074c87967eea31/file#page=351",
+          "source_url": "https://www.volvocars.com/static/support-content/pdfs/uk_en-GB_ec40_2026_UM_8bbd937f411a2582b90516ef58b938ae.pdf",
+          "type": "manual",
+          "page": 351
+        },
+        {
+          "id": "c436eb074c87967eea31:p350",
+          "title": "EC40 2026 (25w46) User Manual · 第350页",
+          "text": "Begin puncture repairs\nthe windscreen. You find it on the compressor.\nLabel, maximum permitted speed\nAttach the sealing fluid bottle to the compressor and then turn it 90 degrees clockwise.\n2\nAttach the air hose to the bottle opening and turn it 90 degrees clockwise.\n3\nUnscrew the dust cap from the tyre and attach the air hose to the tyre's air valve. Screw the connector as far down the\nthread as possible.\n4\nConnect the compressor to the car's 12 V socket and ensure that the socket works and is supplying current.\n5\nStart the compressor by pressing the power button.\n6\nThe compressor pressure in",
+          "conditions": "Volvo EC40 2026 UK",
+          "vehicle": "Volvo EC40 2026 UK",
+          "url": "/api/studio/documents/c436eb074c87967eea31/file#page=350",
+          "source_url": "https://www.volvocars.com/static/support-content/pdfs/uk_en-GB_ec40_2026_UM_8bbd937f411a2582b90516ef58b938ae.pdf",
+          "type": "manual",
+          "page": 350
+        }
+      ]
+    },
+    {
+      "tool": "search_manual",
+      "query": "后向儿童座椅放副驾时气囊怎么办",
+      "status": "answered",
+      "message": "在Volvo EC40 2026 UK手册中检索到第121、127、120页原文。请核对车型适用性及同页警告。",
+      "data": {
+        "document": {
+          "id": "c436eb074c87967eea31",
+          "filename": "Volvo_EC40_2026_UK_en.pdf",
+          "vehicle": "Volvo EC40 2026 UK",
+          "title": "EC40 2026 (25w46) User Manual",
+          "pages": 433,
+          "chunks": 904,
+          "sha256": "1fcca03a413beb0242dd5282a5f645b2b1b5a313610e620e46ec6c28ac4a0939",
+          "source_url": "https://www.volvocars.com/static/support-content/pdfs/uk_en-GB_ec40_2026_UM_8bbd937f411a2582b90516ef58b938ae.pdf",
+          "imported_at": "2026-10-11T16:03:53.325722+00:00"
+        },
+        "passages": [
+          {
+            "document_id": "c436eb074c87967eea31",
+            "title": "EC40 2026 (25w46) User Manual",
+            "vehicle": "Volvo EC40 2026 UK",
+            "page": 121,
+            "text": "5.4.2.1. Disabling and enabling front passenger airbag\nTo use a rearward-facing child restraint in the front passenger seat, you must first disable the seat's airbags\nusing the passenger airbag switch. When disabled, the airbags will not deploy in a collision.\nSwitch location and positions\nLocation of the passenger airbag switch\nThe airbag switch is located on the side of the dashboard and is accessible when the front passenger door is open.\n  Warning\nChild restraints and front passenger seat\nNEVER use a rearward facing child restraint on a seat protected by an ACTIVE AIRBAG in front of it, DEATH or SERIOUS\nINJURY to the CHILD can occur.\n  Tip\nRead everything about airbags\nThere is more information about airbags and safety in general. Make sure you have read everything about these topics so\nthat you understand the capabilities and limitations of your car's safety features.\nThe content of this manual represents the status of the user manual at the time of printing and may not be completely valid in future\ninstances. For more information, refer to the first page for the complete disclaimer note.\n121 / 433",
+            "score": 35.169,
+            "url": "/api/studio/documents/c436eb074c87967eea31/file#page=121",
+            "source_url": "https://www.volvocars.com/static/support-content/pdfs/uk_en-GB_ec40_2026_UM_8bbd937f411a2582b90516ef58b938ae.pdf",
+            "sha256": "1fcca03a413beb0242dd5282a5f645b2b1b5a313610e620e46ec6c28ac4a0939"
+          },
+          {
+            "document_id": "c436eb074c87967eea31",
+            "title": "EC40 2026 (25w46) User Manual",
+            "vehicle": "Volvo EC40 2026 UK",
+            "page": 127,
+            "text": "Airbag information labels\nThis label is located on the front passenger seat's sun visor.\n5.5. Child safety\nSeveral features in the car aim to increase child safety, including anchorage points for child restraint\ninstallation and child locks.\nChildren in the car should always be securely seated and kept under adult supervision. Follow the recommendations in this\nmanual as well as the local regulations and recommendations that apply to you.\n  Warning\nChild restraints and front passenger seat\nNEVER use a rearward facing child restraint on a seat protected by an ACTIVE AIRBAG in front of it, DEATH or SERIOUS\nINJURY to the CHILD can occur.\nThe content of this manual represents the status of the user manual at the time of printing and may not be completely valid in future\ninstances. For more information, refer to the first page for the complete disclaimer note.\n127 / 433",
+            "score": 34.792,
+            "url": "/api/studio/documents/c436eb074c87967eea31/file#page=127",
+            "source_url": "https://www.volvocars.com/static/support-content/pdfs/uk_en-GB_ec40_2026_UM_8bbd937f411a2582b90516ef58b938ae.pdf",
+            "sha256": "1fcca03a413beb0242dd5282a5f645b2b1b5a313610e620e46ec6c28ac4a0939"
+          },
+          {
+            "document_id": "c436eb074c87967eea31",
+            "title": "EC40 2026 (25w46) User Manual",
+            "vehicle": "Volvo EC40 2026 UK",
+            "page": 120,
+            "text": "The passenger side has a single front airbag. The airbag is packed behind a panel above the glove box.\nAll front airbag locations are marked with the text AIRBAG or SRS AIRBAG.\nPassenger airbag switch\nYou can enable or disable the front passenger airbag using the airbag switch. In addition to the passenger airbag, the switch\nalso controls the status of the passenger seat's side airbags and parts of the seatbelt pretensioner. The passenger airbag needs\nto be disabled before you install a rearward-facing child restraint on the front passenger seat. Read all information about airbags\nand child safety before installing a child restraint.\nPassenger airbag status\nThe passenger airbag status is shown in the overhead console.\nThis icon indicates that the passenger airbag is enabled and can be deployed by the car.\nThis icon indicates that the passenger airbag is disabled and cannot be deployed by the car.\n  Warning\nDo not block the front airbags\nDo not place luggage, children or pets in the space between the seated occupant and the front airbags, including in\nthe occupant's lap.\nLegs or feet must never be placed on the dashboard. This could endanger life or lead to serious injury.\nDo not place or mount any items on the dashboard. Even small objects can become dangerous projectiles in a\ncollision and end up between inflating airbags and occupants.\nBlocking airbags in general\nKeep all air",
+            "score": 34.035,
+            "url": "/api/studio/documents/c436eb074c87967eea31/file#page=120",
+            "source_url": "https://www.volvocars.com/static/support-content/pdfs/uk_en-GB_ec40_2026_UM_8bbd937f411a2582b90516ef58b938ae.pdf",
+            "sha256": "1fcca03a413beb0242dd5282a5f645b2b1b5a313610e620e46ec6c28ac4a0939"
+          }
+        ],
+        "warnings": [
+          {
+            "page": 121,
+            "text": "ont passenger door is open.\n  Warning\nChild restraints and front passenger seat\nNEVER use a rearward facing child restraint on a seat protected by an ACTIVE AIRBAG in front of it, DEATH or SERIOUS\nINJURY to the CHILD can occur.\n  Tip\nRead everything about airbags\nThere is more information about airbags and safety in general. Make sure you have read everything about these topics so\nthat you understand the capabilities and limitations of your car's safety features.\nThe content of this manual represents the status of the user manual at the time of printing and may not be completely valid in future\ninstances. For more information, refer to the first page for the complete disclaimer note.\n121 / 433\nimer note.\n121 / 433",
+            "url": "/api/studio/documents/c436eb074c87967eea31/file#page=121"
+          },
+          {
+            "page": 127,
+            "text": "ndations that apply to you.\n  Warning\nChild restraints and front passenger seat\nNEVER use a rearward facing child restraint on a seat protected by an ACTIVE AIRBAG in front of it, DEATH or SERIOUS\nINJURY to the CHILD can occur.\nThe content of this manual represents the status of the user manual at the time of printing and may not be completely valid in future\ninstances. For more information, refer to the first page for the complete disclaimer note.\n127 / 433",
+            "url": "/api/studio/documents/c436eb074c87967eea31/file#page=127"
+          },
+          {
+            "page": 120,
+            "text": "not be deployed by the car.\n  Warning\nDo not block the front airbags\nDo not place luggage, children or pets in the space between the seated occupant and the front airbags, including in\nthe occupant's lap.\nLegs or feet must never be placed on the dashboard. This could endanger life or lead to serious injury.\nDo not place or mount any items on the dashboard. Even small objects can become dangerous projectiles in a\ncollision and end up between inflating airbags and occupants.\nBlocking airbags in general\nKeep all air\nmust never be placed on the dashboard. This could endanger life or lead to serious injury.\nDo not place or mount any items on the dashboard. Even small objects can become dangerous projectiles in a\ncollision and end up between inflating airbags and occupants.\nBlocking airbags in general\nKeep all airbag locations and expansion spaces free of obstructions. Obstructions can reduce airbag effectiveness and\ncause",
+            "url": "/api/studio/documents/c436eb074c87967eea31/file#page=120"
+          }
+        ],
+        "retrieval": "BM25 + bilingual query lexicon",
+        "content_trust": "external_untrusted",
+        "notice": "展示相关原文与同页警告候选，不保证穷尽所有跨页条件；扫描PDF暂不支持OCR。"
+      },
+      "evidence": [
+        {
+          "id": "c436eb074c87967eea31:p121",
+          "title": "EC40 2026 (25w46) User Manual · 第121页",
+          "text": "5.4.2.1. Disabling and enabling front passenger airbag\nTo use a rearward-facing child restraint in the front passenger seat, you must first disable the seat's airbags\nusing the passenger airbag switch. When disabled, the airbags will not deploy in a collision.\nSwitch location and positions\nLocation of the passenger airbag switch\nThe airbag switch is located on the side of the dashboard and is accessible when the front passenger door is open.\n  Warning\nChild restraints and front passenger seat\nNEVER use a rearward facing child restraint on a seat protected by an ACTIVE AIRBAG in front of it, DE",
+          "conditions": "Volvo EC40 2026 UK",
+          "vehicle": "Volvo EC40 2026 UK",
+          "url": "/api/studio/documents/c436eb074c87967eea31/file#page=121",
+          "source_url": "https://www.volvocars.com/static/support-content/pdfs/uk_en-GB_ec40_2026_UM_8bbd937f411a2582b90516ef58b938ae.pdf",
+          "type": "manual",
+          "page": 121
+        },
+        {
+          "id": "c436eb074c87967eea31:p127",
+          "title": "EC40 2026 (25w46) User Manual · 第127页",
+          "text": "Airbag information labels\nThis label is located on the front passenger seat's sun visor.\n5.5. Child safety\nSeveral features in the car aim to increase child safety, including anchorage points for child restraint\ninstallation and child locks.\nChildren in the car should always be securely seated and kept under adult supervision. Follow the recommendations in this\nmanual as well as the local regulations and recommendations that apply to you.\n  Warning\nChild restraints and front passenger seat\nNEVER use a rearward facing child restraint on a seat protected by an ACTIVE AIRBAG in front of it, DEATH",
+          "conditions": "Volvo EC40 2026 UK",
+          "vehicle": "Volvo EC40 2026 UK",
+          "url": "/api/studio/documents/c436eb074c87967eea31/file#page=127",
+          "source_url": "https://www.volvocars.com/static/support-content/pdfs/uk_en-GB_ec40_2026_UM_8bbd937f411a2582b90516ef58b938ae.pdf",
+          "type": "manual",
+          "page": 127
+        },
+        {
+          "id": "c436eb074c87967eea31:p120",
+          "title": "EC40 2026 (25w46) User Manual · 第120页",
+          "text": "The passenger side has a single front airbag. The airbag is packed behind a panel above the glove box.\nAll front airbag locations are marked with the text AIRBAG or SRS AIRBAG.\nPassenger airbag switch\nYou can enable or disable the front passenger airbag using the airbag switch. In addition to the passenger airbag, the switch\nalso controls the status of the passenger seat's side airbags and parts of the seatbelt pretensioner. The passenger airbag needs\nto be disabled before you install a rearward-facing child restraint on the front passenger seat. Read all information about airbags\nand child sa",
+          "conditions": "Volvo EC40 2026 UK",
+          "vehicle": "Volvo EC40 2026 UK",
+          "url": "/api/studio/documents/c436eb074c87967eea31/file#page=120",
+          "source_url": "https://www.volvocars.com/static/support-content/pdfs/uk_en-GB_ec40_2026_UM_8bbd937f411a2582b90516ef58b938ae.pdf",
+          "type": "manual",
+          "page": 120
+        }
+      ]
+    }
+  ],
+  "documents": [
+    {
+      "status": "executed",
+      "message": "已导入433页手册，建立904个可回溯片段。",
+      "data": {
+        "document": {
+          "id": "c436eb074c87967eea31",
+          "filename": "Volvo_EC40_2026_UK_en.pdf",
+          "vehicle": "Volvo EC40 2026 UK",
+          "title": "EC40 2026 (25w46) User Manual",
+          "pages": 433,
+          "chunks": 904,
+          "sha256": "1fcca03a413beb0242dd5282a5f645b2b1b5a313610e620e46ec6c28ac4a0939",
+          "source_url": "https://www.volvocars.com/static/support-content/pdfs/uk_en-GB_ec40_2026_UM_8bbd937f411a2582b90516ef58b938ae.pdf",
+          "imported_at": "2026-10-11T16:03:53.325722+00:00"
+        }
+      },
+      "evidence": []
+    },
+    {
+      "status": "executed",
+      "message": "已导入421页手册，建立888个可回溯片段。",
+      "data": {
+        "document": {
+          "id": "3b407e395d33a4854076",
+          "filename": "Volvo_EC40_2026_US_en.pdf",
+          "vehicle": "Volvo EC40 2026 US",
+          "title": "EC40 2026 (25w17) User Manual",
+          "pages": 421,
+          "chunks": 888,
+          "sha256": "15bb5257af9ff6c032b13a5ad0fc3539b038df60aaabb953bf7068faadffa0f4",
+          "source_url": "https://www.volvocars.com/static/support/pdf/us_en-US_ec40_2026_UM_d2f062b9377f3b650b74c5c6841da8fc.pdf",
+          "imported_at": "2026-10-11T16:03:54.023621+00:00"
+        }
+      },
+      "evidence": []
+    },
+    {
+      "status": "executed",
+      "message": "已导入328页手册，建立1002个可回溯片段。",
+      "data": {
+        "document": {
+          "id": "7c2ddc00d72f4d09ded8",
+          "filename": "Tesla_Model3_2024plus_US_en.pdf",
+          "vehicle": "Tesla Model 3 2024+ US",
+          "title": "Model 3 2024+ Owner’s Manual",
+          "pages": 328,
+          "chunks": 1002,
+          "sha256": "0b211f472b0089fd0fc82e09fe64513bdbddb60649371d4ad9249145bf0d539d",
+          "source_url": "https://www.tesla.com/ownersmanual/model3/en_us/Owners_Manual.pdf",
+          "imported_at": "2026-10-11T16:03:54.629710+00:00"
+        }
+      },
+      "evidence": []
+    }
+  ],
+  "limitations": [
+    "服务可用性为当前单次真实探针，不是可用性SLA。",
+    "公共地图无实时路况/充电空闲信息，起点明确为演示坐标。",
+    "手册原文为各自指定车型/年份/地区的英文PDF；词法召回不保证穷尽全部安全条件。",
+    "新闻/搜索摘要和发布时刻来自外部提供商，未独立事实核查。"
+  ],
+  "source_sha256": "4b760765acc1b580adb4c545fae0c841ce4af4406c3a9bfccff8a8c73b408a8b"
+}

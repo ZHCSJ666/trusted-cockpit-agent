@@ -1,0 +1,16 @@
+# Source: car-agent repository, deploy/host/ (see deploy/host/README.md).
+[Unit]
+Description=Host capacity GC: reclaim the shared BuildKit cache when disk runs low, expire old core dumps
+Requisite=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -I /usr/local/sbin/host-capacity-gc
+StateDirectory=host-capacity-gc
+StateDirectoryMode=0700
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=30min

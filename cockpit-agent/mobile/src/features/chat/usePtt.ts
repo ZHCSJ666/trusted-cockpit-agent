@@ -1,0 +1,289 @@
+// PTT 状态机（实施计划 M2-2）+ B2 T6 的手势契约入口（方案 §5.1.1）：
+//  · 按住 / 松手（hold）：三个竞态守卫照旧（快按快松 pendingStop / <320ms 误触 / 并发按下忽略）
+//  · 轻点（tap）：开始录音、说完自动收尾（core/voice/tapTalk.ts 三层收尾）；录音中再点 = 结束并提交
+//  · 取消（cancel）：按住时上滑 / 隐私栏「关闭本轮麦克风」——不定稿、草稿删除；胶囊说
+//    「已取消，这段话不会发给小舟」（**不是**「未上传」：流式 ASR 已上传的音频不能宣称从未上传）
+//
+// 麦：AsrSession 领一路 micLease（§0 第 5 条：全局单例的那只录音机在免唤醒开着时让 PTT 收不到帧、
+// 且它的 stop 会把免唤醒的真麦停掉——pttLease.test.ts 钉住）。
+// 按下先停播报再开麦；若定稿仍与当时的播报重合，留到输入框核对（停止不证明声学余音已消失）。
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { isTtsEcho } from '@shared/voiceLoop.mjs'
+
+import { AsrSession, type AsrCallbacks, type AsrConfig } from '@/core/voice/asr'
+import { asrStreamUrl } from '@/core/voice/audioUrls'
+import { warmSocket } from '@/core/voice/warmSocket'
+import {
+  beginInteraction,
+  dropPendingInteraction,
+  markInteraction,
+  offerPendingInteraction,
+} from '@/core/obs/turnTimeline'
+import { micLease } from '@/core/voice/micBus'
+import { PermissionDeniedError } from '@/core/voice/recorder'
+import { speechController } from '@/core/voice/speech'
+import { TapTalkSession, vadEndpoint } from '@/core/voice/tapTalk'
+import { ASR_FALLBACK_MODEL, settingsStore } from '@/core/settings/store'
+import type { InteractionScope } from '@/core/session/interactionScope'
+
+const MIN_DURATION_MS = 320
+// 定稿超过它仍无结果 → UI 给中间反馈（兜底链最长 ≈24s，一直只写「识别中…」会让人以为卡死）
+const SLOW_HINT_MS = 8000
+
+export type PttState = 'idle' | 'recording' | 'finalizing'
+export type PttMode = 'hold' | 'tap' | ''
+
+export interface PttHandle {
+  state: PttState
+  /** 这次录音是按住还是轻点（空=没在录） */
+  mode: PttMode
+  partial: string
+  error: string
+  errorKind: 'permission' | 'start' | 'asr' | ''
+  slow: boolean
+  /** 上一次取消的时刻（胶囊短显「已取消…」用）；0=没有 */
+  cancelledAt: number
+  pressDown(): void
+  pressUp(): void
+  /** 轻点契约：空闲 = 开始录音（自动收尾）；录音中 = 结束并提交；识别中 = 忽略 */
+  tap(): void
+  /** 取消本次录音：不定稿、不回调 onFinal、草稿删除 */
+  cancel(): void
+}
+
+interface VoiceSession {
+  start(): Promise<void>
+  stop(): Promise<void>
+  cancel(): Promise<void>
+}
+
+export function usePtt(opts: {
+  scope?: InteractionScope
+  audioUrl: string
+  sessionId: string
+  onFinal(text: string, metaExtra: Record<string, string>): void
+  /** 疑似自身播报的手动输入不自动发送，也不删除，交给宿主放入输入框。 */
+  onEchoReview(text: string): void
+  /** 确认/补槽/位置征询的回答仍交给原有续接路径，不能因复述提示中的词被截走。 */
+  hasPendingReply?: boolean
+  /** 稳定 partial（全文）→ 记录里的草稿气泡（方案 §5.2.1） */
+  onPartial?(text: string): void
+  /** 太短 / 出错 / 空定稿 / 取消 → 草稿不留气泡 */
+  onDiscard?(): void
+}): PttHandle {
+  const [state, setState] = useState<PttState>('idle')
+  const [mode, setMode] = useState<PttMode>('')
+  const [partial, setPartial] = useState('')
+  const [error, setError] = useState('')
+  const [errorKind, setErrorKind] = useState<PttHandle['errorKind']>('')
+  const [slow, setSlow] = useState(false)
+  const [cancelledAt, setCancelledAt] = useState(0)
+  /** 本轮时间线 id（AR08）。PTT 这一轮从**按下**就开始计时——主链要到发送才有 request_id，
+   *  而 ASR 定稿那一整段恰恰是首音时延里最容易被漏掉的一段。 */
+  const timelineRef = useRef<string | null>(null)
+  const sessionRef = useRef<VoiceSession | null>(null)
+  const startingRef = useRef(false)
+  const pendingStopRef = useRef(false)
+  const startedAtRef = useRef(0)
+  const optionsRef = useRef(opts)
+  useEffect(() => { optionsRef.current = opts })
+
+  const reset = useCallback(() => {
+    sessionRef.current = null
+    startingRef.current = false
+    pendingStopRef.current = false
+    setPartial('')
+    setState('idle')
+    setMode('')
+    // 这一轮的识别连接用掉了：为下一次按下预热一条（warmSocket.ts；整句引擎也走同一条 WS）
+    if (opts.audioUrl && (!opts.scope || opts.scope.canCapture())) warmSocket(asrStreamUrl(opts.audioUrl))
+  }, [opts.audioUrl, opts.scope])
+
+  const asrConfig = useCallback((): AsrConfig => {
+    const s = settingsStore.getState().settings
+    return {
+      audioUrl: opts.audioUrl,
+      language: s.asrLanguage,
+      provider: s.asrProvider,
+      model: s.asrModel,
+      // 备用模型是百炼（dashscope）内部的第二个模型：整句引擎（minimax/mimo）没有第二个模型，不给；
+      // 选中的就是备用模型时也不再指自己（否则失败后原地重试一次，白等一个来回）
+      ...(s.asrProvider === 'dashscope' && s.asrModel !== ASR_FALLBACK_MODEL ? { fallbackModel: ASR_FALLBACK_MODEL } : {}),
+      sessionId: opts.sessionId,
+    }
+  }, [opts.audioUrl, opts.sessionId])
+
+  const callbacks = useCallback(
+    (current: () => VoiceSession | null, echoReference: string): AsrCallbacks => ({
+      onPartial: (t) => {
+        if (!current()) return
+        setPartial(t)
+        opts.onPartial?.(t)
+      },
+      onFinal: (t) => {
+        const session = current()
+        if (!session) return
+        const timeline = timelineRef.current
+        if (timeline) markInteraction(timeline, 'asr_final', { detail: t.trim() ? 'text' : 'empty' })
+        reset()
+        void session.cancel().catch(() => {}) // 服务端先定稿时也必须释放本轮麦与 VAD
+        const text = t.trim()
+        const latest = optionsRef.current
+        if (text && !latest.hasPendingReply && isTtsEcho(text, echoReference)) {
+          if (timeline) dropPendingInteraction(timeline)
+          latest.onDiscard?.()
+          latest.onEchoReview(text)
+        } else if (text) latest.onFinal(text, { input_source: 'ptt' })
+        else {
+          // 没定出内容 ⇒ 这一轮不会有主链请求，交接口要收回来，否则下一条文字会认领到它
+          if (timeline) dropPendingInteraction(timeline)
+          setError('没听清，再说一次？')
+          setErrorKind('asr')
+          opts.onDiscard?.()
+        }
+      },
+      onError: (msg) => {
+        const session = current()
+        if (!session) return
+        if (timelineRef.current) {
+          markInteraction(timelineRef.current, 'failed', { detail: 'asr' })
+          dropPendingInteraction(timelineRef.current)
+        }
+        reset()
+        void session.cancel().catch(() => {})
+        setError(msg)
+        setErrorKind('asr')
+        opts.onDiscard?.()
+      },
+    }),
+    [opts, reset],
+  )
+
+  const finishSession = useCallback(async () => {
+    const session = sessionRef.current
+    if (!session) return
+    if (Date.now() - startedAtRef.current < MIN_DURATION_MS) {
+      // ② 误触：不定稿——否则每次误触都往后端发一次空识别
+      reset()
+      opts.onDiscard?.()
+      await session.cancel()
+      return
+    }
+    setState('finalizing')
+    await session.stop()
+  }, [opts, reset])
+
+  const begin = useCallback(
+    (kind: 'hold' | 'tap') => {
+      if (opts.scope && !opts.scope.canCapture()) return
+      if (startingRef.current || sessionRef.current) return // ③ 并发按下忽略
+      startingRef.current = true
+      pendingStopRef.current = false
+      setError('')
+      setErrorKind('')
+      setPartial('')
+      setState('recording')
+      setMode(kind)
+      startedAtRef.current = Date.now()
+      const timeline = beginInteraction('ptt')
+      timelineRef.current = timeline
+      markInteraction(timeline, 'input_gesture', { detail: kind })
+      // 主链 send() 认领它；30s 内没人认领就作废（见 turnTimeline 的 PENDING_TTL_MS）
+      offerPendingInteraction(timeline)
+      const speech = speechController()
+      const echoReference = speech.echoReference // 必须在 stop 前保存，只属于本次手势
+      speech.stop()
+      const cb = callbacks(() => sessionRef.current === session ? session : null, echoReference)
+      const session: VoiceSession =
+        kind === 'tap'
+          ? new TapTalkSession(asrConfig(), cb, { endpoint: vadEndpoint() })
+          : new AsrSession(asrConfig(), cb, micLease())
+      sessionRef.current = session
+      void session
+        .start()
+        .then(() => {
+          if (sessionRef.current !== session) return
+          // 采集**真的**开始（麦租约到手）才打点；`begin()` 只是用户按下
+          markInteraction(timeline, 'capture_started')
+          startingRef.current = false
+          if (pendingStopRef.current) {
+            // ① 会话就绪前就松手了：这时才真正停
+            pendingStopRef.current = false
+            void finishSession()
+          }
+        })
+        .catch((e: unknown) => {
+          if (sessionRef.current !== session) return
+          markInteraction(timeline, 'failed', { detail: 'capture_start' })
+          dropPendingInteraction(timeline)
+          reset()
+          void session.cancel().catch(() => {})
+          const denied = e instanceof PermissionDeniedError
+          setError(denied ? '需要麦克风权限，请在系统设置里允许' : '录音启动失败')
+          setErrorKind(denied ? 'permission' : 'start')
+          opts.onDiscard?.()
+        })
+    },
+    [asrConfig, callbacks, finishSession, opts, reset],
+  )
+
+  // 换服务器/换会话时把上一轮采集连同 UI 状态一起归零。**放在清理里**而不是 effect 体里：
+  // 后者是同步 setState（级联渲染，react-hooks/set-state-in-effect），而首次挂载时
+  // reset() 本来就等价于初值（idle / '' / ''），少跑一次没有行为差别。
+  useEffect(() => {
+    return () => {
+      const session = sessionRef.current
+      reset()
+      void session?.cancel().catch(() => {})
+    }
+  }, [opts.audioUrl, opts.sessionId, reset])
+
+  // 离开 finalizing 时立刻收掉「慢」提示：渲染期调整派生状态，同一帧生效（effect 会晚一帧）
+  const [stateSeen, setStateSeen] = useState(state)
+  if (stateSeen !== state) {
+    setStateSeen(state)
+    if (state !== 'finalizing') setSlow(false)
+  }
+  useEffect(() => {
+    if (state !== 'finalizing') return
+    const t = setTimeout(() => setSlow(true), SLOW_HINT_MS)
+    return () => clearTimeout(t)
+  }, [state])
+
+  const pressDown = useCallback(() => begin('hold'), [begin])
+
+  const pressUp = useCallback(() => {
+    if (startingRef.current) {
+      pendingStopRef.current = true
+      return
+    }
+    void finishSession()
+  }, [finishSession])
+
+  const tap = useCallback(() => {
+    if (state === 'finalizing') return
+    if (sessionRef.current || startingRef.current) {
+      pressUp() // 录音中轻点 = 结束并提交
+      return
+    }
+    begin('tap')
+  }, [begin, pressUp, state])
+
+  const cancel = useCallback(() => {
+    if (!sessionRef.current && !startingRef.current) return
+    const session = sessionRef.current
+    reset()
+    // 必须现在作废底层权限等待；等 start.then 再 cancel 已经晚了一次开麦。
+    void session?.cancel().catch(() => {})
+    setCancelledAt(Date.now())
+    opts.onDiscard?.()
+  }, [opts, reset])
+
+  useEffect(() => {
+    const sync = () => { if (opts.scope && !opts.scope.canCapture()) cancel() }
+    sync()
+    return opts.scope?.subscribe(sync)
+  }, [opts.scope, cancel])
+
+  return { state, mode, partial, error, errorKind, slow, cancelledAt, pressDown, pressUp, tap, cancel }
+}

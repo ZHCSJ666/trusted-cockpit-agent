@@ -1,0 +1,23 @@
+{
+  "checked_at": "2026-10-11T16:06:27.670857+00:00",
+  "source_sha256": "ddcc03afc1a5094689e61c4bfd707de7146885b15bcfb7c8ece010759c79d38c",
+  "scenario": "既有杭州东路线→搜索替换咖啡候选→第二家作为途经点",
+  "args": {
+    "destination": "node/7160108921",
+    "waypoints": [
+      "node/6001712200"
+    ]
+  },
+  "status": "executed",
+  "message": "已规划到杭州东的路线，约15.3公里，预计18分钟。途经：星巴克。不含实时路况。起点使用设置的演示位置：杭州（演示起点，非设备定位），非实时定位。",
+  "expected_destination_id": "node/7160108921",
+  "actual_destination_id": "node/7160108921",
+  "actual_waypoints": [
+    "node/6001712200"
+  ],
+  "distance_m": 15275.1,
+  "provider": "OSRM / OpenStreetMap",
+  "data_mode": "live",
+  "geometry_points": 287,
+  "passed": true
+}

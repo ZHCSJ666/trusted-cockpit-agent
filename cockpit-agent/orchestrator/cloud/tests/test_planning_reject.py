@@ -1,0 +1,400 @@
+"""R4.4 planner 受话判定 + 澄清解析单测（T1）。
+
+覆盖：addressed=false 的显式输入重采样与语音首轮短路、fail-open（缺省/垃圾值=True）、clarify 解析（合法/坏格式）、
+clarify 与非空 steps 互斥（steps 优先）、clarify 命中 route_hints 被兜底填 steps（D6-2）、
+_planner_system() 按 CLARIFY_ENABLED 拼澄清段。全部进程内 stub，不依赖 gRPC/真 LLM。
+"""
+from __future__ import annotations
+import asyncio
+import json
+import os
+
+from unittest.mock import MagicMock
+
+from orchestrator.cloud import planning as P
+from orchestrator.cloud.planning import (
+    PlanBuilder, _assemble_capability_catalog, _planner_system,
+)
+from orchestrator.cloud.models import PlanContext
+from orchestrator.cloud.context import WorkingSet
+from agents._sdk.manifest import load_manifest
+
+_REPO_ROOT = os.path.join(os.path.dirname(__file__), "..", "..", "..")
+_ROUTE_HINT_MANIFESTS = {"deep-research": "agents/deep_research/manifest.yaml"}
+
+
+def _load_route_hints(agent_id):
+    rel = _ROUTE_HINT_MANIFESTS.get(agent_id)
+    if not rel:
+        return []
+    return list(load_manifest(os.path.join(_REPO_ROOT, rel)).route_hints)
+
+
+class MockAgent:
+    def __init__(self, agent_id, intents):
+        self.manifest = MagicMock()
+        self.manifest.agent_id = agent_id
+        self.manifest.capabilities = []
+        self.manifest.latency_budget_ms = 5000
+        self.manifest.kind = "agent"
+        self.manifest.deployment = "cloud"
+        self.manifest.requires_permissions = []
+        self.manifest.trust_level = "first_party"
+        for intent in intents:
+            cap = MagicMock()
+            cap.intent = intent
+            cap.slots = []
+            cap.description = ""
+            cap.examples = []
+            cap.heavy = False
+            self.manifest.capabilities.append(cap)
+        self.manifest.route_hints = _load_route_hints(agent_id)
+        self.endpoint = f"localhost:{hash(agent_id) % 1000 + 50060}"
+
+
+def _builder(llm_returns, resolve_returns=None):
+    """llm_returns: str | list[str]（多次调用按序返回，用尽后重复末项）。"""
+    seq = [llm_returns] if isinstance(llm_returns, str) else list(llm_returns)
+    calls = {"n": 0}
+
+    async def mock_llm(messages):
+        i = min(calls["n"], len(seq) - 1)
+        calls["n"] += 1
+        return seq[i]
+
+    async def mock_resolve(query, top_k=1):
+        return resolve_returns or []
+
+    return PlanBuilder(llm_fn=mock_llm, registry_fn=mock_resolve), calls
+
+
+def _build(builder, text, agents, *, ctx=None):
+    return asyncio.run(builder.build(
+        text, WorkingSet(catalog=agents), ctx or PlanContext(session_id="t")))
+
+
+# ── _parse_clarify 纯函数 ────────────────────────────────────────────────────
+
+def test_parse_clarify_valid():
+    out = PlanBuilder._parse_clarify({
+        "question": "您是想找附近的，还是导航过去？",
+        "options": [{"label": "找附近的", "send_text": "帮我找附近的川菜馆"},
+                    {"label": "导航过去", "send_text": "导航去最近的川菜馆"}]})
+    assert out["question"].startswith("您是想")
+    assert len(out["options"]) == 2
+    assert out["options"][0]["send_text"] == "帮我找附近的川菜馆"
+
+
+def test_parse_clarify_rejects_bad():
+    # 非 dict
+    assert PlanBuilder._parse_clarify("nope") is None
+    # 缺 question
+    assert PlanBuilder._parse_clarify({"options": [{"label": "a", "send_text": "x"},
+                                                   {"label": "b", "send_text": "y"}]}) is None
+    # options 只 1 个（消歧至少 2 选）
+    assert PlanBuilder._parse_clarify({"question": "?", "options": [{"label": "a", "send_text": "x"}]}) is None
+    # 某项缺 send_text
+    assert PlanBuilder._parse_clarify({"question": "?", "options": [
+        {"label": "a", "send_text": "x"}, {"label": "b"}]}) is None
+
+
+def test_parse_clarify_truncates_to_three():
+    out = PlanBuilder._parse_clarify({"question": "?", "options": [
+        {"label": str(i), "send_text": str(i)} for i in range(5)]})
+    assert len(out["options"]) == 3
+
+
+# ── _parse_and_validate 短路 ─────────────────────────────────────────────────
+
+def test_addressed_false_short_circuits():
+    b, _ = _builder("x")
+    plan = b._parse_and_validate(
+        '{"addressed":false,"steps":[]}', _assemble_capability_catalog([]), "妈你到哪了")
+    assert plan is not None
+    assert plan.addressed is False
+    assert plan.steps == []
+
+
+def test_addressed_missing_is_fail_open_true():
+    b, _ = _builder("x")
+    agents = [MockAgent("nearby", ["nearby.search"])]
+    catalog = _assemble_capability_catalog(agents)
+    plan = b._parse_and_validate(
+        ('{"steps":[{"id":"s1","capability_ref":"cap_0001","slots":{},'
+         '"depends_on":[],"slot_refs":{}}]}'),
+        catalog, "找川菜")
+    assert plan.addressed is True
+
+
+def test_addressed_garbage_is_fail_open_true():
+    b, _ = _builder("x")
+    # addressed 是垃圾字符串（非 bool false）→ 视作 True，且无 steps → None（走重试/fallback）
+    plan = b._parse_and_validate(
+        '{"addressed":"maybe","steps":[]}', _assemble_capability_catalog([]), "嗯")
+    assert plan is None      # 非 false + 无 steps + 无 clarify → 解析失败语义（现状）
+
+
+def test_clarify_without_steps_parsed():
+    b, _ = _builder("x")
+    raw = json.dumps({"addressed": True, "clarify": {
+        "question": "找附近还是导航？",
+        "options": [{"label": "找附近", "send_text": "找附近川菜"},
+                    {"label": "导航", "send_text": "导航去川菜馆"}]}})
+    plan = b._parse_and_validate(raw, _assemble_capability_catalog([]), "华润大厦")
+    assert plan is not None
+    assert plan.steps == []
+    assert plan.clarify and plan.clarify["question"].startswith("找附近")
+
+
+def test_clarify_payload_misnested_in_single_step_slots_is_salvaged():
+    """MiniMax may understand the decision but nest clarify under a tool step."""
+    agents = [MockAgent("navigation", ["navigation.search_poi"])]
+    catalog = _assemble_capability_catalog(agents)
+    ref = catalog.pair_to_ref[("navigation", "navigation.search_poi")]
+    payload = {
+        "question": "你希望我怎么处理云岚国际中心？",
+        "options": [
+            {"label": "路线引导", "send_text": "请规划到云岚国际中心的路线"},
+            {"label": "地点资料", "send_text": "请介绍云岚国际中心的地点信息"},
+        ],
+    }
+    wire = {
+        "addressed": True,
+        "steps": [{
+            "id": "s1", "capability_ref": ref, "slots": payload,
+            "depends_on": [], "slot_refs": {},
+        }],
+    }
+
+    plan = PlanBuilder(None, None)._parse_and_validate_data(
+        wire, catalog, "云岚国际中心")
+    assert plan is not None
+    assert plan.steps == []
+    assert plan.clarify == payload
+
+
+def test_clarify_ignored_when_steps_present():
+    b, _ = _builder("x")
+    agents = [MockAgent("nearby", ["nearby.search"])]
+    catalog = _assemble_capability_catalog(agents)
+    raw = json.dumps({
+        "steps": [{"id": "s1", "capability_ref": "cap_0001", "slots": {},
+                   "depends_on": [], "slot_refs": {}}],
+        "clarify": {"question": "?", "options": [{"label": "a", "send_text": "x"},
+                                                 {"label": "b", "send_text": "y"}]}})
+    plan = b._parse_and_validate(raw, catalog, "找川菜")
+    assert len(plan.steps) == 1
+    assert plan.clarify is None      # 互斥：steps 非空则 clarify 忽略
+
+
+# ── build() 集成：输入源边界 / route_hints 优先 ──────────────────────────────
+
+def test_build_explicit_input_retries_addressed_false_once():
+    agents = [MockAgent("nearby", ["nearby.search"])]
+    b, calls = _builder('{"addressed":false,"steps":[]}')
+    plan = _build(b, "他昨天跟我说那个项目黄了", agents)
+    assert plan.addressed is False
+    assert plan.steps == []
+    assert calls["n"] == 2
+
+
+def test_build_voice_input_accepts_addressed_false_without_retry():
+    agents = [MockAgent("nearby", ["nearby.search"])]
+    b, calls = _builder('{"addressed":false,"steps":[]}')
+    ctx = PlanContext(
+        session_id="t", prefs={"input_source": "voice_followup"})
+
+    plan = _build(b, "他昨天跟我说那个项目黄了", agents, ctx=ctx)
+
+    assert plan.addressed is False
+    assert plan.steps == []
+    assert calls["n"] == 1
+
+
+def test_build_clarify_no_retry():
+    agents = [MockAgent("nearby", ["nearby.search"])]
+    raw = json.dumps({"addressed": True, "clarify": {
+        "question": "找附近还是导航？",
+        "options": [{"label": "找附近", "send_text": "找附近川菜"},
+                    {"label": "导航", "send_text": "导航去川菜馆"}]}})
+    b, calls = _builder(raw)
+    plan = _build(b, "华润大厦", agents)
+    assert plan.clarify is not None
+    assert plan.steps == []
+    assert calls["n"] == 1
+
+
+def test_build_clarify_overridden_by_route_hint():
+    """clarify 计划被 route_hints 命中 → steps 被兜底填充，clarify 让位（母卡 D6-2）。"""
+    agents = [MockAgent("deep-research", ["research.run"])]
+    raw = json.dumps({"addressed": True, "clarify": {
+        "question": "要调研什么？",
+        "options": [{"label": "电池", "send_text": "调研电池"},
+                    {"label": "别的", "send_text": "调研别的"}]}})
+    b, _ = _builder(raw)
+    plan = _build(b, "帮我深入调研一下固态电池", agents)
+    assert [s.intent for s in plan.steps] == ["research.run"]   # route_hint 兜底填 steps
+
+
+# ── _fallback 语义 top-1 分数门槛（P1 T5）────────────────────────────────────
+
+def _resolved(agent_id, intent, score):
+    """构造带 .score 的 registry ResolvedAgent（fake）。"""
+    m = MagicMock()
+    m.agent_id = agent_id
+    cap = MagicMock(); cap.intent = intent
+    m.capabilities = [cap]
+    m.kind = "agent"; m.deployment = "cloud"; m.requires_permissions = []; m.trust_level = "first_party"
+    a = MagicMock(); a.manifest = m; a.endpoint = "stub:50099"; a.score = score
+    return a
+
+
+def test_fallback_low_score_honest_degrades():
+    """LLM 两次失败 + 语义 top-1 分数 < 门槛 → 空计划（不硬执行 capabilities[0]）。"""
+    agents = [MockAgent("nearby", ["nearby.search"])]        # 无 chitchat 兜底 → 走语义 top-1
+    b, calls = _builder(["nope", "still nope"], resolve_returns=[_resolved("info", "info.weather", 0.4)])
+    plan = _build(b, "含混不清的一句", agents)
+    assert plan.steps == []          # 低分诚实降级
+    assert calls["n"] == 2           # LLM 两次都失败才走 fallback
+
+
+def test_fallback_high_score_executes_top1():
+    """语义 top-1 分数 ≥ 门槛 → 现状：执行该 Agent capabilities[0]。"""
+    agents = [MockAgent("nearby", ["nearby.search"])]
+    b, _ = _builder(["nope", "still nope"], resolve_returns=[_resolved("info", "info.weather", 0.7)])
+    plan = _build(b, "含混不清的一句", agents)
+    assert [s.intent for s in plan.steps] == ["info.weather"]
+
+
+# ── _planner_system() env 拼接 ───────────────────────────────────────────────
+
+def test_planner_system_addressed_always_present(monkeypatch):
+    monkeypatch.delenv("CLARIFY_ENABLED", raising=False)
+    sys_text = _planner_system()
+    assert "受话判定" in sys_text and "addressed" in sys_text
+
+
+def test_planner_system_clarify_gated_by_env(monkeypatch):
+    monkeypatch.setenv("CLARIFY_ENABLED", "off")
+    assert "路由歧义澄清" not in _planner_system()
+    monkeypatch.setenv("CLARIFY_ENABLED", "on")
+    assert "路由歧义澄清" in _planner_system()
+
+
+def test_lone_named_object_is_addressed_before_it_is_clarified(monkeypatch):
+    """A place/name fragment must not be rejected by the earlier addressed rule."""
+    monkeypatch.setenv("CLARIFY_ENABLED", "on")
+    sys_text = _planner_system()
+    assert "整句只有一个名词" in sys_text
+    assert "仍是对助手说的" in sys_text
+    assert "addressed=true" in sys_text
+
+
+def test_mixed_negative_and_positive_command_is_still_addressed(monkeypatch):
+    """Negating one action must not reject the positive request in another clause."""
+    monkeypatch.setenv("CLARIFY_ENABLED", "on")
+    sys_text = _planner_system()
+    assert "另一个肯定请求" in sys_text
+    assert "必须 addressed=true" in sys_text
+    assert "否定只影响 steps" in sys_text
+
+
+def test_planner_system_mode_criteria_live_in_policy_skill(monkeypatch):
+    """M0b Full Migration 后：四模式判据（时效/常识/深度）唯一来源=policy skill
+    `freshness-and-depth`，中央 base 不得倒灌回判据文本；受话段仍恒附在 system。
+    （原契约「判据在受话段之前」由 skills 注入块先于上下文渲染承接，
+    见 test_skills 的 date 锚序断言；2026-07-12 mode-routing 设计 P0-3 的守护目标不变。）"""
+    monkeypatch.delenv("CLARIFY_ENABLED", raising=False)
+    sys_text = _planner_system()
+    assert "时效与深度" not in sys_text          # 判据不在中央（防倒灌）
+    assert "受话判定" in sys_text                # 受话段仍恒附
+    from orchestrator.cloud import skills as sk
+    pol = {d.name: d for d in sk.SkillStore().policies()}
+    assert "freshness-and-depth" in pol
+    assert "禁止凭你的记忆直答" in pol["freshness-and-depth"].knowledge
+
+
+# ── 祈使指令不接受 not_addressed（2026-07-27 真机：说了、没回、也没记）────────────
+
+def test_directive_prefixes_are_always_addressed():
+    """用户用祈使句直接对助手下指令——是不是在跟你说话不需要模型判断。"""
+    for t in ("记住，我女儿叫小满", "记一下我最喜欢吃辣", "帮我记住停车位在B2",
+              "别忘了我妈住杭州", "请记住我的口味", "那记着我不吃香菜",
+              "记得我下周要出差"):
+        assert P._is_directive_to_assistant(t), t
+
+
+def test_directive_guard_does_not_hijack_non_directives():
+    """须锚在句首：陈述里出现「记」字的不是指令，不能借此绕过拒识。"""
+    for t in ("我不记得了", "他记住了我的名字", "这事你还记不记得都行",
+              "我女儿叫小满", "今天天气不错", ""):
+        assert not P._is_directive_to_assistant(t), t
+
+
+# ── 受话边界的确定性一维：播报语域 + 语音来源 + 两轮空手 ⇒ 不受话（2026-09-11 真栈漏拒的四种形态）──
+
+def _chitchat_agent():
+    a = MockAgent("chitchat", ["chitchat.talk"])
+    a.manifest.capabilities[0].response_only = True
+    a.manifest.capabilities[0].require_confirm = False
+    return a
+
+
+_BROADCAST = "本台记者报道，项目建设已经进入第二阶段。"   # 续测漏拒原话（trace 5d068f03162c462d 同族）
+_NO_ACTION = '{"addressed":true,"steps":[]}'
+
+
+def test_voice_broadcast_register_with_no_action_twice_is_not_addressed():
+    """真栈形态 ①：模型两次 addressed=true、steps=[] → 旧行为落 chitchat 安慰一句；现在判不受话。"""
+    b, calls = _builder(_NO_ACTION)
+    ctx = PlanContext(session_id="t", prefs={"input_source": "ptt"})
+    plan = _build(b, _BROADCAST, [_chitchat_agent()], ctx=ctx)
+    assert plan.addressed is False
+    assert plan.steps == []
+    assert plan.plan_mode.endswith("_register_not_addressed")
+    assert plan.technical_failure is False
+    assert calls["n"] == 2          # 判据在两轮抽样**之后**才生效：模型拿得准就不该由规则替它说
+
+
+def test_voice_broadcast_register_with_parse_failure_twice_is_not_addressed_not_technical_failure():
+    """真栈形态 ②：两轮都没交出合法计划 → 旧行为兜底 + technical_failure（「换个说法再试」一句用户没说过的话）。"""
+    b, _ = _builder(["nope", "still nope"])
+    ctx = PlanContext(session_id="t", prefs={"input_source": "voice_followup"})
+    plan = _build(b, _BROADCAST, [_chitchat_agent()], ctx=ctx)
+    assert plan.addressed is False
+    assert plan.steps == []
+    assert plan.technical_failure is False
+
+
+def test_text_input_in_broadcast_register_keeps_todays_behaviour():
+    """反例 ①：文字输入是用户刻意打进来的——同一句、同样两轮空手，仍是今天的 chitchat 应答。"""
+    b, _ = _builder(_NO_ACTION)
+    plan = _build(b, _BROADCAST, [_chitchat_agent()])
+    assert plan.addressed is True
+    assert [s.intent for s in plan.steps] == ["chitchat.talk"]
+
+
+def test_voice_broadcast_register_with_real_steps_is_honoured():
+    """反例 ②：「据报道明天暴雨，帮我看看天气」——模型拆出了步，判据不动它。"""
+    raw = json.dumps({"addressed": True, "steps": [
+        {"id": "s1", "capability_ref": "cap_0001", "slots": {"city": "深圳"}, "depends_on": [], "slot_refs": {}}]})
+    agents = [MockAgent("info", ["info.weather"])]
+    b, _ = _builder(raw)
+    ctx = PlanContext(session_id="t", prefs={"input_source": "ptt"})
+    plan = _build(b, "据报道明天暴雨，帮我看看深圳的天气", agents, ctx=ctx)
+    assert plan.addressed is True
+    assert [s.intent for s in plan.steps] == ["info.weather"]
+
+
+def test_voice_passenger_talk_without_register_is_untouched():
+    """反例 ③：乘客句「他昨天跟我说那个项目黄了」没有播报语域——这条仍归模型（拿不准归模型，不归规则）。"""
+    b, _ = _builder(_NO_ACTION)
+    ctx = PlanContext(session_id="t", prefs={"input_source": "ptt"})
+    plan = _build(b, "他昨天跟我说那个项目黄了", [_chitchat_agent()], ctx=ctx)
+    assert plan.addressed is True
+    assert [s.intent for s in plan.steps] == ["chitchat.talk"]
+
+
+def test_is_voice_input_source_is_the_single_prefix_table():
+    assert P.is_voice_input_source("ptt") and P.is_voice_input_source("voice_followup")
+    assert not P.is_voice_input_source("") and not P.is_voice_input_source("text") and not P.is_voice_input_source(None)

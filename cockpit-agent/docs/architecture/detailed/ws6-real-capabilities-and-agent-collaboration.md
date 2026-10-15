@@ -1,0 +1,249 @@
+# WS6 · 真实能力对接 & Agent 协作 — 实现级细化
+
+> 依据：`phase1-implementation-plan.md` WS6、`cockpit-agent-architecture.md` §4、§11
+> 目标：把 mock 能力换成真实/沙箱能力（统一适配层范式 + 支付网关），并打通 multi-agent 协作（trip-planner 子规划者）。读者：各 Agent 开发、平台开发。
+> 设计时基线：各 Agent 仅有内置 mock，且不能互调。
+>
+> **当前实现（2026-06-20 复核）**：7 个 Agent（含 `info` 天气/预报/预警/指数/搜索/新闻/股票）
+> 已接统一 Provider 工厂，无凭证回退 mock；**导航=高德 / 天气=和风（JWT）/ 搜索=Bing /
+> 新闻=NewsAPI / 股票=Alpha Vantage 真实 Provider 已落地**（见 `docs/guides/provider-integration.md`、
+> `test/e2e_real_providers.py`）；trip-planner 经受控 AgentClient 协作跑通；
+> **§4 协作护栏已修复**（depth/stack 经 meta→contextvar 跨进程传递，护栏拒绝发审计 span）。
+> **车型手册已于 2026-09-03 接入 Xiaomi SU7 只读真实索引**；多车型向量库按规模/
+> badcase 触发，不再是关闭 mock 的前置条件。PaymentGateway 已于 2026-08-11 真实化接线（parking-payment
+> 走 Authorize/Capture 幂等重取时序，双渠道扫码收单 + 商户收银登记，§2 与
+> conventions §9.17）。
+
+---
+
+## 1. 外部适配层范式（统一所有"接真实"的方式）
+
+**问题**：直接在 Agent 里写死某家厂商 SDK → 难替换、难测试、难灰度。
+**范式**：Agent 只依赖**领域 Provider 接口**，厂商实现作为可插拔适配器；mock/real 经配置切换。
+
+```
+agents/<name>/
+├─ src/agent.py            # 业务逻辑，只调 Provider 接口
+├─ src/providers/
+│   ├─ base.py             # 领域接口，如 POIProvider
+│   ├─ mock.py             # MockPOIProvider（PoC / 离线 / 单测）
+│   └─ amap.py             # AmapPOIProvider（真实厂商适配，凭证经 env/secret）
+└─ src/providers/__init__.py  # build_provider()：按 env 选择 real/mock
+```
+
+```python
+# base.py
+class POIProvider:
+    async def search(self, keyword: str, near: GeoPoint, rating_min: float) -> list[POI]: ...
+    async def route(self, dest: str, origin: GeoPoint) -> Route: ...
+
+# __init__.py
+def build_poi_provider() -> POIProvider:
+    vendor = os.getenv("POI_VENDOR", "mock")
+    if vendor == "amap" and os.getenv("AMAP_KEY"):
+        return AmapPOIProvider(os.getenv("AMAP_KEY"))
+    return MockPOIProvider()
+```
+
+`agent.py` 改造：`self.poi = build_poi_provider()`，`_search` 调 `self.poi.search(...)`。**业务逻辑零改动即可切换厂商或回退 mock**（也保证无 key 时 PoC 仍可跑）。
+
+### 各 Agent 对接清单
+| Agent | Provider 接口 | 真实适配（示例） | 备注 |
+|---|---|---|---|
+| navigation | `POIProvider` | 高德/百度/HERE | 路况、充电桩同一接口扩展 |
+| media | `MediaProvider` | 内容平台 | 播放/搜索/收藏 |
+| info | `WeatherProvider`/`NewsProvider` | 气象/资讯源 | 多源聚合 |
+| food-ordering | `RestaurantProvider` + `PaymentGateway` | 到店点评/预订平台 | 支付走网关，见 §2 |
+| parking-payment | `ParkingProvider` + `PaymentGateway` | 停车平台 | 无感支付走网关 |
+| manual-rag | `KnowledgeRetriever` | 当前：车型手册只读索引；多车型目标：pgvector/Milvus | 见 §3 |
+| trip-planner | （无外部，靠协作） | — | 见 §4 |
+
+---
+
+## 2. 统一支付网关（Agent 不持凭证）
+
+**红线**：任何 Agent（尤其 third_party）都不接触支付密钥/账户凭证。支付经独立 `payment-gateway` 服务，Agent 只发起"支付请求"。
+
+> 2026-08-11 真实化改造：双渠道扫码收单（支付宝当面付 / 微信 Native）+ 商户收银登记
+> （`MERCHANT_HOSTED`）。完整裁决见
+> `docs/design/2026-08-11-payment-infrastructure-and-merchant-mcp.md`，契约细则见
+> `docs/conventions.md` §9.17。本节只保留时序真相。
+
+### proto（`proto/cockpit/payment/v1/payment.proto`）
+
+RPC 面：`Authorize`（本地建单，**不碰渠道**）/ `Capture`（确认后调渠道亮码）/ `Cancel` /
+`GetStatus` / `Refund`。**Capture 的语义是「确认后启动收款」而非「同步扣款」**——扫码
+支付里真正的扣款动作发生在用户手机上；Capture 返回 `qr_content`，订单落 `pending_pay`，
+`captured`（钱已到账）由网关轮询 worker 在渠道确认后推进。字段与状态机全集见 proto 本体
+与 conventions §9.17。
+
+### 支付时序（与 WS3 二次确认、WS8 权限联动）
+```
+Agent（第一趟，未确认）
+   └─► PaymentGateway.Authorize(idempotency_key)   # 本地创建待确认单，渠道零动作
+        └─► 返回 payment_id + confirm_prompt + confirm_token
+   Agent 返回 NEED_CONFIRM（用网关回传的 confirm_prompt 组话术；token 不出栈、不进 payload）
+   ── 用户确认（HMI/语音）──► 编排对挂起步注入 confirmed ──► Agent 第二趟
+   └─► Authorize(同 idempotency_key)               # 幂等重取：同单、同 confirm_token
+   └─► Capture(payment_id, confirm_token)          # 调渠道 precreate，返回二维码
+        └─► HMI 出 payment_qr 卡；worker 轮询查单 ──► captured ──► proactive 推「支付成功」
+merchant_hosted（商户 MCP 下单已含确认）：单次 Authorize(channel=MERCHANT_HOSTED,
+external_pay_url) 登记会话落 pending_pay；本地只做过期收口，订单状态以商户为准
+```
+- 幂等：`idempotency_key`（含 user+scene+订单要素，**刻意不含金额**——渠道参数取订单
+  快照，用户确认的金额=扣的金额）；`out_trade_no ≡ payment_id`，重连/重试不重复创建或扣款。
+- **confirm_token 经幂等重取传递，不经挂起 payload**（编排刻意不持久化 step.meta；
+  token 只活在 Agent 单次 handle() 栈内）。
+- 权限：`payment.invoke` 经 WS8 校验；网关执行层再校验一次；third_party 必须经网关且强制确认。
+- 凭证：支付渠道密钥只在 `payment-gateway` 服务（env/Secret 注入）；商户 MCP 会话 token
+  只在 mcp-bridge——两类凭证互不越界。
+
+---
+
+## 3. manual-rag 接真实车型手册索引
+
+> **2026-09-03 实现校准**：Xiaomi SU7 2024 用户手册已在生产 `434a046` 接入真实 Provider。
+> 单车型静态语料当前不建数据库：PDF 离线构建成 hash 绑定的只读 `.mrag` 图文包，在线用中文
+> n-gram BM25 + 确定性重排。多车型规模或真实 badcase 证明词法上限后再迁移
+> pgvector/Milvus；接口不变。
+
+```python
+class KnowledgeRetriever:
+    async def retrieve(self, query: str, vehicle_model: str, top_k: int = 4) -> list[Chunk]: ...
+```
+
+- 离线：`scripts/build_manual_index.py` 校验输入 PDF SHA，按物理页和 outline 构建文本 chunk，
+  再按受控视觉 manifest 绑定图标俗称、caption 与图片 blob，产 deterministic `.mrag`；
+  source/content/chunk/visual/blob hash、车型、版本和页数均进入 metadata。
+- 在线：`ManualIndexRetriever` 启动期完整校验并对账 tracked 手册 catalog 指纹 → 中文双字 n-gram BM25 → 受控同义词、章节、
+  短语与 IDF 覆盖率重排；图标只按受控 caption/alias 精确匹配，未知描述不做近似猜测。
+  显著 Latin/多词产品名缺失、低相关、错车型一律零命中。
+- 出处：`Chunk` 带 `source_type=manual`、章节、PDF 物理页、车型；`ui_card` 同时保留结构化
+  citation、source/content hash、手册版本和最多两张校验过的 JPEG/PNG 图片，完整性通过后才盖
+  `_prov.mode=real`；图片不进 LLM prompt。
+- 生成：沿用“只依据资料作答”，并新增数值接地闸；真实手册答案中带单位或小数的数值
+  无法在本轮引用片段核对时整段弃权。
+- 资产：源 PDF 和索引正文不进 Git；`models/manual_rag/` 是 ignored 私有运行资产，生产
+  cloud release 的 `source.tar` 只来自目标 commit，不携带 ignored 包；索引进入 shared-model
+  SHA 清单，经单独 bootstrap 安装到远端后只读挂载给 `manual-rag-agent`。缺索引、错车型或
+  任一文本/视觉 hash 损坏时，显式 real 配置 fail-fast，不回 mock。
+- 向量化触发：车型数大于 1、实际改写 badcase 无法由受控扩展覆盖，或文件索引超出时延/
+  内存预算；迁移时用 `test/eval_corpus/manual_rag_retrieval.yaml` 做 A/B，不改 Agent 契约。
+
+---
+
+## 4. Multi-Agent 协作（trip-planner 子规划者）
+
+trip-planner 需要导航(POI)、天气、充电、(可选)酒店等能力——这是典型的 Agent 间协作。
+
+### 4.1 协作模式决策
+| 模式 | 机制 | 取舍 |
+|---|---|---|
+| A. **Agent 经 SDK 直接调用其他 Agent** ⭐ | SDK 提供 `AgentClient`：经 Registry 解析 → `Agent.Execute` | 直接、低时延；需防环、防越权、限深度 |
+| B. Agent 把子任务交回 Planner 再编排 | Agent 返回"需协作"信号，Planner 展开 | 集中可控，但多一跳、Planner 复杂度上升 |
+
+**决策：A 为主**（SDK 内置受控 `AgentClient`），并施加护栏；超出护栏（如需要复杂再规划）才回退 B。
+
+### 4.2 SDK 受控 AgentClient（`agents/_sdk/agent_client.py`）
+```python
+class AgentClient:
+    """供 Agent 在 handle() 内调用其他 Agent。带护栏，防滥用。"""
+    def __init__(self, caller_manifest, auth, call_depth: int, registry):
+        ...
+    async def call(self, intent: str, slots: dict, ctx) -> AgentResult:
+        # 护栏 1：调用深度上限（防无限链），depth > MAX_DEPTH(=2) -> 拒绝
+        # 护栏 2：环检测（caller 在调用栈中再次出现 -> 拒绝）
+        # 护栏 3：权限不放大——被调 Agent 的有效权限 ≤ 调用方（WS8 引擎复核）
+        # 护栏 4：超时（取被调 manifest.latency_budget_ms）
+        target = await self.registry.resolve(intent=intent, top_k=1)
+        return await self._execute(target, intent, slots, ctx, depth=self.call_depth + 1)
+```
+- `BaseAgent` 注入 `self.agents: AgentClient`（带当前调用上下文：auth、call_depth、调用栈）。
+- 调用栈与 depth 通过 `ExecuteRequest.meta`（`call_stack`、`call_depth`）透传，跨进程可见。
+
+### 4.3 trip-planner 改造（示例）
+
+> ⚠️ **真实 API 为 `call(agent_id, intent, slots, ctx)`（需显式 agent_id）**，下例已按现状修正；
+> 实际代码见 `agents/trip_planner/src/agent.py`。
+
+```python
+async def handle(self, intent, ctx, meta):
+    dest = intent.slots.get("destination")
+    if not dest: return need_slot(...)
+    # 并行协作 + 部分失败降级（gather return_exceptions）
+    results = await asyncio.gather(
+        self.agents.call("navigation", "navigation.search_poi",
+                         {"keyword": f"{dest} 景点", "rating_min": "4.0"}, ctx),
+        self.agents.call("info", "info.weather", {"city": dest}, ctx),  # info 已建、port_map 已含
+        return_exceptions=True,
+    )
+    plan = await self.llm.complete(self._compose_prompt(dest, results, intent))
+    return AgentResult(speech=plan, ui_card={"type": "trip_plan", ...})
+```
+> 与 WS3 关系：Planner 路由到 trip-planner，trip-planner 内部再协作下层 Agent——形成"Planner→子规划者→工具 Agent"层级，护栏确保不失控。
+> 注：当前 `trip_planner` 实调 `navigation`×2（景点+充电桩）；`info.weather` 协作现已可接（`info` 已建、`agent_client.py:port_map` 已含 info），是自然增量。
+
+### 4.4 落地现状与缺口（2026-06-20 复核 + 修复）
+
+trip-planner 协作链路**跑通**（并行 + `gather(return_exceptions=True)` 降级）。
+
+**已修复项**（2026-06-20）：
+1. ✅ **跨进程深度/环护栏已生效**：`server.py:Execute` 从 `request.meta` 读 `call_depth/call_stack`，经 `_set_current_meta` contextvar 传入 `BaseAgent.agents` 属性，构造正确深度的 `AgentClient`。`MAX_DEPTH=2` 和环检测跨进程生效。`_set_current_meta` 在 `finally` 中重置（防泄漏）。
+2. ✅ **审计事件**：护栏拒绝（深度/环）发 `agent_client.guardrail` span，进 collector→Dashboard trace 视图。
+3. ✅ **测试已升级**：`test/sdk/test_agent_client.py` 从假桩 `_AgentClientShim` 升级为直接测真实 `AgentClient` + ContextVar 机制（11 条：深度/环/port_map/meta 透传/fork），修复了"绿测是假信心"的问题。
+
+**剩余待做**：
+3. **权限不放大（护栏3）未实现**：`call()` 只有深度+环+超时，无权限校验（设计 §4.2 护栏3）。落地：被调有效权限 ≤ 调用方，granted_permissions 经 meta 透传，被调侧或 call 前经 `security/` 复核（呼应 WS8）。
+4. **超时按 manifest**：从目标 `manifest.latency_budget_ms` 取（依赖 registry 解析拿到 manifest）。当前仍为固定 10s。
+5. **endpoint 动态解析**：当前走硬编码 `port_map` / `<AGENT_ID>_ENDPOINT`（`_resolve_endpoint`），未经 registry 动态解析。多实例/容器内需配 ENDPOINT env。
+
+**实现与设计的偏差（以实现为准）**
+
+| 设计（§4.2/4.3） | 当前实现 | 说明 |
+|---|---|---|
+| `call(intent, slots, ctx)`，经 `registry.resolve` 找目标 | `call(agent_id, intent, slots, ctx, timeout)`，endpoint 走硬编码 port_map | 需显式传 agent_id；未经 registry 动态解析 |
+| 注入 `auth`、`registry` | `AgentClient(caller, call_depth, call_stack, timeout)`，无 auth | 见剩余待做③权限 |
+
+---
+
+## 5. 边界与失败处理
+
+| 情况 | 处理 |
+|---|---|
+| 厂商 API 失败/超时 | Provider 内重试/降级；Agent 返回部分结果或 fallback 话术 |
+| 无厂商 key | `build_provider` 回退 mock，PoC 不阻断 |
+| Agent 协作成环 | AgentClient 环检测 + 深度上限，拒绝并记审计 |
+| 协作权限放大 | 被调权限 ≤ 调用方（WS8 复核） |
+| 支付重复 | `idempotency_key` 去重 + 确认态保护（WS4/WS3） |
+| 协作部分失败 | `asyncio.gather(return_exceptions=True)`，缺项降级（如无天气仍给行程） |
+
+---
+
+## 6. 测试点（DoD）
+
+**单元**：
+- `build_provider` 按 env 选择 real/mock；无 key 回退 mock。
+- AgentClient 护栏：深度超限拒绝、环检测拒绝、权限放大拒绝。
+- 支付幂等：同 idempotency_key 不重复创建/扣款。
+
+**集成（需 registry+agents 起）**：
+- navigation 切到真实/沙箱 POI，黄金用例通过；回退 mock 也通过。
+- food/parking：Authorize→NEED_CONFIRM→Capture 全流程；未确认不扣款。
+- manual-rag：完整 36 题 corpus 逐题校验单域落点、正文/PDF 页/图片或正确零命中、approved
+  real provenance 与零 action；低相关/错车型零命中，数值声明可核对。
+- trip-planner：联动 navigation+info（≥2 Agent），部分失败仍产出行程。
+
+**契约不回归**：新增/切换 Provider 不改 Agent 对外契约；新增协作不改编排核心。
+
+---
+
+## 7. 任务清单（建议拆 PR）
+
+1. Provider 范式落地：navigation 先行（`POIProvider` + mock/amap + `build_provider`）作为模板。
+2. 其余 core/eco Agent 按模板接 Provider（可并行多人）。
+3. `payment-gateway` 服务 + `payment.proto`；food/parking 接入（Authorize/Capture + 幂等）。
+4. ✅ manual-rag 接 Xiaomi SU7 真实手册只读索引（离线建库脚本 + 在线检索 + 出处，
+   2026-09-03）；pgvector/Milvus 留作规模触发后的可替换实现。
+5. SDK `AgentClient` + 护栏（深度/环/权限/超时）+ meta 透传调用栈。
+6. trip-planner 改造为子规划者（并行协作 + 降级）。
+7. 各 Agent 黄金用例（real + mock 双跑）+ 协作集成测试。

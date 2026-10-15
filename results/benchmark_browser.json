@@ -1,0 +1,25 @@
+{
+  "passed": true,
+  "cases": 250,
+  "repeats": 3,
+  "checks": [
+    {
+      "width": 1440,
+      "accuracies": "matched saved trials",
+      "category_comparisons": 10,
+      "visible_groups": 2,
+      "offline_hidden": true,
+      "overflow": false
+    },
+    {
+      "width": 390,
+      "accuracies": "matched saved trials",
+      "category_comparisons": 10,
+      "visible_groups": 2,
+      "offline_hidden": true,
+      "overflow": false
+    }
+  ],
+  "page_errors": [],
+  "responses_mocked": false
+}

@@ -1,0 +1,10 @@
+{
+  "markdown_links": "passed",
+  "main_source_hashes": "matched",
+  "main_kimi_exit": 0,
+  "qa_server_stopped": true,
+  "pdf_pages": 8,
+  "unit_integration_passed": 55,
+  "browser_checks_passed": 11,
+  "all_artifacts_under": "<project-root>"
+}

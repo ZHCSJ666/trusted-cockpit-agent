@@ -1,0 +1,1114 @@
+"""M4 S2S 单测（P1）——协议 / provider 映射 / L-Session 状态机 / 回灌，全部离线可跑。
+
+重点覆盖 RFC 里「混为一谈必出双播/幽灵执行」的三层打断语义（§4.3），以及回灌的
+两条易漏项：escalated 轮不重复写 memory、被打断轮只存已播增量（★1 实测）。
+
+含源码级铁律断言（同 M2 Verifier / M3 治理器的做法）：会话层不得出现领域字面量、
+单工具契约不得被偷偷扩成能力清单。
+"""
+from __future__ import annotations
+
+import asyncio
+import types
+import inspect
+import json
+import os
+import re
+from pathlib import Path
+
+import pytest
+
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from scripts.e2e_contract import assert_architecture_guard  # noqa: E402
+from s2s import protocol as P  # noqa: E402
+from s2s.provider import (  # noqa: E402
+    EV_ANSWER_DELTA, EV_AUDIO_DELTA, EV_ERROR, EV_TOOL_CALL, EV_TRANSCRIPT,
+    EV_TURN_DONE, EV_TURN_STARTED, MockS2SProvider, QwenOmniRealtimeProvider,
+    S2SEvent, build_s2s_provider,
+)
+from s2s.reflux import Reflux, build_context_summary, detect_false_promise  # noqa: E402
+from s2s.session import (  # noqa: E402
+    S2SSession, SessionState, T_ABANDONED, T_CANCELLING, T_ESCALATED, Turn,
+)
+
+
+# ─────────────────────────── protocol ───────────────────────────
+
+def test_escalate_is_single_tool_with_utterance_slot():
+    t = P.escalate_tool()
+    assert t["name"] == "escalate"
+    assert list(t["parameters"]["properties"]) == ["utterance"]
+    assert t["parameters"]["required"] == ["utterance"]
+
+
+def test_escalate_description_is_env_tunable_for_domain_rollout(monkeypatch):
+    """§6.2 域灰度 = 收放 description 的边界，不是运行时白名单。"""
+    base = P.escalate_tool()["description"]
+    monkeypatch.setenv("S2S_ESCALATE_DESC", "只有车控才移交")
+    assert P.escalate_tool()["description"] == "只有车控才移交"
+    monkeypatch.delenv("S2S_ESCALATE_DESC")
+    assert P.escalate_tool()["description"] == base
+
+
+def test_turn_ids_are_gateway_generated_and_unique():
+    ids = {P.new_turn_id() for _ in range(200)}
+    assert len(ids) == 200
+
+
+# ─────────────────────── provider 事件映射 ───────────────────────
+
+def _qwen():
+    return QwenOmniRealtimeProvider("k", "wss://x", "qwen3.5-omni-flash-realtime")
+
+
+@pytest.mark.parametrize("raw,kind,check", [
+    ({"type": "response.created", "response": {"id": "r1"}}, EV_TURN_STARTED,
+     lambda e: e.response_id == "r1"),
+    ({"type": "conversation.item.input_audio_transcription.delta", "delta": "今天"},
+     EV_TRANSCRIPT, lambda e: e.text == "今天" and not e.final),
+    ({"type": "conversation.item.input_audio_transcription.completed",
+      "transcript": "今天天气"}, EV_TRANSCRIPT,
+     lambda e: e.text == "今天天气" and e.final),
+    ({"type": "response.audio_transcript.delta", "delta": "好的"}, EV_ANSWER_DELTA,
+     lambda e: e.text == "好的"),
+    ({"type": "response.function_call_arguments.done", "name": "escalate",
+      "call_id": "c1", "arguments": '{"utterance":"开空调"}'}, EV_TOOL_CALL,
+     lambda e: e.name == "escalate" and e.call_id == "c1"),
+    ({"type": "response.done", "response": {"status": "cancelled"}}, EV_TURN_DONE,
+     lambda e: e.reason == "cancelled"),
+    ({"type": "error", "error": {"message": "boom"}}, EV_ERROR,
+     lambda e: e.reason == "provider"),
+])
+def test_provider_maps_vendor_events_to_normalized(raw, kind, check):
+    evs = _qwen()._map(raw)
+    assert len(evs) == 1 and evs[0].kind == kind
+    assert check(evs[0])
+
+
+def test_provider_decodes_audio_delta_base64():
+    import base64
+    pcm = b"\x01\x02\x03\x04"
+    evs = _qwen()._map({"type": "response.audio.delta",
+                        "delta": base64.b64encode(pcm).decode()})
+    assert evs[0].kind == EV_AUDIO_DELTA and evs[0].pcm == pcm
+
+
+def test_provider_ignores_function_call_arguments_delta():
+    """流式 args 增量不带 name → 不产归一化事件（tool_call 只在 .done 出，★2 实测）。"""
+    assert _qwen()._map({"type": "response.function_call_arguments.delta",
+                         "call_id": "c1", "delta": '{"utt'}) == []
+
+
+def test_provider_maps_unknown_event_to_nothing():
+    assert _qwen()._map({"type": "response.content_part.added"}) == []
+
+
+# ─────────────────────────── 工厂 ───────────────────────────
+
+def test_factory_rejects_models_that_silently_drop_tools(monkeypatch):
+    """P0 探针 ★T：这些型号静默丢弃 tools → fail-fast，不静默降级。"""
+    monkeypatch.setenv("LLM_EMBED_API_KEY", "sk-test")
+    for bad in ("qwen3-omni-flash-realtime", "qwen-omni-turbo-realtime",
+                "QWEN3-OMNI-REALTIME"):
+        with pytest.raises(ValueError, match="tools"):
+            build_s2s_provider("dashscope", bad)
+
+
+def test_factory_off_and_missing_key_return_none(monkeypatch):
+    assert build_s2s_provider("off") is None
+    monkeypatch.delenv("S2S_API_KEY", raising=False)
+    monkeypatch.delenv("DASHSCOPE_ASR_KEY", raising=False)
+    monkeypatch.delenv("LLM_EMBED_API_KEY", raising=False)
+    assert build_s2s_provider("dashscope") is None
+
+
+def test_factory_mock_available_without_key(monkeypatch):
+    monkeypatch.delenv("LLM_EMBED_API_KEY", raising=False)
+    assert isinstance(build_s2s_provider("mock"), MockS2SProvider)
+
+
+def test_factory_default_model_supports_tools(monkeypatch):
+    monkeypatch.setenv("LLM_EMBED_API_KEY", "sk-test")
+    p = build_s2s_provider("dashscope")
+    assert isinstance(p, QwenOmniRealtimeProvider)
+    assert p.model == "qwen3.5-omni-flash-realtime"
+
+
+def test_provider_clamps_vad_silence():
+    assert _qwen().vad_silence_ms == 800
+    assert QwenOmniRealtimeProvider("k", "w", "m", vad_silence_ms=99).vad_silence_ms == 300
+    assert QwenOmniRealtimeProvider("k", "w", "m", vad_silence_ms=9999).vad_silence_ms == 2000
+
+
+# ───────────────────── L-Session 测试脚手架 ─────────────────────
+
+class Harness:
+    """收集下行帧的会话夹具（provider 用 MockS2SProvider 手动喂事件）。"""
+
+    def __init__(self, **kw):
+        self.json_out: list[dict] = []
+        self.audio_out: list[bytes] = []
+        self.reflux_calls: list[Turn] = []
+        self.providers: list[MockS2SProvider] = []
+        self.fail_opens = 0
+        self.open_summaries: list[str] = []
+
+        def factory():
+            p = MockS2SProvider()
+            if self.fail_opens > 0:
+                self.fail_opens -= 1
+
+                async def boom(**_kw):
+                    raise RuntimeError("open failed")
+                p.open = boom
+            else:
+                orig = p.open
+
+                async def rec(**kwargs):
+                    self.open_summaries.append(kwargs.get("context_summary", ""))
+                    await orig(**kwargs)
+                p.open = rec
+            self.providers.append(p)
+            return p
+
+        async def emit_json(o):
+            self.json_out.append(o)
+
+        async def emit_audio(b):
+            self.audio_out.append(b)
+
+        async def reflux(t):
+            self.reflux_calls.append(t)
+
+        kw.setdefault("reconnect_backoff", (0.0, 0.0, 0.0))
+        self.sess = S2SSession(provider_factory=factory, emit_json=emit_json,
+                               emit_audio=emit_audio, reflux=reflux,
+                               session_id="s-test", **kw)
+
+    @property
+    def prov(self) -> MockS2SProvider:
+        return self.providers[-1]
+
+    def types(self) -> list[str]:
+        return [m["type"] for m in self.json_out]
+
+    def of(self, t: str) -> list[dict]:
+        return [m for m in self.json_out if m["type"] == t]
+
+    async def pump_once(self, *events: S2SEvent):
+        """直接喂 provider 归一化事件并等事件泵消费。"""
+        for e in events:
+            await self.prov.push(e)
+        await asyncio.sleep(0)
+        for _ in range(6):
+            if self.prov._q.empty():
+                break
+            await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+
+async def _normal_turn(h: Harness, answer="嗯，我在呢。"):
+    await h.pump_once(
+        S2SEvent(kind=EV_TURN_STARTED, response_id="r1"),
+        S2SEvent(kind=EV_TRANSCRIPT, text="你好呀", final=True),
+        S2SEvent(kind=EV_ANSWER_DELTA, text=answer),
+        S2SEvent(kind=EV_AUDIO_DELTA, pcm=b"\x00\x01" * 80),
+        S2SEvent(kind=EV_TURN_DONE, reason="completed"))
+
+
+# ────────────────────── L-Session：正常轮 ──────────────────────
+
+@pytest.mark.asyncio
+async def test_normal_turn_emits_full_downstream_sequence():
+    h = Harness()
+    await h.sess.start()
+    await _normal_turn(h)
+    assert h.types() == [
+        P.DOWN_SESSION_STATE, P.DOWN_TRANSCRIPT, P.DOWN_ANSWER_DELTA,
+        P.DOWN_AUDIO_META, P.DOWN_TURN_END,
+    ]
+    assert h.of(P.DOWN_TURN_END)[0]["reason"] == P.END_COMPLETE
+    assert h.audio_out == [b"\x00\x01" * 80]
+    assert len(h.reflux_calls) == 1
+    t = h.reflux_calls[0]
+    assert t.transcript == "你好呀" and t.answer == "嗯，我在呢。"
+    await h.sess.close()
+
+
+@pytest.mark.asyncio
+async def test_direct_session_without_reflux_has_no_persistence_callback():
+    json_out: list[dict] = []
+
+    async def emit_json(value):
+        json_out.append(value)
+
+    async def emit_audio(_value):
+        return None
+
+    session = S2SSession(
+        provider_factory=MockS2SProvider,
+        emit_json=emit_json,
+        emit_audio=emit_audio,
+        session_id="direct-resilience-probe",
+        max_turns=99,
+    )
+    assert session._reflux is None
+
+    turn = Turn(
+        turn_id="turn-1",
+        transcript="probe transcript",
+        answer="probe answer",
+    )
+    await session._end_turn(turn, P.END_COMPLETE)
+
+    assert json_out == [{
+        "type": P.DOWN_TURN_END,
+        "turn_id": "turn-1",
+        "reason": P.END_COMPLETE,
+    }]
+
+
+@pytest.mark.asyncio
+async def test_audio_meta_carries_provider_sample_rate_once():
+    h = Harness()
+    await h.sess.start()
+    await h.pump_once(S2SEvent(kind=EV_TURN_STARTED),
+                      S2SEvent(kind=EV_AUDIO_DELTA, pcm=b"aa"),
+                      S2SEvent(kind=EV_AUDIO_DELTA, pcm=b"bb"))
+    metas = h.of(P.DOWN_AUDIO_META)
+    assert len(metas) == 1 and metas[0]["sample_rate"] == 24000
+    assert h.audio_out == [b"aa", b"bb"]
+    await h.sess.close()
+
+
+@pytest.mark.asyncio
+async def test_turn_id_is_stable_within_turn_and_new_across_turns():
+    h = Harness()
+    await h.sess.start()
+    await _normal_turn(h)
+    first = {m.get("turn_id") for m in h.json_out if "turn_id" in m}
+    assert len(first) == 1
+    await _normal_turn(h)
+    allids = {m.get("turn_id") for m in h.json_out if "turn_id" in m}
+    assert len(allids) == 2
+    await h.sess.close()
+
+
+@pytest.mark.asyncio
+async def test_transcript_before_turn_started_still_opens_turn():
+    """实测两种事件序都出现过（转写可能早于 response.created）→ 谁先来谁开 turn。"""
+    h = Harness()
+    await h.sess.start()
+    await h.pump_once(S2SEvent(kind=EV_TRANSCRIPT, text="嗨", final=False))
+    assert h.of(P.DOWN_TRANSCRIPT)[0]["turn_id"]
+    await h.sess.close()
+
+
+# ─────────────── L-Session：①听感打断（残包丢弃）───────────────
+
+@pytest.mark.asyncio
+async def test_barge_in_cancels_provider_and_ends_turn():
+    h = Harness()
+    await h.sess.start()
+    await h.pump_once(S2SEvent(kind=EV_TURN_STARTED),
+                      S2SEvent(kind=EV_ANSWER_DELTA, text="好的，"),
+                      S2SEvent(kind=EV_AUDIO_DELTA, pcm=b"x" * 10))
+    await h.sess.barge_in()
+    assert h.prov.cancels == 1
+    assert h.of(P.DOWN_TURN_END)[-1]["reason"] == P.END_CANCELLED
+    assert h.sess.turn.status == T_CANCELLING
+    await h.sess.close()
+
+
+@pytest.mark.asyncio
+async def test_barge_in_discards_residual_audio_and_text():
+    """★1：cancel 在途时 delta 可能已在飞 → 本侧必须丢，否则打断后残包续播。"""
+    h = Harness()
+    await h.sess.start()
+    await h.pump_once(S2SEvent(kind=EV_TURN_STARTED),
+                      S2SEvent(kind=EV_ANSWER_DELTA, text="好的，"),
+                      S2SEvent(kind=EV_AUDIO_DELTA, pcm=b"a" * 4))
+    await h.sess.barge_in()
+    n_audio, n_delta = len(h.audio_out), len(h.of(P.DOWN_ANSWER_DELTA))
+    await h.pump_once(S2SEvent(kind=EV_ANSWER_DELTA, text="残余文本"),
+                      S2SEvent(kind=EV_AUDIO_DELTA, pcm=b"b" * 4),
+                      S2SEvent(kind=EV_TURN_DONE, reason="cancelled"))
+    assert len(h.audio_out) == n_audio, "残包音频必须丢弃"
+    assert len(h.of(P.DOWN_ANSWER_DELTA)) == n_delta, "残余文本必须丢弃"
+    assert len(h.of(P.DOWN_TURN_END)) == 1, "turn 只收束一次（幂等）"
+    await h.sess.close()
+
+
+@pytest.mark.asyncio
+async def test_barge_in_marks_truncated_so_reflux_stores_only_played_text():
+    """被打断轮回灌的 answer 只含打断前已播增量（provider 全文≠用户听到的）。"""
+    h = Harness()
+    await h.sess.start()
+    await h.pump_once(S2SEvent(kind=EV_TURN_STARTED),
+                      S2SEvent(kind=EV_ANSWER_DELTA, text="好的，我来讲"))
+    await h.sess.barge_in()
+    t = h.reflux_calls[-1]
+    assert t.truncated is True
+    assert t.answer == "好的，我来讲"
+    await h.sess.close()
+
+
+@pytest.mark.asyncio
+async def test_barge_in_with_no_active_turn_is_noop():
+    h = Harness()
+    await h.sess.start()
+    await h.sess.barge_in()
+    assert h.prov.cancels == 0 and not h.of(P.DOWN_TURN_END)
+    await h.sess.close()
+
+
+# ────────── L-Session：逃逸 + ③工具调用中打断 ──────────
+
+@pytest.mark.asyncio
+async def test_escalate_emits_escalated_then_end_and_does_not_execute():
+    h = Harness()
+    await h.sess.start()
+    await h.pump_once(
+        S2SEvent(kind=EV_TURN_STARTED),
+        S2SEvent(kind=EV_TRANSCRIPT, text="把空调调到24度", final=True),
+        S2SEvent(kind=EV_TOOL_CALL, name="escalate", call_id="c1",
+                 args=json.dumps({"utterance": "把空调调到24度"}, ensure_ascii=False)))
+    esc = h.of(P.DOWN_ESCALATED)
+    assert len(esc) == 1 and esc[0]["utterance"] == "把空调调到24度"
+    assert h.of(P.DOWN_TURN_END)[-1]["reason"] == P.END_ESCALATED
+    assert not h.audio_out, "逃逸轮网关不产音频（执行与播报全在主链）"
+    assert h.sess.turn.status == T_ESCALATED
+    await h.sess.close()
+
+
+@pytest.mark.asyncio
+async def test_escalate_with_broken_args_falls_back_to_transcript():
+    """槽位坏了也别丢这一轮——utterance 本就是「原话转述」。"""
+    h = Harness()
+    await h.sess.start()
+    await h.pump_once(S2SEvent(kind=EV_TURN_STARTED),
+                      S2SEvent(kind=EV_TRANSCRIPT, text="导航去公司", final=True),
+                      S2SEvent(kind=EV_TOOL_CALL, name="escalate", call_id="c1",
+                               args="{not json"))
+    assert h.of(P.DOWN_ESCALATED)[0]["utterance"] == "导航去公司"
+    await h.sess.close()
+
+
+# ────── 评审四轮 R4-06：移交出去的请求是原话，模型重述只作解读 ──────
+# 修前 `_on_tool_call` 优先用工具参数里的 `utterance`：转写「不要开车窗，只解释怎么开」+ 参数「打开车窗」⇒ 主链收到「打开车窗」，
+# engine 还把它盖成 `safety_origin_text`。限制从被传递的请求里消失，执行闸看到的是模型改写过的请求。
+
+_REWRITE = json.dumps({"utterance": "打开车窗"}, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_escalation_hands_over_the_transcript_not_the_model_rewrite():
+    h = Harness()
+    await h.sess.start()
+    await h.pump_once(S2SEvent(kind=EV_TURN_STARTED),
+                      S2SEvent(kind=EV_TRANSCRIPT, text="不要开车窗，只解释怎么开", final=True),
+                      S2SEvent(kind=EV_TOOL_CALL, name="escalate", call_id="c1", args=_REWRITE))
+    esc = h.of(P.DOWN_ESCALATED)
+    assert len(esc) == 1
+    assert esc[0]["utterance"] == "不要开车窗，只解释怎么开", "请求 = 原话（旧客户端原样 send 这个键）"
+    assert esc[0]["transcript"] == "不要开车窗，只解释怎么开"
+    assert esc[0]["interpretation"] == "打开车窗", "模型的重述只作解读留痕"
+    assert h.sess.turn.utterance == "不要开车窗，只解释怎么开"
+    await h.sess.close()
+
+
+@pytest.mark.asyncio
+async def test_escalation_waits_for_a_late_final_transcript():
+    """工具调用可能早于转写定稿（两种事件序都实测过）：等定稿再移交，partial 不算。"""
+    h = Harness()
+    await h.sess.start()
+    await h.pump_once(S2SEvent(kind=EV_TURN_STARTED),
+                      S2SEvent(kind=EV_TRANSCRIPT, text="只解释", final=False),
+                      S2SEvent(kind=EV_TOOL_CALL, name="escalate", call_id="c1", args=_REWRITE))
+    assert not h.of(P.DOWN_ESCALATED), "转写没定稿不移交，更不拿模型重述顶上"
+    assert not h.of(P.DOWN_TURN_END)
+    await h.pump_once(S2SEvent(kind=EV_TRANSCRIPT, text="只解释一下车窗怎么开", final=True))
+    esc = h.of(P.DOWN_ESCALATED)
+    assert [e["utterance"] for e in esc] == ["只解释一下车窗怎么开"]
+    assert h.of(P.DOWN_TURN_END)[-1]["reason"] == P.END_ESCALATED
+    assert h.sess.turn.escalate_call_id == "c1"
+    await h.sess.close()
+
+
+@pytest.mark.asyncio
+async def test_escalation_without_a_transcript_ends_honestly_and_never_hands_over_the_rewrite():
+    h = Harness(escalate_transcript_wait_s=0.05)
+    await h.sess.start()
+    await h.pump_once(S2SEvent(kind=EV_TURN_STARTED),
+                      S2SEvent(kind=EV_TOOL_CALL, name="escalate", call_id="c1", args=_REWRITE))
+    await asyncio.sleep(0.12)
+    assert not h.of(P.DOWN_ESCALATED)
+    end = h.of(P.DOWN_TURN_END)
+    assert len(end) == 1 and end[0]["reason"] == P.END_ERROR
+    assert end[0]["detail"] == "transcript_unavailable"
+    await h.sess.close()
+
+
+@pytest.mark.asyncio
+async def test_provider_done_during_the_wait_does_not_end_the_turn():
+    """provider 在 function call 之后照常发 response.done：等转写期间它不许把这一轮收成 complete。"""
+    h = Harness()
+    await h.sess.start()
+    await h.pump_once(S2SEvent(kind=EV_TURN_STARTED),
+                      S2SEvent(kind=EV_TOOL_CALL, name="escalate", call_id="c1", args=_REWRITE),
+                      S2SEvent(kind=EV_TURN_DONE, reason="completed"))
+    assert not h.of(P.DOWN_TURN_END)
+    await h.pump_once(S2SEvent(kind=EV_TRANSCRIPT, text="车窗怎么开", final=True))
+    assert [e["utterance"] for e in h.of(P.DOWN_ESCALATED)] == ["车窗怎么开"]
+    assert [e["reason"] for e in h.of(P.DOWN_TURN_END)] == [P.END_ESCALATED]
+    await h.sess.close()
+
+
+@pytest.mark.asyncio
+async def test_output_after_the_tool_call_is_dropped_while_waiting():
+    """修前 tool call 一到就是 escalated，之后的增量全丢；等转写期间照旧不播。"""
+    h = Harness()
+    await h.sess.start()
+    await h.pump_once(S2SEvent(kind=EV_TURN_STARTED),
+                      S2SEvent(kind=EV_TOOL_CALL, name="escalate", call_id="c1", args=_REWRITE),
+                      S2SEvent(kind=EV_ANSWER_DELTA, text="好的，已为您打开"),
+                      S2SEvent(kind=EV_AUDIO_DELTA, pcm=b"a" * 8))
+    assert not h.of(P.DOWN_ANSWER_DELTA) and not h.audio_out
+    await h.sess.close()
+
+
+@pytest.mark.asyncio
+async def test_barge_in_during_the_wait_drops_the_escalation():
+    h = Harness()
+    await h.sess.start()
+    await h.pump_once(S2SEvent(kind=EV_TURN_STARTED),
+                      S2SEvent(kind=EV_TOOL_CALL, name="escalate", call_id="c1", args=_REWRITE))
+    await h.sess.barge_in()
+    await h.pump_once(S2SEvent(kind=EV_TRANSCRIPT, text="打开车窗吧", final=True))
+    assert not h.of(P.DOWN_ESCALATED), "被打断的那一轮不再移交"
+    assert h.of(P.DOWN_TURN_END)[0]["reason"] == P.END_CANCELLED
+    await h.sess.close()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_during_the_wait_drops_the_escalation():
+    h = Harness(escalate_transcript_wait_s=5.0)
+    await h.sess.start()
+    await h.pump_once(S2SEvent(kind=EV_TURN_STARTED),
+                      S2SEvent(kind=EV_TOOL_CALL, name="escalate", call_id="c1", args=_REWRITE))
+    waiting = h.sess.turn
+    await h.prov.close()             # 事件流结束 → 重连：在途的这一轮诚实收束
+    await asyncio.sleep(0.05)
+    assert not h.of(P.DOWN_ESCALATED)
+    assert waiting.end_reason == P.END_CANCELLED and not waiting.pending_call_id
+    await h.sess.close()
+
+
+@pytest.mark.asyncio
+async def test_unknown_tool_name_is_not_treated_as_escalate():
+    """单工具契约外的调用=协议漂移，诚实忽略不臆测。"""
+    h = Harness()
+    await h.sess.start()
+    await h.pump_once(S2SEvent(kind=EV_TURN_STARTED),
+                      S2SEvent(kind=EV_TOOL_CALL, name="set_hvac", call_id="c9",
+                               args='{"temp":24}'))
+    assert not h.of(P.DOWN_ESCALATED)
+    await h.sess.close()
+
+
+@pytest.mark.asyncio
+async def test_escalated_result_injects_context_without_triggering_speech():
+    """§5.2/R1：回注只为上下文连续；provider 侧不 create response 故不双播。"""
+    h = Harness()
+    await h.sess.start()
+    await h.pump_once(S2SEvent(kind=EV_TURN_STARTED),
+                      S2SEvent(kind=EV_TRANSCRIPT, text="开空调", final=True),
+                      S2SEvent(kind=EV_TOOL_CALL, name="escalate", call_id="c1",
+                               args='{"utterance":"开空调"}'))
+    tid = h.of(P.DOWN_ESCALATED)[0]["turn_id"]
+    await h.sess.escalated_result(tid, "空调已调到24度")
+    assert h.prov.injected == [("c1", "空调已调到24度")]
+    assert not h.audio_out
+    await h.sess.close()
+
+
+@pytest.mark.asyncio
+async def test_barge_in_during_tool_call_abandons_turn_not_rollback():
+    """§4.3③ 打断≠回滚：丢的是播报权，副作用由主链确认链自己收束。"""
+    h = Harness()
+    await h.sess.start()
+    await h.pump_once(S2SEvent(kind=EV_TURN_STARTED),
+                      S2SEvent(kind=EV_TRANSCRIPT, text="订个位", final=True),
+                      S2SEvent(kind=EV_TOOL_CALL, name="escalate", call_id="c1",
+                               args='{"utterance":"订个位"}'))
+    tid = h.of(P.DOWN_ESCALATED)[0]["turn_id"]
+    await h.sess.barge_in()
+    assert h.sess.turn.status == T_ABANDONED
+    assert h.prov.cancels == 0, "逃逸轮无 provider 生成在飞，不该发 cancel"
+    await h.sess.escalated_result(tid, "已为你订位")
+    assert h.prov.injected == [], "abandoned turn 的结果不回注、不播报"
+    await h.sess.close()
+
+
+@pytest.mark.asyncio
+async def test_escalated_result_for_unknown_turn_is_ignored():
+    h = Harness()
+    await h.sess.start()
+    await h.sess.escalated_result("no-such-turn", "x")
+    assert h.prov.injected == []
+    await h.sess.close()
+
+
+# ──────────────── L-Session：重连 / 降级 / 重建 ────────────────
+
+@pytest.mark.asyncio
+async def test_reconnect_reinjects_summary_and_reports_ready():
+    summaries = []
+
+    async def ctx():
+        summaries.append(1)
+        return "用户：你好\n你：在呢"
+
+    h = Harness(context_provider=ctx)
+    await h.sess.start()
+    await h.prov.close()  # provider 事件流结束 → 触发重连
+    await asyncio.sleep(0.05)
+    assert h.sess.state == SessionState.READY
+    assert [m["state"] for m in h.of(P.DOWN_SESSION_STATE)] == ["ready", "reconnecting", "ready"]
+    assert h.open_summaries[-1] == "用户：你好\n你：在呢", "重连必须带摘要重注入"
+    await h.sess.close()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_exhausted_goes_degraded():
+    h = Harness()
+    await h.sess.start()
+    h.fail_opens = 99
+    await h.prov.close()
+    await asyncio.sleep(0.05)
+    assert h.sess.state == SessionState.DEGRADED
+    assert h.of(P.DOWN_SESSION_STATE)[-1]["state"] == P.STATE_DEGRADED
+    await h.sess.close()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_mid_turn_ends_turn_honestly():
+    """§4.5：IN_TURN 断连不假装无事——收 turn.end(cancelled, detail=disconnected)。"""
+    h = Harness()
+    await h.sess.start()
+    await h.pump_once(S2SEvent(kind=EV_TURN_STARTED),
+                      S2SEvent(kind=EV_ANSWER_DELTA, text="正说着"))
+    await h.prov.close()
+    await asyncio.sleep(0.05)
+    end = h.of(P.DOWN_TURN_END)[-1]
+    assert end["reason"] == P.END_CANCELLED and end["detail"] == "disconnected"
+    assert h.reflux_calls[-1].truncated is True
+    await h.sess.close()
+
+
+@pytest.mark.asyncio
+async def test_audio_during_reconnect_is_buffered_then_flushed():
+    """§4.5 前滚缓冲：重连期音频不丢，恢复后续灌（复用 R4.3b pcmRing 思想）。"""
+    h = Harness()
+    await h.sess.start()
+    h.fail_opens = 1
+    await h.prov.close()
+    await asyncio.sleep(0)
+    await h.sess.push_audio(b"z" * 100)
+    await asyncio.sleep(0.05)
+    assert h.sess.state == SessionState.READY
+    assert h.prov.sent_audio == 100, "缓冲的音频应在重连成功后续灌"
+    await h.sess.close()
+
+
+@pytest.mark.asyncio
+async def test_ring_buffer_is_bounded():
+    h = Harness(ring_max_bytes=50)
+    await h.sess.start()
+    h.sess.state = SessionState.RECONNECTING
+    await h.sess.push_audio(b"a" * 200)
+    assert len(h.sess._ring) == 50
+    await h.sess.close()
+
+
+@pytest.mark.asyncio
+async def test_audio_dropped_when_degraded():
+    h = Harness()
+    await h.sess.start()
+    h.sess.state = SessionState.DEGRADED
+    await h.sess.push_audio(b"q" * 20)
+    assert h.prov.sent_audio == 0
+    await h.sess.close()
+
+
+@pytest.mark.asyncio
+async def test_max_turns_triggers_proactive_rebuild():
+    """★3 未钉死上限 → 轮数旋钮主动重建（走同一重连路径，零新机制）。"""
+    h = Harness(max_turns=2)
+    await h.sess.start()
+    await _normal_turn(h)
+    await _normal_turn(h)
+    await asyncio.sleep(0.05)
+    assert len(h.providers) >= 2, "达上限应重建 provider 会话"
+    assert h.sess.turns_done == 0, "重建后轮计数复位"
+    await h.sess.close()
+
+
+# ─────────── 音频段收尾（真机死锁的回归护栏）───────────
+
+@pytest.mark.asyncio
+async def test_audio_done_commits_to_provider():
+    """本侧 VAD 判端点 → 必须请 provider 收尾定稿。
+
+    真机首验的死锁：这一步缺了，provider 的 server VAD 永远等不到静音尾 → turn 永不
+    收束 → **用户说什么都没有回复**。早先的 e2e 自己灌静音尾，把它整个掩盖过去了。
+    """
+    h = Harness()
+    await h.sess.start()
+    await h.sess.push_audio(b"\x01\x02" * 800)
+    await h.sess.audio_done()
+    await asyncio.sleep(0.02)
+    assert h.prov.commits == 1, "audio_done 必须落到 provider.commit_audio"
+    await h.sess.close()
+
+
+@pytest.mark.asyncio
+async def test_new_audio_cancels_inflight_commit():
+    """用户又说话了 → 撤掉在途静音尾，别让它污染这一段。"""
+    h = Harness()
+    await h.sess.start()
+    await h.sess.audio_done()
+    assert h.sess._commit is not None
+    await h.sess.push_audio(b"\x01" * 100)
+    assert h.sess._commit is None, "新音频到达应撤销在途 commit"
+    await h.sess.close()
+
+
+@pytest.mark.asyncio
+async def test_barge_in_cancels_inflight_commit():
+    """打断了就别再补静音尾催它说完。"""
+    h = Harness()
+    await h.sess.start()
+    await h.pump_once(S2SEvent(kind=EV_TURN_STARTED),
+                      S2SEvent(kind=EV_ANSWER_DELTA, text="嗯"))
+    await h.sess.audio_done()
+    await h.sess.barge_in()
+    assert h.sess._commit is None
+    await h.sess.close()
+
+
+@pytest.mark.asyncio
+async def test_audio_done_noop_when_degraded():
+    h = Harness()
+    await h.sess.start()
+    h.sess.state = SessionState.DEGRADED
+    await h.sess.audio_done()
+    await asyncio.sleep(0.02)
+    assert h.prov.commits == 0
+    await h.sess.close()
+
+
+def test_qwen_commit_sends_silence_longer_than_vad_window():
+    """静音尾**须长于** silence_duration_ms 才触发 server VAD（ASR 面早就踩过的坑）。"""
+    import inspect
+    src = inspect.getsource(QwenOmniRealtimeProvider.commit_audio)
+    assert "vad_silence_ms" in src, "静音尾长度必须随 vad_silence_ms 放大，不能写死"
+    p = QwenOmniRealtimeProvider("k", "w", "m", vad_silence_ms=2000)
+    frames = max(13, p.vad_silence_ms // 100 + 4)
+    assert frames * 100 > p.vad_silence_ms, "静音总时长须超过 VAD 判定窗"
+
+
+@pytest.mark.asyncio
+async def test_hanging_turn_is_honestly_closed_by_watchdog():
+    """真栈踩到的缺口：turn 开了却永不 done（下行背压/provider 静默）→ HMI 干等。
+    任何成因都在此收口：诚实收 turn.end(error, provider_silent)，不假装还在处理。"""
+    h = Harness(turn_timeout_s=0.05)
+    await h.sess.start()
+    await h.pump_once(S2SEvent(kind=EV_TURN_STARTED),
+                      S2SEvent(kind=EV_ANSWER_DELTA, text="说了一半"))
+    await asyncio.sleep(0.12)
+    end = h.of(P.DOWN_TURN_END)[-1]
+    assert end["reason"] == P.END_ERROR and end["detail"] == "provider_silent"
+    assert h.reflux_calls[-1].truncated is True, "悬挂轮回灌须标截断"
+    await h.sess.close()
+
+
+@pytest.mark.asyncio
+async def test_watchdog_does_not_fire_on_normal_turn():
+    h = Harness(turn_timeout_s=0.2)
+    await h.sess.start()
+    await _normal_turn(h)
+    await asyncio.sleep(0.3)
+    reasons = [m["reason"] for m in h.of(P.DOWN_TURN_END)]
+    assert reasons == [P.END_COMPLETE], f"正常轮不该被看门狗补收束: {reasons}"
+    await h.sess.close()
+
+
+@pytest.mark.asyncio
+async def test_watchdog_disabled_when_timeout_zero(monkeypatch):
+    monkeypatch.setenv("S2S_TURN_TIMEOUT_S", "0")
+    h = Harness()
+    assert h.sess.turn_timeout_s == 0
+    await h.sess.start()
+    await h.pump_once(S2SEvent(kind=EV_TURN_STARTED))
+    await asyncio.sleep(0.05)
+    assert not h.of(P.DOWN_TURN_END)
+    await h.sess.close()
+
+
+def test_empty_numeric_environment_uses_s2s_defaults(monkeypatch):
+    monkeypatch.setenv("S2S_VAD_SILENCE_MS", "")
+    monkeypatch.setenv("S2S_VAD_THRESHOLD", "")
+    monkeypatch.setenv("S2S_SESSION_MAX_TURNS", "")
+    monkeypatch.setenv("S2S_TURN_TIMEOUT_S", "")
+    monkeypatch.setenv("S2S_MODEL", "")
+    monkeypatch.setenv("S2S_WS_URL", "")
+    monkeypatch.setenv("S2S_API_KEY", "test-key")
+
+    provider = build_s2s_provider("qwen")
+    h = Harness()
+
+    assert provider is not None
+    assert provider.vad_silence_ms == 800
+    assert provider.vad_threshold == 0.2
+    assert provider.model == "qwen3.5-omni-flash-realtime"
+    assert provider.ws_url == (
+        "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+    )
+    assert h.sess.max_turns == 20
+    assert h.sess.turn_timeout_s == 45
+
+
+@pytest.mark.asyncio
+async def test_context_provider_failure_does_not_block_session():
+    async def boom():
+        raise RuntimeError("memory down")
+
+    h = Harness(context_provider=boom)
+    await h.sess.start()  # fail-open：取不到摘要照样开会话
+    assert h.sess.state == SessionState.READY
+    await h.sess.close()
+
+
+@pytest.mark.asyncio
+async def test_reflux_failure_does_not_kill_session():
+    async def boom(_t):
+        raise RuntimeError("obs down")
+
+    h = Harness()
+    h.sess._reflux = boom
+    await h.sess.start()
+    await _normal_turn(h)
+    assert h.sess.state == SessionState.READY
+    await h.sess.close()
+
+
+# ─────────────────────────── 回灌 ───────────────────────────
+
+@pytest.mark.parametrize("answer,expect", [
+    ("已经帮你把空调调到24度了", True),
+    ("好的，导航已经开始了", True),
+    ("温度调好了", True),
+    ("为什么数学书很忧郁？因为它有太多问题", False),
+    ("今天天气不错呀", False),
+    ("好的", False),                     # 光有应答词不算承诺
+    ("已经很晚了，早点休息", False),      # 有完成词无动作对象
+])
+def test_detect_false_promise(answer, expect):
+    assert detect_false_promise(answer, escalated=False) is expect
+
+
+def test_escalated_turn_is_never_false_promise():
+    """移交了就不是漏移交——哪怕话术里有完成词。"""
+    assert detect_false_promise("已经帮你调好空调了", escalated=True) is False
+
+
+class FakeMemStub:
+    def __init__(self):
+        self.appended: list[tuple[str, str]] = []
+        self.turns: list = []
+
+    async def AppendTurn(self, req, timeout=None):
+        self.appended.append((req.role, req.text))
+        return object()
+
+    async def GetSession(self, req, timeout=None):
+        class R:
+            pass
+        r = R()
+        r.turns = self.turns
+        return r
+
+
+class FakeObs:
+    def __init__(self):
+        self.turns: list[dict] = []
+        self.spans: list[tuple[str, dict]] = []
+
+    async def emit_turn(self, trace_id, session_id, **kw):
+        self.turns.append({"session_id": session_id, **kw})
+
+    async def emit_span(self, trace_id, node, **kw):
+        self.spans.append((node, kw))
+
+
+def _turn(**kw) -> Turn:
+    t = Turn(turn_id=kw.pop("turn_id", "t1"))
+    for k, v in kw.items():
+        setattr(t, k, v)
+    return t
+
+
+@pytest.mark.asyncio
+async def test_reflux_writes_memory_and_obs_for_normal_turn():
+    mem, obs = FakeMemStub(), FakeObs()
+    r = Reflux(memory_stub_getter=lambda: mem, obs=obs, gate_content=lambda s, n: s[:n],
+               session_id="s1", user_id="u1", provider_name="dashscope", model="m")
+    await r(_turn(transcript="你好", answer="在呢", end_reason="complete"))
+    assert mem.appended == [("user", "你好"), ("assistant", "在呢")]
+    assert len(obs.turns) == 1 and obs.turns[0]["path"] == "s2s"
+    assert obs.spans[0][0] == "s2s.turn"
+
+
+@pytest.mark.asyncio
+async def test_reflux_skips_memory_for_escalated_turn_but_keeps_span():
+    """§7-3：escalated 轮主链已落，不重复回灌，只补 span 关联。"""
+    mem, obs = FakeMemStub(), FakeObs()
+    r = Reflux(memory_stub_getter=lambda: mem, obs=obs, gate_content=lambda s, n: s[:n],
+               session_id="s1")
+    t = _turn(transcript="开空调", utterance="开空调", status="escalated",
+              end_reason="escalated")
+    await r(t)
+    assert mem.appended == [], "escalated 轮不得重复写 memory"
+    assert obs.turns == [], "escalated 轮不重复出 obs.turn"
+    assert obs.spans[0][1]["attrs"]["escalated"] is True
+    assert obs.spans[0][1]["attrs"]["utterance"] == "开空调"
+
+
+@pytest.mark.asyncio
+async def test_reflux_span_flags_false_promise():
+    obs = FakeObs()
+    r = Reflux(memory_stub_getter=None, obs=obs, session_id="s1")
+    await r(_turn(transcript="把空调开到24", answer="好的，已经帮你打开空调了",
+                  end_reason="complete"))
+    assert obs.spans[0][1]["attrs"]["s2s_false_promise"] is True
+    assert r.false_promises == 1
+
+
+@pytest.mark.asyncio
+async def test_reflux_span_marks_truncated_turn():
+    obs = FakeObs()
+    r = Reflux(memory_stub_getter=None, obs=obs, session_id="s1")
+    await r(_turn(answer="好的我来", truncated=True, end_reason="cancelled"))
+    assert obs.spans[0][1]["attrs"]["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_reflux_survives_memory_failure():
+    class Boom:
+        async def AppendTurn(self, req, timeout=None):
+            raise RuntimeError("pg down")
+
+    obs = FakeObs()
+    r = Reflux(memory_stub_getter=lambda: Boom(), obs=obs, session_id="s1")
+    await r(_turn(transcript="你好", answer="在呢", end_reason="complete"))
+    assert obs.spans, "记忆写失败仍要出 obs（缺口可见）"
+
+
+@pytest.mark.asyncio
+async def test_context_summary_renders_recent_turns():
+    mem = FakeMemStub()
+
+    class T:
+        def __init__(self, role, text):
+            self.role, self.text = role, text
+    mem.turns = [T("user", "我叫泓舟"), T("assistant", "记住啦")]
+    s = await build_context_summary(mem, "s1", exchanges=4)
+    assert s == "用户：我叫泓舟\n你：记住啦"
+
+
+# ── 评审四轮 R4-05：重建摘要按完整问答对取、压缩不剪禁止事项 ──────────────────────────
+
+class _TurnRow:
+    def __init__(self, role, text, exchange_id="", actions=()):
+        self.role, self.text, self.exchange_id, self.actions = role, text, exchange_id, list(actions)
+
+
+class _RecordingMem(FakeMemStub):
+    def __init__(self, turns):
+        super().__init__()
+        self.turns = turns
+        self.requests = []
+
+    async def GetSession(self, req, timeout=None):
+        self.requests.append(req)
+        return await super().GetSession(req, timeout)
+
+
+@pytest.mark.asyncio
+async def test_context_summary_keeps_the_trailing_restriction_of_a_long_message():
+    """评审 S3 反例：一条长用户消息末尾是「不要启动导航」——修前每条硬截 120 字，这句被截掉。"""
+    long_user = "我们等会儿要去深圳湾公园散步，" * 8 + "不要启动导航"
+    mem = _RecordingMem([_TurnRow("user", long_user, "x1"), _TurnRow("assistant", "好的，记下了", "x1")])
+    summary = await build_context_summary(mem, "s1")
+    assert "不要启动导航" in summary
+    assert summary.splitlines()[0].startswith("用户：我们等会儿要去深圳湾公园散步")
+
+
+@pytest.mark.asyncio
+async def test_context_summary_takes_whole_exchanges_like_the_planner():
+    turns = []
+    for i in range(6):
+        turns += [_TurnRow("user", f"第{i}问", f"x{i}"), _TurnRow("assistant", f"第{i}答", f"x{i}")]
+    mem = _RecordingMem(turns)
+    summary = await build_context_summary(mem, "s1")
+    assert mem.requests[0].last_n == 10, "4 对要取 2N+2 条（修前只取 4 条 ≈ 2 对）"
+    assert summary.splitlines() == [line for i in range(2, 6) for line in (f"用户：第{i}问", f"你：第{i}答")]
+
+
+@pytest.mark.asyncio
+async def test_context_summary_says_so_when_history_cannot_be_read():
+    """读不到 ≠ 没聊过：RPC 失败 / 服务端自报降级且为空 ⇒ 一句实话，不是空串（空串会让模型以为从没聊过）。"""
+    from s2s.reflux import HISTORY_UNAVAILABLE_NOTE
+
+    class Boom(FakeMemStub):
+        async def GetSession(self, req, timeout=None):
+            raise RuntimeError("memory down")
+
+    class Degraded(FakeMemStub):
+        async def GetSession(self, req, timeout=None):
+            class R:
+                turns, degraded = [], True
+            return R()
+
+    assert await build_context_summary(Boom(), "s1") == HISTORY_UNAVAILABLE_NOTE
+    assert await build_context_summary(Degraded(), "s1") == HISTORY_UNAVAILABLE_NOTE
+    assert await build_context_summary(FakeMemStub(), "s1") == "", "读到了、本来就是空的：什么都不注入"
+
+
+@pytest.mark.asyncio
+async def test_context_summary_carries_what_was_actually_executed():
+    mem = _RecordingMem([_TurnRow("user", "打开副驾车窗", "x1"),
+                         _TurnRow("assistant", "开了", "x1", actions=["window.open"])])
+    assert await build_context_summary(mem, "s1") == "用户：打开副驾车窗\n你：开了（已执行：window.open）"
+
+
+@pytest.mark.asyncio
+async def test_context_summary_empty_when_no_session():
+    assert await build_context_summary(FakeMemStub(), "") == ""
+    assert await build_context_summary(None, "s1") == ""
+
+
+# ──────────────────────── 铁律（源码级）────────────────────────
+
+def test_session_layer_has_no_dynamic_domain_literals():
+    """L-Session 的业务词来自声明面，AST 只查可执行语义，不误扫说明文字。"""
+    assert_architecture_guard(Path(__file__).resolve().parents[2])
+
+
+def test_protocol_defines_exactly_one_tool():
+    """§5.1：不注入 capability 清单。多一个工具就是把判定权还给了 S2S 模型。"""
+    from s2s import protocol as PR
+    src = inspect.getsource(PR)
+    assert len(re.findall(r'"type":\s*"function"', src)) == 1
+
+
+def test_provider_never_creates_response_after_tool_result():
+    """R1 前提的源码守卫：inject_tool_result 里发 response.create 即双播。
+
+    只看**有效代码行**——注释里正写着「刻意不发 response.create」，不能连注释一起判。
+    """
+    src = inspect.getsource(QwenOmniRealtimeProvider.inject_tool_result)
+    code = "\n".join(l.split("#", 1)[0] for l in src.splitlines())
+    assert "response.create" not in code
+
+
+def test_http_s2s_verifies_identity_before_provider_or_session_creation():
+    """Invalid test identity must close before any provider/session side effect."""
+    path = os.path.join(os.path.dirname(__file__), "..", "http_server.py")
+    source = open(path, encoding="utf-8").read()
+    start_at = source.find("if mtype == UP_SESSION_START:")
+    verify_at = source.find("resolve_s2s_identity(", start_at)
+    provider_at = source.find("build_s2s_provider(", start_at)
+    session_at = source.find("session = S2SSession(", start_at)
+    assert verify_at >= 0, "S2S route does not apply the identity gate"
+    assert verify_at < provider_at < session_at
+
+
+@pytest.mark.asyncio
+async def test_reflux_occupant_is_mutable_and_reaches_append_turn():
+    """M4 P4 补口（验收抓到）：occupant 是唤醒粒度不是会话粒度。
+
+    会话级静态快照会把 S2S 自答轮全记进 primary——乘员 B 的闲聊进主驾记忆，
+    多用户隔离在 S2S 挡位下被破坏。网关收到 occupant 上行帧后就地更新
+    reflux.occupant_id，下一次 turn 收束的 AppendTurn 必须按新说话人归档。
+    """
+    class OccMemStub(FakeMemStub):
+        def __init__(self):
+            super().__init__()
+            self.occupants: list[str] = []
+
+        async def AppendTurn(self, req, timeout=None):
+            self.occupants.append(req.occupant_id)
+            return await super().AppendTurn(req, timeout)
+
+    mem, obs = OccMemStub(), FakeObs()
+    r = Reflux(memory_stub_getter=lambda: mem, obs=obs, gate_content=lambda s, n: s[:n],
+               session_id="s1", user_id="u1")
+    await r(_turn(transcript="你好", answer="在呢", end_reason="complete"))
+    assert mem.occupants[-2:] == ["primary", "primary"]   # 未识别 → 逐字回落 P4 之前
+
+    r.occupant_id = "occ-2"                                # ← 网关 UP_OCCUPANT 帧的效果
+    await r(_turn(turn_id="t2", transcript="我爱吃辣", answer="记住啦",
+                  end_reason="complete"))
+    assert mem.occupants[-2:] == ["occ-2", "occ-2"], "换人后自答轮必须记进新说话人"
+
+    r.occupant_id = "primary"                              # 唤醒窗结束归位
+    await r(_turn(turn_id="t3", transcript="今天冷吗", answer="有点",
+                  end_reason="complete"))
+    assert mem.occupants[-2:] == ["primary", "primary"]
+
+
+class _EpochMemStub:
+    """CA2-15 S1b: records call order and the epoch each write carries."""
+
+    def __init__(self, *, refuse=False):
+        self.calls: list[str] = []
+        self.epochs: list[tuple[str, str]] = []
+        self.refuse = refuse
+
+    async def GetMemoryEpoch(self, req, timeout=None):
+        self.calls.append("epoch")
+        return types.SimpleNamespace(memory_epoch="1.ab")
+
+    async def GetSession(self, req, timeout=None):
+        self.calls.append("session")
+        return types.SimpleNamespace(turns=[], degraded=False)
+
+    async def AppendTurn(self, req, timeout=None):
+        self.epochs.append((req.role, req.memory_epoch))
+        return types.SimpleNamespace(ok=not self.refuse,
+                                     error="stale_memory_epoch" if self.refuse else "")
+
+
+@pytest.mark.asyncio
+async def test_reflux_reads_the_epoch_before_the_summary_and_writes_with_it():
+    mem = _EpochMemStub()
+    r = Reflux(memory_stub_getter=lambda: mem, obs=FakeObs(), gate_content=lambda s, n: s[:n],
+               session_id="s1", user_id="u1")
+    await r.context_summary()
+    await r(_turn(transcript="我家在哪", answer="在云岚小区", end_reason="complete"))
+    assert mem.calls == ["epoch", "session"]
+    assert mem.epochs == [("user", "1.ab"), ("assistant", "1.ab")]
+
+
+@pytest.mark.asyncio
+async def test_reflux_drops_the_exchange_once_memory_was_deleted_after_the_summary():
+    mem = _EpochMemStub(refuse=True)
+    r = Reflux(memory_stub_getter=lambda: mem, obs=FakeObs(), gate_content=lambda s, n: s[:n],
+               session_id="s1", user_id="u1")
+    await r.context_summary()
+    await r(_turn(transcript="我家在哪", answer="在云岚小区", end_reason="complete"))
+    assert mem.epochs == [("user", "1.ab")]          # 助手那条不再写

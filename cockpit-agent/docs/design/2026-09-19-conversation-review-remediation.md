@@ -1,0 +1,783 @@
+# 落域 / 拒识 / 上下文 / 长会话评审：逐条重证与分阶段落地
+
+- 状态：批 1（P0 W01–W04 + W05-lite）、批 2（P1 W08/W09）、批 3（P1 W10 / W06 / W07，2026-09-20 用户批准后实施）已发布
+  （生产 release `88a89456`）；批 4（P2 W11–W15）方案见 §5、落地记录见 §5.6（P2 收尾 release `9ebaa5c3`）；
+  批 5（P3 W16–W19 + 两条观察，2026-09-20 晚）方案见 §7、落地记录见 §7.1；
+  批 6（批 5 留项：W16-b 步级起点原话 / W19-b 持久订阅落域，2026-09-20 晚）方案见 §8、落地记录见 §8.1；批 7（批 6 留项，2026-09-21）
+  方案见 §9、落地记录见 §9.1 / §9.2；**批 8（批 7 追加留项：T2 完成轮收口 / 安全闸二第二臂 / chitchat 车辆读数 / 迁移预检 Serve 判据，
+  2026-09-22 下午，用户授权提交 / 推送 / 部署 / 真栈验证）方案见 §10、落地记录见 §10.1**
+- 交付对象：云侧编排（`orchestrator/cloud`）、`runtime/`、`agents/nearby`、`skills/`；HMI / Android 零改动
+- 关联：评审原文 [`docs/reviews/2026-09-19-cockpit_conversation_review.md`](../reviews/2026-09-19-cockpit_conversation_review.md)（基线 `2f3c574d`）；
+  接手 `AGENTS.md` §4；QA 交接 `docs/reviews/2026-08-30-qa-closeout-handoff.md`；上一批收口 [`2026-09-19-qa-residual-closeout.md`](2026-09-19-qa-residual-closeout.md)
+
+## 0. 结论
+
+评审基线 `2f3c574d` 是当前 `main`（`3b12fb9e`）的祖先，且 `git log 2f3c574d..HEAD -- orchestrator runtime agents` 为空 ⇒
+评审列出的**代码事实对工作树逐字成立**，不需要再「对着新代码重证」。逐条核对见 §1。
+
+裁决（与评审 §10 一致）：先做 P0 的四条窄修复（W01–W04），每条先写复现原问题的失败测试；W05 只做「效配置记录 + 复算
+用例进 pytest + 真栈探针组」，不在本批伪造一个 300–500 条的新基线。P1 里 W08（候选集版本）与 W09（生命周期拆分）是
+确定性改动，放批 2；**W06（DialogueDecision）/ W07（TaskFrame）/ W10（澄清续接）会改 Planner 结构化输出契约或客户端契约，
+先出方案（§4）再由用户裁决**，不在本批偷跑。P2/P3 按评审原表保留为后续入口。
+
+## 1. 逐条重证（对 HEAD `3b12fb9e`）
+
+| 评审 | 代码位置 | 核对结论 |
+|---|---|---|
+| F01 确认肯定谓词接受问句 | `engine.py::_confirm_reply`：`k in t and len(t) <= len(k)+2`；`session.load()` 空 `operation_id` 时返回 `entries[-1]` | **成立**。「确认吗」「可以吗」「行吗」都判 yes；多条挂起并存时裸「确认」静默落最新一条（`test_engine_confirm::test_unaddressed_confirm_resolves_to_the_newest_pending` 正是把这个行为钉成了契约）；最新一条是 `wait_slot` 时裸「确认」会被 `_is_topic_change` 判成槽值填进槽 |
+| F02 历史视窗短、预算非硬约束 | `context.py::_render_history`：`history[-4:]`、逐条丢最旧（不按 exchange 对）、`len(turns)==1` 时无视预算整块返回；`_render_memory` 按 `[:400]` 截字 | **成立**。生产未覆盖 `PLANNER_CTX_BUDGET_CHARS`（compose 不透传）⇒ 效值 1400 |
+| F03 同类新检索替换旧列表 | `context.py::update_focus` 合并键 `(source_intent, purpose, is_fallback)` | **成立** |
+| F04 焦点/路线/安全/约束共用短 TTL | `session.py::_FOCUS_TTL = 300`；候选集自带 `_CANDIDATE_TTL_S = 900` 但要先读得到 Focus | **成立** |
+| F05 约束只有两个布尔、无撤销 | `runtime/session_constraints.py`：`no_queue` 只写 `True`；「之前不吃辣，今天想吃辣」整句否定优先 ⇒ `no_spicy=True` | **成立** |
+| F06 补槽启发式非统一行为解析 | `engine.py::_slot_answer` 除 `order_id` 外整句当值 | 成立；归 W06（契约级） |
+| F07 多诉求缺强结果账本 | `_clause_uncovered` / `_goal_value_dropped` 只观测 | 成立；归 W12（P2） |
+| F08 T2 按 intent 判重 | `planning.py::_completed_observation_steps` / `_drop_completed_replan_steps` 只看 `intent`；`loop.summarize` 不带 slots | **成立**。执行器侧 `DagExecutor._fingerprint` 早已是 `(intent, 归一化 slots)`——**同一件事两份键**，规划侧那份更粗 |
+| F09 受话/理解/支持/执行失败分账 | `is_voice_input_source` 含 `ptt` | 成立；归 W13（P2） |
+| F10–F12 | 目录耦合 / Memory 读取 / 评测资产 | 成立，归 P2/P3 |
+
+## 2. 批 1（P0）方案
+
+### W01 确认歧义
+
+判据与修法（全部在 `engine.py`，`session.py` 不改；客户端不改——HMI / Android 早已按 `operation_id` 精确寻址）：
+
+1. **问句形态永远不是授权**：`_confirm_reply` 在词表判定之前先问 `runtime.question_shape.is_non_directive_question`
+   （唯一实现，零领域词）；「确认吗 / 可以吗 / 行吗 / 行不行」→ `None`（答非所问 ⇒ 按新请求处理 = 先解释不执行）。
+   `flagged=True`（HMI 按钮）仍直接 yes——按钮文本是客户端固定的，且带 `operation_id`。
+2. **多条 `wait_confirm` 并存 + 无寻址键的裸确认 ⇒ 问一次**：「确认「把全车门解锁」，还是「创建午休模式」？」，
+   零动作、不关任何挂起、`held_operation_ids` 带全两条、生命周期事件 `cloud.pending_ambiguous`。
+   恰好一条 `wait_confirm`（哪怕更新的那条是 `wait_slot`）⇒ 就是它。
+3. **确认与补槽不混**：裸确认词在只有 `wait_slot` 挂起时不再被当槽值——走既有「当前没有待确认的操作」出口并附带
+   补槽挂起的软提醒；反过来 `wait_confirm` 下的自由文本照旧是插话（R2 保留挂起）。
+4. 语音消歧通道（窄）：「确认解锁 / 确认那个午休模式」——肯定词开头、余量点名了**恰好一条**挂起的 goal ⇒ 打给它；
+   点不到或点到多条 ⇒ 按普通语句处理。序数（「第一个」）刻意不接：它在 `wait_slot` 语境里有另一套语义。
+
+`operation_id` 已经是每次挂起新生成的 `op-<uuid16>`、重挂起即换新——它同时充当评审要的 `confirmation_nonce`；
+`plan_revision` 在挂起表（Q1-C）里由「一条挂起 = 一份序列化计划快照」表达，本批不再加第二个字段。
+
+### W02 上下文预算保真
+
+`context.py`：
+
+- `_render_history` 改为**按完整 exchange 裁剪**（user + 其后的 assistant 为一对；孤立的 assistant 尾巴归前一对）；
+  预算是**硬**的：装不下就再丢一对；连最近一对都装不下时先把那一对里**最长的那条按句从尾部收缩**（回答是可再取的，
+  半句不是），收到只剩一句仍放不下就只留最新一条，最新一条也放不下则输出空——绝不再出现「预算 0 渲染 2019 字符」。
+  受保护的事实（约束 / 告警 / 路线）不靠历史块活着，它们在焦点块里。
+- 视窗从「最近 4 条消息」改成「最近 N 对 exchange」，`PLANNER_HISTORY_EXCHANGES` 可调，**默认 2（与今天 4 条消息等价）**——
+  扩窗是 W19 的单变量实验，不在这里无证据地改；`ContextManager.history_n` 随之取 `2*N+2`。
+- `_render_memory` 按**条**裁不按字裁（`[:400]` 会把一条偏好切成半句）。
+- 受保护结构区：`_render_focus` 补渲染 `session_constraints`（「本次会话约束=不吃辣/不介意排队」）——此前 planner 的
+  prompt 里根本没有这一行，只有 nearby 经 meta 收到。
+- 可观测：`WorkingSet.context_stats = {ctx_chars, history_pairs_kept, history_pairs_dropped, history_trimmed}` 随 `cloud.planning`
+  span 发出（同 `catalog_stats` 口径），W05 要的「按实际请求记录渲染规模」从此有数。
+
+### W03 约束改口
+
+`runtime/session_constraints.py` 保持**扁平投影**契约（消费方 nearby 读 `{"no_spicy": bool, "no_queue": bool}`），内部改成
+「按分句逐条抽取、后说的覆盖先说的」：
+
+- `no_queue` 增加 `False` 通道：「可以排队 / 排队也行 / 排一会儿没关系 / 不介意排队 / 等位也行」。
+- 时态框架：「之前 / 以前 / 原来 / 上次 …不吃辣」是**转述过去**不是当前约束——该分句不写键；「今天想吃辣」照常写 `False`。
+  判据：分句内出现过去框架词且无「今天/现在/这次」当前框架 ⇒ 跳过。
+- 主体框架：「同行的人 / 朋友 / 我老婆 / 他们 …想吃辣 / 不吃辣」是**别人的**约束，不覆盖说话人自己的键——写进 `others`
+  子键（`{"others": {"no_spicy": bool}}`）供话术引用，本批 nearby 不消费（只保证不串）。
+- 撤销：「不用管辣不辣了 / 辣不辣无所谓 / 排不排队都行」⇒ 显式 `None`，`merge_constraints` 遇 `None` 删键。
+- 消费方 `agents/nearby`：`no_queue` 改成与 `no_spicy` 对称的「会话里说了就按会话的」（此前只接 `True`）。
+- 模型抽取异常不覆盖旧真值：`constraints_in` 仍是纯正则，`merge_constraints` 只覆盖出现的键。
+
+### W04 读复用与写幂等分离
+
+- 规划侧判重键 = 执行侧那一份：`models.step_fingerprint(intent, slots)` 成为唯一实现，`DagExecutor._fingerprint` 委托它；
+  `loop.summarize` 把该步的 `slots`（有界投影）带进 observation；`_completed_observation_steps` 按 fingerprint 记完成，
+  `_drop_completed_replan_steps` 按 fingerprint 判重复 ⇒ 「深圳天气 ok → 广州天气」不再被当成重复；
+  `retry_same_intent=True` 语义不变（同参也允许重问）。replan prompt 与校验反馈话术同步改成「同一能力**且同一参数**」。
+- 写幂等：执行器 `(intent, 归一化 slots)` 指纹防抖 + 超时也打指纹的既有机制不动，锁死为测试（同参写动作重发只执行一次）。
+- 未做、记账：freshness / 实体版本进复用键（要能力声明，归 W11）；`summarize` 的「按决策价值投影」（同归 W11）。
+
+### W05-lite 当前基线
+
+- 效配置记录：生产 release 见 `AGENTS.md` §4.0；`PLANNER_CTX_BUDGET_CHARS` 未覆盖 ⇒ 1400；`PLANNER_CATALOG_TOP_K` 未覆盖 ⇒ 20；
+  规划模型 `minimax:MiniMax-M3`（verify artifact 记）。
+- 评审附录的局部复算改写成 pytest，落在各自模块的套件里（不另立「评审用例」文件——判据要跟着实现住）：
+  `test_engine_confirm.py`（确认问句 / 双挂起 / 裸确认不填槽）、`test_context_budget_fidelity.py`（预算 0 + 2000 字）、
+  `runtime/tests/test_session_constraints.py`（排队改口 / 时态 / 主体）、`test_planning.py`（深圳→广州）；候选合并键归批 2。
+- 真栈探针：`scripts/probe_qa_regression.py` 的 `confirm` 组 CF5 改成 W01 契约（双挂起裸确认 ⇒ 问一次）、新增 CF7（问句不授权）
+  与 CF9（裸确认不填槽）；`residual` 组新增 RS5（「今天可以排队」撤销上一轮）；跑法与读数纪律沿用该脚本。
+- 不做：重建 300–500 条基线（那是独立评测程序，先要真实分布再冻结指标）。
+
+### 批 1 验收
+
+- 每个工作包：先有红测试，再改实现；`orchestrator/cloud`、`runtime`、`agents/nearby` 定向套件 + 四门禁 + smoke_edge；
+  全量固定口径一次；四处变异各自判红（W01 问句判据、W02 预算硬约束、W03 撤销通道、W04 判重键）。
+- 真栈：push → dry-run → apply → status / verify → 探针组 `confirm` / `candidate` 至少 repeat 2；证据绑 release SHA。
+
+## 3. 批 2（P1 确定性部分）
+
+### W08 候选集版本
+
+`extract_focus` 给每组候选带 `candidate_set_id`（uuid）、`query_signature`（产生步 `slots` 的归一化摘要，复用 `step_fingerprint`）、
+`revision`；`update_focus` 合并键改为 `(source_intent, purpose, is_fallback, query_signature)`：同能力不同查询共存，同查询的
+「换一批」是同键新版本（`revision+1`）。产生方没声明 `_candidate_label` 时从查询槽（`keyword` / `cuisine` / `location` / `destination`）
+派生标签，让「刚才 A 那批第二家」经既有 `resolve_candidate_scope` 的标签通道命中。`_render_focus` 渲染最近两组（带标签），
+`_CANDIDATE_SETS_MAX` 保持 3。客户端选择载荷绑定版本：本批只在下发面加 `candidate_set_id`，客户端消费归 W10 一并裁决。
+
+### W09 生命周期拆分
+
+Focus 内分两层：**短时引用**（`obj/attr/positions/last_poi/last_destination/last_city/last_intent/last_choices` 等）挂 `focus_ts`，
+读取时超过 300s 即置空；**活动状态**（`candidate_sets` 按各组 ts、`active_route` 按 ts、`safety_alert` 按 7200s、
+`session_constraints` 按会话 2h、`last_places` 按 900s）各按自己的时效判活。Redis key TTL 抬到 7200s。
+「沉默十分钟再说继续刚才的行程」⇒ 路线 / 约束仍在，短时指代不在；缓存超时不是事实解除。
+
+### W10 / W06 / W07：2026-09-20 用户批准，已实施（落地记录 §4.5；以下是当时的方案）
+
+- W10 澄清续接：`plan.clarify` 现在只有 `{question, options[{label, send_text}]}`，客户端回传 `send_text` 当新话轮、planner 从零猜。
+  方案：澄清进挂起表（`phase=wait_clarify`，`clarification_id=operation_id`、`target_field`、`candidate_refs`、`expires_at`），
+  客户端点选回传 `operation_id + choice_index` ⇒ 服务端确定性落值，不再过 LLM；同一问题无进展才止损（复用 `slot_retry`）。
+  改 HMI + Android 消息契约，需要用户批准范围。
+- W06 DialogueDecision：Planner 一次结构化输出同时产 `acts[]`（new_goal / answer_slot / correct / select / confirm / cancel / resume）
+  与 steps；toolcall schema 加字段、弱模型 fail-open（缺字段 = 今天的行为）。它改的是 LLM 契约，要 A/B（`eval_route_hints`、
+  范例契约、真栈 repeat 3）才敢开，需要用户拍板做不做这轮。
+- W07 TaskFrame：在挂起表之上加 `task_id / goal_id / plan_revision / outcome`，与 Task Ledger 对接。依赖 W06 的行为标签。
+
+## 4. 落地记录
+
+### 4.1 批 1（2026-09-19）
+
+| 工作包 | 提交 | 本地证据 |
+|---|---|---|
+| W01 确认歧义 | `e6191057` | `test_engine_confirm` 54（新增 6：双挂起问一次 / 唯一 wait_confirm 优先于更新的 wait_slot / 裸确认不填槽 / 问句不授权 ×4 形态 / 点名确认 / 点名落空不授权）；`test_engine_session_facts` 的读出口 stub 改跟 `load_all`；变异「去掉问句否决」红 2、「歧义退回最新一条」红 1 |
+| W02 预算保真 | `0a4544e0` | 新 `test_context_budget_fidelity` 13 + 既有 `test_context` / `test_memory_render` 逐字契约不动；变异「最后一对无视预算」红 3 |
+| W03 约束改口 | `e35bdb33` | runtime 28（+12）、nearby 111（+3）、context +2（跨轮撤销 / 无可撤不落 None）；变异「去掉接受通道」红 6、「去掉时态框架」红 1 |
+| W04 读复用键 | `1f5dfd27` | planning +3、loop +1、capability-refs prompt 措辞用例改；`test_loop_tier_dedup` 执行侧 12 条不动；变异「键忽略 slots」红 1 |
+
+- 四门禁 + smoke_edge：skills PASS、exemplars 65/3/100（域错配 1.8%）、L0 strict 2/2、capability integrity PASS、smoke_edge 13/13。
+- 全量固定口径（树 `1f5dfd27` + 探针脚本改动，`TZ=UTC0` `-n 8`）：**8437 passed / 0 failed / 31 skipped / 11 warnings**，240s
+  （上一基线 8397 / 1 / 31；那 1 红的 OS-lock 用例本趟绿）。
+- 效配置：生产 compose 不透传 `PLANNER_CTX_BUDGET_CHARS` / `PLANNER_HISTORY_EXCHANGES` / `PLANNER_CATALOG_TOP_K` ⇒ 1400 / 2 / 20。
+- ⚠ 过程记录：W01 / W02 两个提交被另一会话的 push 顺带推上了 `origin/main`（对方已在其记忆与 history 里记了「列出与推送必须分两步」）；
+  本批其余提交按流程列出后再推。
+- 真栈：见 §4.2。
+
+### 4.2 批 1 真栈（release `744fb655`，2026-09-19 21:3x–21:5x）
+
+- push `33cd199d..744fb655`；deploy：plan 只有 `.github/workflows/mobile-apk.yml`（G-05，上一轮已批）一条 `ci_cd` 阻断 ⇒ 用其摘要
+  `c35301ae…dee9` approved dry-run（零阻断）→ apply `submitted` → `status` ok、5/5 healthy、`release_sha` = `running_release_sha` = `744fb655`、
+  零 warning → `verify` `verified`（artifact `20260919T133955Z-744fb65.json`，`minimax:MiniMax-M3`，lock `e2e`）。
+- `probe_qa_regression --cases CF5,CF7,CF9,CF1,CF3,CF4 --repeat 2`：**12/12 PASS**。
+  CF5 T3 裸「确认」⇒「您要确认「把全车门解锁」，还是「创建一个午休场景：空调设定24度」？」零动作，T4 带寻址键 ⇒ `door_lock.open`；
+  CF7「可以吗 / 确认吗」两轮零车控动作、挂起活到 T4；CF9 补槽挂起下「确认」⇒「当前没有待确认的操作」零动作、`取消` 收口。
+- ⚠ CF7 第 1 次取样露出话术层缺陷：「可以吗」交给规划落 chitchat，答「**可以，已为您执行**」（零动作、声称做了；`execution_claim` 只观测不拦）。
+  当日追加 `227457df`：裸确认询问（「可以吗 / 确认吗 / 行不行」）在有 wait_confirm 时走 `system.pending_state` 确定性出口念出挂着什么、怎么确认，
+  零 LLM；「可以换第二天的安排吗」与无挂起的「可以吗」照旧进规划。待下一次 deploy 后复跑 CF7。
+- `--cases RS5,RS4 --repeat 2`：**4/4 PASS**。RS5 T2 带「地图没有实时排队数据」、T3「今天可以排队，等一会儿没关系」之后 T4 两次都不再念那句 ⇒ 撤销通道端到端成立。
+- 顺带观察（不在本批修，记给 W13 / 范例）：纯偏好陈述「我不想排队」「我不吃辣，也不想排长队」在 MiniMax-M3 下 3/4 次落到
+  「这次我没能把您的请求拆成可以执行的步骤」/「看不到刚才那次下单的记录」这类技术失败 / 执行史出口——约束照样登记成功
+  （`_register_input_facts` 在提前出口上跑），但一句陈述得到一句报错式回复；另有 1/2 次把「今天可以排队」规划成一次搜索。
+
+### 4.3 批 2（2026-09-19，P1 确定性部分）
+
+| 工作包 | 提交 | 本地证据 |
+|---|---|---|
+| W01 追加 | `227457df`（裸确认询问走 `system.pending_state` 出口）、`49dacc1f`（「好的，明天早上八点」不进确认寻址） | `test_engine_confirm` 58；两处变异各判红 |
+| W08 候选集版本 | `0d4d795e` + `40edaad1`（地点提示 ≥3 字公共子串）+ `e8e6c949`（`keyword` 垫底） | `test_candidate_sets` +7；变异「合并键无签名」红 2 |
+| W09 生命周期拆分 | `0d4d795e` | 新 `test_focus_lifecycle` 8；变异「不过期短时引用」红 4 |
+
+- 全量固定口径（树 `0d4d795e`，`TZ=UTC0` `-n 8`）：**8453 passed / 0 failed / 31 skipped / 11 warnings**，249s；四门禁 + smoke_edge 全过。
+  后续三个小提交只跑 cloud 目录（1386 / 1388 passed）。
+- 发布链：`744fb655` → `0d4d795e`（22:07 status ok 5/5、verify `20260919T140833Z-0d4d795.json`）→ `49dacc1f`（22:27，verify
+  `20260919T143811Z-49dacc1.json`）→ **`e8e6c949`**（22:47 status ok 5/5 零 warning、verify `20260919T150023Z-e8e6c94.json`，
+  `minimax:MiniMax-M3`，lock `e2e`）。每次 dry-run 零阻断、apply `submitted`。
+- 真栈：
+  - CF7 ×2（`0d4d795e`）**2/2**：「可以吗 / 确认吗」⇒「有 1 条待确认的操作：「把全车门解锁」等你确认。说「确认」就执行，说「取消」就作废。」零动作、零 LLM；T4 带寻址键解锁。
+  - CD8（W08）：`0d4d795e` 上 1/2 → 差的那次 planner 填 `location=深圳湾万象城`，2 字前缀「深圳」对不上「万象城」⇒ `40edaad1` 改 ≥3 字公共子串；
+    `49dacc1f` 上 2/3 → 差的那次 planner 把「万象城」填进 `keyword`、`location` 空 ⇒ `e8e6c949` 让 `keyword` 垫底；**`e8e6c949` 上 3/3**：
+    「刚才万象城那批第二家评分多少」三次都答第 1 轮卡片第 2 项（TOVA / Auvers / TOVA），「第二家评分多少」三次都答最新批。
+    两次修的都是**取名通道对 planner 槽位方差的容错**，合并逻辑本身首跑就对。
+  - W09 沉默探针（自写脚本，`--silence 660`）：第一版尺子「话术含"不吃辣"」判红，但 collector 显示两条线 T2 的焦点块同样大小
+    （`ctx_chars − history_chars` 都是 152）且 A 线话术带「不合口味的已排后」——**约束其实活过去了，那句话依赖记忆画像里的
+    「爱吃川菜」，尺子量错了对象**。第二版零 LLM 尺子：「万象城附近的餐厅」→ 沉默 660 s（中间还撞上一次发布导致 WS 断连、同
+    session 重连）→「第二家评分多少」由 `candidate_query` 出口答出第 1 轮卡片第 2 项「TOVA西班牙餐厅」评分 4.5；旧 300 s key TTL
+    下必落 `cloud.candidate_missing`。对照线（零沉默）同样通过。焦点同时跨过了一次 planner 容器重启（Redis 未动）。
+- 记给后续的观察（不在本批修）：
+  - planner（MiniMax-M3）对「X 附近的餐厅」的槽位三次三样（`location=万象城` / `location=深圳湾万象城` / `keyword=万象城`），
+    第三种让 nearby 以车辆位置为中心搜——批次内容与用户所指不符，属于范例 / W13 层面；
+  - 纯偏好陈述（「我不吃辣」「我不想排队」）在 MiniMax-M3 下经常落技术失败 / 执行史出口（约束照样登记成功），归 W13 分账；
+  - 探针会写进共享 e2e 用户的长期记忆（「不吃辣」已进画像，后续取样话术带「您说过不吃辣」），读话术层读数时要知道这一点。
+
+### 4.4 装置与流程教训
+
+- `dev_stack.py verify` 紧跟 apply 之后的全空 artifact（`…-unknown.json`）是已知的锁窗口；但**连红十几分钟**的真因是本会话一条
+  被工具超时挪到后台、仍在跑的 bash `until verify` 循环——每 45 s 抢一次远端 release 锁，且跑在 MSYS 下。停掉它立刻 `verified`。
+  规矩：cloud 命令只在 PowerShell 前台跑，不写轮询循环；后台任务超时后要显式 `TaskStop`。
+- 另一会话的 push 顺带推走了本会话的 W01/W02（对方已记「列出与推送分两步」）；本会话之后每次 push 前先 `git fetch` + 列 `origin/main..HEAD`。
+- Bash 工具的多行 heredoc 在本机时有 EOF 解析失败，改用 Write 写 .py 补丁再执行。
+
+### 4.5 批 3（2026-09-20，W10 / W06 / W07 + 真栈驱动的两条 navigation 修复）
+
+| 工作包 | 提交 | 做了什么 | 本地证据 |
+|---|---|---|---|
+| W10 澄清续接 | `05a631b2` | 澄清落 `wait_clarify` 挂起（`SessionState.clarify`，卡带 `index / operation_id / expires_at_ms`）；选择由服务端解：寻址键+序号 / 裸序数 / 纯数字 / label / `send_text` 原文（老客户端）；选项带合法 `capability_ref`+`slots` 时 planner 预解析成 `step`，点选零 LLM 执行，否则 send_text 重新规划（`clarify_probe`）；止损判据 `clarify_is_progress`（同题不问、换题可问）；换题保留挂起、「算了」取消；HMI / mobile 回传 `operation_id` | 新 `test_engine_clarify_pending` 14、planning +3、contracts +1、mobile sendRouter +2；老「零会话状态」断言改写；cloud+runtime 2032、mobile 111 suites / 1143 + tsc/eslint 0、hmi 338 + tsc 零新错；变异「去掉 label/send_text 通道」红、「去掉进展闸」红 |
+| W06 行为标签 | `2449aabb` | prompt-only 顶层 `acts`（`planning.ACTS`，`PLANNER_ACTS` 开关，不进 schema）；`Plan.acts` 进 span | `test_engine_task_frame` 13（含词表 / prompt 开关 / schema 不含）；变异「去掉 correct 闸」红 2 |
+| W07 任务帧 | `2449aabb` | `Focus.active_task`（task_id / intent / slots / revision / outcome / kind / ts）；写任务只被写任务顶掉；1800 s 限龄；焦点块渲染「当前任务=…（第N版）」；engine `_apply_task_patch`：correct ∧ 单步 ∧ 同 intent ∧ 帧活着 ⇒ 缺槽继承、revision+1 | 同上；变异「去掉读写优先」红 1 |
+| navigation 修复 | `fb98150d` / `88a89456` | reroute：改时限算改动（此前答「您想怎么调整」）；「改成7点半前到就行」的捕获是时刻不是地名（此前被搜成「东方之门(地铁站)」——**改时限把导航改去了另一个地方**）；裸时刻就近旧时限取半天（19:00 → 19:30 不是 07:30） | reroute 29、navigation 197；变异「去掉时刻守卫」红 2 |
+
+- 全量固定口径（树 `4bfebdd1`，`TZ=UTC0` `-n 8`）：**8485 passed / 1 failed / 32 skipped**；那 1 红是 `test_e2e_stack_lease` 的 OS-lock 用例（串行 61/61 绿，隔离债未修）。四门禁 + smoke_edge 全过。
+- 发布链：`4bfebdd1`（verify `20260919T165227Z-4bfebdd.json`）→ `fb98150d`（`20260919T170108Z-fb98150.json`）→ **`88a89456`**（status ok 5/5 零 warning、`20260919T170707Z-88a8945.json`，`minimax:MiniMax-M3`）；每次 dry-run 零阻断；CI 8/8。
+- 真栈：
+  - CL1（W10）`4bfebdd1` 2/3、`fb98150d` 2/3：出澄清卡的取样里「第一个」**每次**由服务端解成选择、关掉那条挂起并导航；差的那次是 planner 对裸地名「云岚国际中心」落技术失败出口（没出澄清卡，同 F09 家族），下一句「第一个」诚实答「没有可以引用的列表」。
+    模型两次都没给 `capability_ref`（可选字段被跳过）⇒ 走的是 send_text 重新规划这一路（`cloud.clarify_choice` → `cloud.planning`），零 LLM 直执行的通道在真栈尚未观察到。
+  - TF1（W06/W07）`4bfebdd1` **0/3** → 定因：planner 三次都选 `navigation.reroute`（活动路线在场，这是对的），1/3 标了 `acts=correct`；而 reroute **不把改时限当改动**（2/3 答「您想怎么调整当前路线？」），
+    且 `_REROUTE_DEST_RE` 把「7点半前到就行」当目的地搜成「东方之门(地铁站)」（1/3，**危险**）。修 navigation 后 `fb98150d` 3/3（但 00:5x 跑出「到达时限改为07:30」——裸「7点半」按未来最近一次），
+    再修就近旧时限后 `88a89456` **3/3「到达时限改为19:30」**，目的地深圳湾公园不变。
+  - 结论：这条旅程里「改口精确修改对象」由 navigation 自己持有的路线会话兑现，W06/W07 的继承通道在真栈没有被触发（planner 选的是 reroute 而不是同 intent 的 navigate_to）——
+    通道本身单测钉死，但**真栈证据只有观测列**（`acts=correct` 1/3）。哪类旅程会真正走到「同 intent 改口」（无活动路线的路线规划、提醒改期、行程改日）留给 P2 的 14 类边界矩阵。
+- 记给后续：planner 对可选字段（`capability_ref` / `acts`）的遵循率低（MiniMax-M3：`acts` 1/3、`capability_ref` 0/2）——prompt-only 字段要靠范例；纯名词 / 纯偏好陈述落技术失败出口的 F09 家族在本批探针里又出现两次（CL1 T1、RS5 T1）。
+
+## 5. 批 4（P2）方案与裁决（2026-09-20）
+
+先拿生产分布再动手（评审 W05 的纪律）：collector 只读 830 轮（2026-07-10 → 09-20 01:07，
+含标注豁免的老轮）——终态族 `planner_technical_failure` **42**、`candidate_aggregate` 19、`pending_state` 10、
+`clarify_choice` 4、`pending_cancel` 4、`no_pending` 4、`no_plan` 2、`pending_ambiguous` 2；两条 shadow 列：
+`execution_claim` **6**（4 条是 `pending_cancel` 出口的「好的，已为您取消」——它真的关掉了一条挂起，是尺子的误报；
+2 条是 chitchat 零动作声称执行：「可以，已为您执行」（W01 追加已修）与 PTT 噪声句「但是，这里面来。哎妈。」答
+「已为您避开此路段。已为您重新规划路线：当前位置 → 浮木咖啡 → …7.4公里」）；`clause_uncovered` **134/830**，逐条看
+≥ 95% 是误报（chitchat / `info.search` 整句透传、单步双槽「导航去深圳湾公园，晚上7点前到」、修饰分句「联网查询」「至少五百字」、
+安全陈述）。这两组数字决定了下面每包做到哪、不做到哪。
+
+### W13 受话与失败分账（本批主干）
+
+1. **终态账本**：`runtime/outcome.py` 一份封闭词表（`not_addressed / pending_missing / pending_ambiguous / pending_asked /
+   no_pending / cancelled / pending_expired / safety_origin_blocked / injection_rejected / candidate_missing / fact_answered /
+   constraint_noted / unresolved_object / planner_failure / permission_missing / clarify / cancel_unresolved / no_plan /
+   pending_confirm / pending_slot / completed / partial / failed / uncertain / stream_lost / escalate_failed / store_fenced`），
+   每个 kind 映射到评审 §5.1 的八类之一（`CATEGORY_OF`）。engine 的**每一条 final 出口**都声明 `_outcome`（内部键，`run()`
+   剥掉），执行类 final 由结果集算（全 OK ⇒ completed；有 OK 有 FAILED / `_refused` ⇒ partial；全 FAILED ⇒ failed），
+   `run()` 在唯一出口发 `cloud.outcome` span `{kind, category, actions, answer_only}`；collector 合并成 `turns.outcome` 列
+   （加法迁移，`/api/search` 直接可查），dashboard 详情页多一枚徽记。**这就是「受话 / 理解 / 支持 / 执行失败分账」的载体**——
+   此前只有 `planner_technical_failure` 这一格有名字，其余都混在 `status=ok` 里。
+2. **F09-a 纯偏好陈述**（真栈三批共见四次）：`constraints_in(text)` 覆盖了**全部分句**、无安全信号、`mem_on` 时 ⇒
+   登记（`_register_input_facts`）+ 确定性致谢「好的，这次不吃辣、可以排队，找地方的时候我按这个来。」，零 LLM，kind
+   `constraint_noted`。话术用词与焦点块共用 `runtime.session_constraints.phrase_of`（一份词表）。挂起分支之后、规划之前
+   （与候选 / 会话事实短路同挂点）。
+3. **F09-b 裸对象落技术失败**（CL1 差的那次）：planner 两轮里出现过澄清标记（`goal_requires_clarification` /
+   `clarification_marker`）却没交出合法澄清卡而落 `_fallback` ⇒ `Plan.clarify_wanted=True`；engine 把这一种技术失败改成
+   `unresolved_object` 出口：「我听到了「云岚国际中心」，但没听清要拿它做什么——说完整一点我就能办。」不出 retry issue
+   （它不是技术失败，是歧义）。
+4. PTT 静默拒识**不改**：客户端已把拒识轮渲染成「已忽略疑似环境人声（点错了可重说一遍）」，评审要的可见状态在那里。
+
+### W14 AnswerContract（执行性表述）
+
+- 只拦**按声明不可能为真**的那一种：这一轮执行的步全是 `response_only`（chitchat 谈话）、final 零动作、话术命中
+  `execution_claim`（完成体 / 进行体 + 指向用户）⇒ 按句剥掉声称句（`runtime.execution_claim.strip_execution_claims`），
+  剥空了换成「这一轮我没有执行任何操作；要我做什么的话说具体一点。」；`cloud.execution_claim` span 加 `intercepted=true`。
+  非 response_only 的步照旧只观测（信息类能力的「已为您规划 3 天行程」是真的）。
+- 生产 830 轮里两条真阳性都在这条判据里；四条误报（pending_cancel 出口）是 engine 自己的确定性话术，不经这条路。
+
+### W11 Capability Contract：`effect`
+
+- `Capability.effect`（proto 字段 11，`""|read|write`）：manifest → SDK loader → Registry round-trip（逐字段无损用例跟着长）→
+  `Step.effect` / `step_record` → 消费方：① W07 任务帧 `kind` 由声明决定（此前靠「结果带 actions / 声明 require_confirm」猜，
+  `reminder.create` 这类不出 action 的云侧写被记成 read，下一轮查询就把它顶掉、「改成八点半」无处继承）；② `cloud.outcome`
+  的 `answer_only` / 执行类 kind 只看声明。缺省 `""` = 今天的启发式（旧 manifest 零行为变化）。
+- **刻意不接进问句安全闸**：把云侧声明写接进 `_side_effect_steps` 会让「明天八点提醒我开会好吗」（`is_non_directive_question`
+  认「…好吗」为问句、`DIRECTIVE_MARKERS` 里没有它）被拦成闲聊——那是新造的洞。礼貌尾词的判据先补、再谈扩闸。
+- 数据有效期 / 结果投影（`freshness_s` / `observation_keys`）**不落**：没有现成消费方，落了就是会漂移的声明（B4）。
+
+### W15 hint 与目录解耦
+
+- 能力可见性 = 兜底 Agent ∪ `category: core`，**不再**因「声明了 route_hints」而受保护（退役一条 hint 不再顺手改变
+  目录裁剪）；hint 扫描改用**权限过滤后的完整注册表**（`WorkingSet.registry_agents`），不用 prompt 目录——被 top-k /
+  预算裁出 prompt 的 Agent，它的 hint 照样命中、步照样过 `_validated_steps`。今天 14 个 Agent 两道裁剪都不触发，
+  行为逐字不变；改的是结构。
+
+### W12 多目标闭环（分两步）
+
+- 第一步（批 4 首个 release `e9044daf`）：终态账本区分 `completed / partial / failed`（**按结果集，精确**）；
+  `clause_uncovered` 观测列去掉三类已证实的误报（整句透传槽 / 兜底 Agent 吃整句 / 单步已填槽数 ≥ 分句数）。
+  用户可见话术当时**不落**：生产 134 条 shadow 里真阳性个位数，按分句子串判「哪一段没人管」在真实分布上不成立。
+- 第二步（P2 收尾，用户 2026-09-20 下午指示「P2 推进至完整收尾」）：**planner 侧诉求账本**——顶层 `goals[]`（按原话
+  截的肯定诉求）+ step `covers[]`，JSON 段与 toolcall schema 两条通道都进（可选字段、`PLANNER_GOALS` 开关），系统只核对
+  （`engine.goal_gap`：每一步都填了 covers ∧ 某条诉求没人认领 ∧ 槽值也不替它作证）才在完成类 final 上补一句
+  「「X」这部分这次没有处理到」+ `goal.uncovered` + 终态 partial；任何一环缺席 fail-open。为什么现在能落：判断
+  「联网查一下」是修饰、「再点生椰拿铁」是诉求的只有模型自己，系统做的是核对而不是猜；schema 里的注记字段填多了
+  无害（与 clarify / acts 那类决策字段不同），所以可以进 schema 拿结构遵循率。A/B 见 §5.6（同一语料两个 release）
+  ——**结果是缺省关**：MiniMax-M3 开着时工具通道 82/90 → 54/90、多 3 轮 planner_failure，而账本 goals 只填 24/90、
+  covers 全填 21/90、判出漏承接 0/90。机制与判据留着（`PLANNER_GOALS=on` 一键开），换模型 / 范例后重跑同一语料再定。
+
+### P2 余项收尾（2026-09-20 下午）
+
+- **礼貌尾词进 `question_shape`**：只在祈使框架上开口子（`_polite_request`：动词打头 / 「把 / 将」框架 + 礼貌尾）；
+  非祈使主体的礼貌尾句是 A-not-A 提问。SF3 那句「慢一点开可以吗」仍是提问、仍被拦；`test_question_write_guard` 的
+  「礼貌请求也会被拦」改成两向：祈使框架照做、其余照拦。评审 §4 对比对「帮我把窗关上好吗 vs 关窗会影响通风吗」
+  从此不靠「帮我」也分得开。
+- **云侧 `effect: write` 是否接问句闸——用数据裁**：扫 132 条 gold 为云侧写能力的语料，3 条会被新闸拦掉（含一条
+  多分句里第二句「会不会」把整句判成问句的假阳性），危险类零增益 ⇒ **不接**（conventions §9.43 ⑦）。
+- **W11 数据有效期 / 结果投影**：仍无现成消费方（跨轮读复用不存在；T2 观察投影没有声明方）⇒ 不落，维持 §5 W11 的裁决。
+- **最小对比对**（评审 §4 表，P2 退出条件）：确定性能分的七对进 `test/test_contrast_pairs.py`，两对当场红——
+  「第二家离这里多远」候选算子不认「离这里」这个方位虚词（`_PICK_DIMS` 距离维加 `离我 / 离这里`）、
+  「不要换第二家」极性判据的动词表没有「换」（`polarity` 加「换」）；模型才能分的五对 + W12 一条进探针 `contrast` 组。
+- 顺带：「记住…」记忆祈使的判据下沉到 `runtime/memory_directive.py`（planning 只 import），纯偏好陈述判据排除它
+  ——「记住我喜欢清淡」是长期偏好，不能答成「这次不吃辣」。
+
+### 批 4 验收
+
+- 每包先红测试再改实现；定向套件（cloud / runtime / registry / collector / dashboard）+ 四门禁 + smoke_edge；全量固定口径一次；
+  变异各自判红（outcome 漏声明 / 剥声称 / effect round-trip / hint 解耦 / 观测去噪）。
+- 真栈：push → dry-run → apply → status / verify → 探针：`residual` RS6（纯偏好陈述 ⇒ 致谢、零动作、约束下一轮生效）、
+  `confirm` CL2（裸地名技术失败改口）无法稳定触发时用离线用例锁；collector `turns.outcome` 分布作为 W05 新基线读数。
+
+### 5.6 落地记录（2026-09-20，release `e9044daf`）
+
+| 工作包 | 提交 | 做了什么 | 本地证据 |
+|---|---|---|---|
+| W13 终态账本 + F09-a/b | `b0b39c7d` | `runtime/outcome.py` 词表（27 kind → 8 类）；engine 全部 final 出口声明 `_outcome`，`run()` 发 `cloud.outcome`；loop.py 的 T2 final 同款；collector `turns.outcome` 列（加法迁移）+ dashboard 徽记；`constraint_noted` 出口（`is_pure_constraint_statement` + `phrase_of` 词表与焦点块共用）；`Plan.clarify_wanted` → `unresolved_object` 出口 | 新 `test_engine_outcome` 16（源码级：engine / loop 声明的每个 kind 都在词表里）、`runtime/tests/test_outcome` 6、`test_planning_no_action` +3、collector +3、dashboard vitest 2 + tsc 0；变异「漏声明 no_plan」「常量关掉约束出口」「忽略 clarify_wanted」各判红 |
+| W14 声称拦截 | `b0b39c7d` | `strip_execution_claims`（按句、同一份正则）；`PlanContext.answer_only`（D0 / executor / escalate 三条路各自置）；`_emit_execution_claim` 只在 answer_only ∧ 零动作时剥句，span 加 `intercepted` | `test_execution_claim` +4、`test_engine_outcome` W14 段 4（含「任务步的完成语只观测」对照）；变异「永不拦截」判红 |
+| W11 `effect` | `b0b39c7d` | proto 字段 11 + `gen-proto.ps1`（Go gateway build/vet 零错）；loader `capability_effect`（值域外 ValueError）；registry `_manifest_to_dict` / `_dict_to_manifest` + 全字段夹具；`Step.effect` / `step_record` / `_validated_steps`（`_declared_effect` 只认 read / write）；`context.task_writes`；端侧 `_effect_for`、MCP 桥 `tool.write`；8 份云侧 manifest 共 23 条 `effect: write` | `test_manifest_effect` 6、`test_store_roundtrip` 全字段无损、`test_capabilities` +2、`test_bridge` 断言、`test_engine_task_frame` +3（不出 action 的 `reminder.create` 现在是写任务、查询顶不掉它）；变异「还原时丢 effect」「帧忽略声明」各判红 |
+| W15 hint 解耦 | `b0b39c7d` | `_always_include` = 兜底 ∪ core；`WorkingSet.registry_agents`（`_catalog_with_registry`）；`PlanBuilder._hint_map`（权限过滤后的完整注册表）喂 `apply` 与 `matches_clause_scope` | `test_context` 两条改写、`test_route_hints` +3（被裁出 prompt 的 Agent 的 hint 照样命中 / 无权 Agent 的 hint 不偷渡 / 退役 hint 不改保护）、`test_catalog_budget` 期望集按新规则改（8000 下 ecosystem 全裁、core 一个不掉、16000 零裁剪不变）；变异「扫回 prompt 目录」「跳过权限过滤」各判红 |
+| W12 记账 | `b0b39c7d` | `_clause_uncovered` 去噪三类 | `test_obs_spans` +5；变异「去掉槽容量规则」判红 |
+| 探针 + 文档 | `e9044daf` | RS6 / EC1、判据 `no_execution_claim`；conventions §9.43；本文 §5 | — |
+
+- 全量固定口径（树 `b0b39c7d` 的工作树，`TZ=UTC0` `-n 8`）：**8548 passed / 0 failed / 32 skipped / 11 warnings，237 s**（上一基线 8485 / 1 / 32；那条 OS-lock 用例本趟绿）。四门禁 + smoke_edge 13/13 全过；九处变异各自判红。
+- 发布链：push `c574bd31..e9044daf`（`origin/main..HEAD` 恰两条、单独一步列出）→ dry-run 零阻断 → apply `submitted` → status **ok、5/5 healthy、零 warning、`release_sha` = `running_release_sha` = `e9044daf`** → verify **`verified`**（artifact `20260920T032437Z-e9044da.json`，`minimax:MiniMax-M3`，lock `e2e`，`e2e_remote_safe` passed）。
+- 真栈（`minimax:MiniMax-M3`，`--repeat 2`）：**RS6 2/2**——「我不吃辣，也不想排长队」⇒「好的，这次不吃辣、不想排队，找地方的时候我按这个来。」零动作、零 LLM；下一句推荐带「地图没有实时排队数据，这条我按不上」/「您说过不吃辣，这次就不按平时爱吃的川菜找了」。
+  **EC1 2/2**——生产 PTT 噪声原句「但是，这里面来。哎妈。」一次落 `unresolved_object`（「我听到了「…」，但没听清要拿它做什么」）、一次落 `planner_failure`，两次都零动作、零执行性声称（拦截通道在这两次里没被走到——模型这次没编）。
+- collector `turns.outcome` 上线即有读数：探针与 verify 的十条新轮分别落 `constraint_noted ×2 / completed ×3 / unresolved_object ×2 / planner_failure / clarify`，旧轮为空。
+- 记给后续：verify 的问候句「你好，请只回复一句问候」有一次落 `unresolved_object`（planner 对问候先标「需要澄清」再两轮交不出卡）——这是 planner 在琐碎输入上的方差（同一句其余取样走 `toolcall_salvage_no_action` → chitchat），F09-b 只改了它失败时的措辞，没改失败本身；这类「模型对问候要澄清」归范例 / W19。
+
+#### P2 收尾（2026-09-20 下午，release `e3528ee7` → `9ebaa5c3`）
+
+| 项 | 提交 | 做了什么 | 证据 |
+|---|---|---|---|
+| W12 诉求账本（planner 侧） | `e3528ee7` | `goals[]` + `covers[]` 两条通道、`engine.goal_gap` 四道核对、`goal.uncovered` issue、终态 partial、span 三列 | `test_goal_ledger` 15；变异四处判红（漏 fail-open / 去槽值作证 / 不补话术 / 不接 covers） |
+| A/B（同一语料两个 release） | — | 45 句（30 组合 / 适应 + 15 单意图）× 2，`minimax:MiniMax-M3`，A=`e9044daf` B=`e3528ee7` | 通过 **84/90 → 81/90**（组合 56 → 53、单意图 28 = 28）；意图集一致 80/90；**plan_mode：toolcall 82 → 54**（salvage 14 + salvage_kept 16 + fallback 1）；B 多 3 轮 `planner_failure`（「陪我说说话」「随便聊点什么」「找个充电站，同时看看附近有什么吃的」）；账本 goals_declared **24/90**、covers 全填 21/90、**goal_gap 0/90** |
+| 裁决 | `9ebaa5c3` | **`PLANNER_GOALS` 缺省 off**（机制、判据、开关都在；GL1 探针挪到 `ledger` 组） | 代价实（工具通道掉 28 轮、3 轮技术失败）、收益零（0 条漏承接判出）——换模型 / 范例把遵循率拉上来再开，重跑同一语料 |
+| 礼貌尾词 | `e3528ee7` | `question_shape.POLITE_TAILS` + `_polite_request`（祈使框架才开口子） | `test_question_shape` +17、`test_question_write_guard` 改两向（SF3 句仍拦）；变异两处判红；edge 895 / fast_intent 69/69 / 四门禁全过 |
+| `effect` 进问句闸 | — | **不接**（数据：132 条云侧写 gold 里 3 条会被误拦、危险类零增益） | conventions §9.43 ⑦ |
+| 对比对 | `e3528ee7` | `test/test_contrast_pairs.py` 七对；当场红两对修掉（候选算子距离维 + 极性「换」）；`runtime/memory_directive.py` 下沉 | 探针 `contrast` 组 CT1–CT5 **10/10**（CT1 首跑探针自己撞了内置模式名「静音模式」，改「读书模式」后 2/2）；CT2 T2「之后一旦下雨就通知我」零动作零声称但被当成建提醒追问时间（记给 W13 后续：持久订阅的诚实拒绝） |
+| 发布链 | `e3528ee7` / `9ebaa5c3` | push（每次 `origin/main..HEAD` 恰一条）→ dry-run 零阻断 → apply → status ok 5/5 零 warning → `9ebaa5c3` verify `verified`（`20260920T043927Z-9ebaa5c.json`，MiniMax-M3，lock e2e）；RS6 / EC1 / CL1 复跑 **6/6**；CI 8/8（`e3528ee7`） | 全量固定口径 **8593 / 0 / 32**（`e3528ee7` 工作树）；九处变异各自判红 |
+
+## 6. 后续入口（P3，用户另开会话推进）
+
+P2 已收尾（§5 与 §5.6 第二段）：余项里唯一保留为条件的是 W11 的数据有效期 / 结果投影（等有真实消费方再落）。
+P3 按评审原表：W16 ContextCapsule、W17 摘要 / Memory 检索（三态：找到 / 无结果 / 后端不可用）、W18 50/100 轮长会话与恢复
+（`scripts/probe_qa_long_sessions.py` 是现成 runner）、W19 模型与检索消融。每包仍按「先红测试、独立开关、旧 schema 读兼容」推进。
+**2026-09-20 晚起由批 5 接（§7）。**
+
+## 7. 批 5（P3）方案与裁决（2026-09-20，用户授权提交 / 推送 / 部署 / 真栈验证）
+
+先对 HEAD `7f5ff700` 重证四包的现状，再定每包做到哪：
+
+| 包 | 现状（代码事实） | 本批做什么 | 刻意不做 |
+|---|---|---|---|
+| W16 ContextCapsule | 胶囊**已经存在**：`WorkingSet` 一轮装配一次，Planner prompt、五条确定性读出口、`_apply_focus_meta` 的五条投影通道（`focus_active_route` / `focus_candidate_set` / `focus_session_constraints` / `focus_safety_alert` / `focus_destination_*`）全读它。缺的是**读取本身的结局**：`_history` / `_recall` 各自 `except Exception: return []`，「读到了、是空的」与「根本没读到」在胶囊上是同一个值 | 胶囊加两格读态 `history_state` / `memory_state`（`found / none / unavailable`），随 `context_stats` 进 `cloud.planning` span；投影通道保持一条（`_apply_focus_meta`），不新开第二条 | 不把整份历史下发给 Agent（chitchat 的 8 条是**谈话文本**读，不是事实通道——事实由确定性出口按胶囊答）；不加没有消费方的任务帧下发 |
+| W17 记忆读取三态 | memory 服务 PG 连不上 ⇒ 静默退到进程内存（`MemoryVectorStore.init` 只试一次，之后**永远**是空库）；Redis 连不上 ⇒ 会话历史也退到内存。两条都让「后端不可用」在读侧长得和「没有记忆 / 没有历史」一模一样；云侧再吞一次异常。后果：一次 PG 故障会让「你还记得我不吃辣吗」得到一句自信的「你没说过」，「刚才执行了什么」得到「没有执行记录」 | ① memory 服务：`RecallResponse.degraded` / `GetSessionResponse.degraded`（proto 加法字段）= 配置了持久后端却在用内存兜底；PG 初始化失败后**带退避重试**（不再要重启服务才恢复）。② 云侧 `Clients.recall_read` / `get_session_read` → `(items, state)`；gRPC 失败 = `unavailable`、`degraded=true` = `unavailable`、空 = `none`。③ 判据 `runtime/memory_read.py`（唯一实现）：`is_memory_recall_question`（「你还记得…吗 / 我之前说过…吗 / 你知道我喜欢…吗」，问句形态、零领域词、排除「记住…」祈使）与固定话术。④ engine：记忆问句 ∧ `memory_state=unavailable` ⇒ 确定性出口「记忆服务这会儿连不上…」，kind `memory_unavailable`（新登记，类 `dependency_or_planner_failure`）；执行史 / 数据源两条读出口在 `history_state=unavailable` 时答「我这会儿查不到执行记录」而不是「没有记录」。⑤ chitchat：`_memory_context` 三态，自己的召回失败 + 记忆问句 ⇒ 同一句诚实话术（`handle` / `handle_stream` 共用一个入口） | 不建第二套向量库；不做摘要层（历史视窗是 W19 的单变量，先量再改）；时间感知检索（`max_age_days`）没有证据先不接 |
+| W18 长会话与恢复 | runner 五个 persona 已覆盖 50–100 轮、失败后恢复、清理与 TTS；**没有**沉默 / 断连重连 / 旧批候选被顶掉后再点名 / 旧确认与已取消之后再「确认」/ 修正后的约束再问 | runner 加 `continuity` persona（同一 session 连续 ≥50 轮、每轮 `silence_s` / `reconnect` 指令）；两条由设计先揭出的真缺陷各配红测试再修：**(a) 被顶掉 / 过期的候选批被点名时不许悄悄换成另一批**（`resolve_candidate_scope` 零命中退回最新——用户点名「万象城那批」而它已不在台账 ⇒ 今天答的是科技园那批第二家、零方差）⇒ 台账保留被顶掉组的**墓碑**（label / place_hint / ts，≤6 条、2h），点名到墓碑 ⇒ `candidate_missing` 出口的第二种话术「万象城那批已经不在手边了，要我重新查一下吗」；**(b) 「我今天说过不吃辣吗」是系统持有的事实**（`focus.session_constraints`）⇒ `session_facts` 家族第四条读出口，零 LLM | 「别人的偏好不会串给我」要第二个 user，WS 探针换不了 user（§4.3 那条老账），不写成已验；跨端会话迁移按现设计各自独立会话，不在本批造迁移协议 |
+| W19 模型与检索消融 | 请求级 LLM pin 已有（`llm_provider` / `llm_model`）；上下文视窗 `PLANNER_HISTORY_EXCHANGES` 只能靠部署改 env（compose 不透传 ⇒ 生产恒 2），单变量 A/B 要两次发布 | 请求级视窗 pin `meta.planner_history_exchanges`（1–6，预算仍是硬上限）——同 D2 那条「评测 / 重放 A/B」pin 的定位；`context_stats.history_pairs_kept` 证明它生效；用一组**要跨过 ≥3 对才能接上**的省略追问语料做首个单变量读数（2 对 vs 4 对，同一 release） | 不据此改缺省（评审 F02 原话：先量再定档位）；不换主模型 |
+| 留下的观察 | 「之后一旦下雨就通知我」被 reminder 当成缺时间追问 | 事件触发（一旦 / 只要 / 每当…就…通知我）不是时间也不是地点 ⇒ reminder 自己诚实拒绝（领域知识留在 Agent）：`_refused: "unsupported"`，终态账本新 kind `unsupported`（`outcome_of_results`：全部是 `unsupported` 拒绝 ⇒ `unsupported`，不再记成 failed） | 问候句偶尔「需要澄清」：模型方差，留给 W19 后续（不为它加 hint） |
+
+### 批 5 验收
+
+- 每包先红测试再改实现；定向套件（cloud / runtime / memory / agents/_sdk / chitchat / reminder）+ 四门禁 + smoke_edge；全量固定口径一次；变异各自判红
+  （三态吞成空 / 墓碑不落 / 约束问句不接管 / 事件触发仍追问时间 / 视窗 pin 不生效）。
+- 真栈：push → dry-run → apply → status / verify → 探针：`continuity` persona（≥50 轮，含 `silence_s` 与 `reconnect`）、
+  `contrast` CT2 复跑（持久订阅诚实拒绝）、新增 `residual` RS7（约束问句读出口）/ CD9（墓碑）；W19 单变量读数单独成表。
+  `memory_unavailable` 出口在真栈上**不可触发**（不停别人的 PG / Redis），只有离线用例 + 生产 `turns.outcome` 分布作为后续读数。
+
+### 7.1 落地记录（2026-09-20 晚，release `485fccd1` → `8e403d5c`）
+
+| 包 | 提交 | 做了什么 | 本地证据 |
+|---|---|---|---|
+| W17 读取三态 | `485fccd1` | `runtime/memory_read.py`（四态词表 + `is_memory_recall_question` + 两句固定话术）；memory 服务 `RecallResponse.degraded` / `GetSessionResponse.degraded`（proto 字段 3 / 2）+ `MemoryVectorStore.ensure()` 按 30 s 退避后台重连（此前 `init()` 只跑一次）；云侧 `Clients.recall_read` / `get_session_read`、SDK `MemoryClient.recall_read` / `Context.recall_read`；`WorkingSet.history_state` / `memory_state` 进 `context_stats` 与 `cloud.planning` span；engine `memory_unavailable` 出口（新 kind）+ 执行史出口读不到时答「查不到」；chitchat `_build_messages` 一个入口盖 handle / handle_stream | `runtime/tests/test_memory_read` 23、`memory/tests/test_degraded_read` 8、`test_context_read_state` 9、`test_engine_memory_read_state` 10、chitchat +3（`make_context` 的 `recall_read` 跟 `recall` 走）；变异 6 处各判红（三态吞成 NONE / 服务端不自报 / 不重连 / 读接口异常记 NONE / 出口不接 / 执行史不分账） |
+| W16 胶囊 | `485fccd1` | 结构已在，本批只补读态两格 + 视窗一格进胶囊与 span；投影通道仍只有 `_apply_focus_meta` 一条 | `test_planning_span_attrs_carry_read_states_and_window` |
+| W18-a 墓碑 | `485fccd1` | `Focus.retired_candidate_sets`（≤6 条、2 h；封顶顶掉与过期各立一次；同键新版本不立）；`retired_candidate_hit`；engine 在 `resolve_candidate_scope` 零命中且点到墓碑 ∧（句首序数 ∨ 候选聚合形态）时走 `candidate_missing` 第二种话术 | `test_candidate_sets` +4、`test_engine_candidate_shortcut` +3（修前逐字答「「南店2」评分 4.2」）；变异「墓碑不查」红 3 |
+| W18-b 约束读出口 | `485fccd1` | `is_constraint_recall_question` / `constraint_recall_answer`；engine `cloud.constraint_recall`（kind `fact_answered`，有账才劫持）；`constraints_in` 对回问句不登记 | runtime +6、engine +3；变异「回问句照登记」红 2 |
+| 生产缺陷（顺手抓到） | `485fccd1` | `is_pure_constraint_statement` 把「帮我找家不辣的餐厅」「附近有没有不辣的馆子」判成纯陈述 ⇒ `e9044daf` 起这类单分句请求答「好的，这次不吃辣…」零搜索。修法：问句形态与 `REQUEST_MARKER_RE` 任一在场就不是陈述；约束照登记 | runtime +7（含「陈述仍是陈述」对照）、`test_engine_outcome` +1；变异「去掉请求标记」红 4 |
+| 事件触发拒绝 | `485fccd1` | reminder `_EVENT_TRIGGER_RE`（连接词 + 事件 + 通知动词 / 「…就通知我」），时间 / 地点 / 可提醒事件都走不通后 `_refused="unsupported"` 诚实拒绝；`outcome_of_results` 新 kind `unsupported` | reminder +8、`test_outcome` +1；变异「仍追问时间」红 4、「记成 failed」红 1 |
+| W19 视窗 pin | `485fccd1` | `meta.planner_history_exchanges`（1–6 字面量）→ `PlanContext.history_exchanges`（不进 prefs）→ 取回 `2N+2`、渲染 N 对；预算仍硬上限；`context_stats.history_exchanges` | `test_context_history_pin` 5；变异「pin 恒 0」红 1 |
+| 探针 | `485fccd1` / `8e403d5c` | `continuity` persona（53 轮；`silence_s` / `reconnect` 轮指令、`--silence-scale`）；`residual` RS7 / RS8 / RS9、`candidate` CD9；`_ENGINE_ONLY_TRACE_NODES` 加四条零 Agent 出口；视窗 pin 进探针 meta 白名单 | `scripts/tests` +3 |
+| 真栈逼出的两条 | `8e403d5c` | ① 路况补槽把「把全车门解锁」整句当路线（continuity T21）：`question_shape.is_imperative_opening`（把 / 将 处置式、请 / 麻烦 礼貌祈使）⇒ `_is_topic_change` 判换题；形状表新增 `task_title`（只对祈使开头定案）声明在 reminder.create 的 `title`，「要提醒你什么事？」→「把文件交给张总」仍是答案；② 沉默 600 s 后客户端还举着过期确认条，带寻址键取消得到「已经不在了」却零 closed id ⇒ 探针清理台账证不了关闭：`pending_missing` 现在把寻址的 id 点进 `closed_operation_ids` | `test_engine_confirm` +2、`test_pending_operation_id` +1、`test_slot_shape` +1、runtime +2；三处变异各判红 |
+
+- 全量固定口径：`485fccd1` 工作树 **8692 passed / 0 failed / 32 skipped / 12 warnings，227 s**（上一基线 8593 / 0 / 32）；`8e403d5c` 工作树
+  **8710 passed / 1 failed / 32 skipped**——那 1 红 `test_cloud_deploy_assets::test_https_verifier_fails_closed_when_an_endpoint_never_becomes_ready`
+  是真实 bash 子进程的秒级时钟边界（单文件串行 185/185 ×2 绿，与本批改动无关；「真实子进程污染读数」形态）。四门禁 + smoke_edge 13/13 两趟全过；
+  `go build/vet ./gateway/...` 零错（proto 重生成）；十五处变异各自判红。
+- 发布链：push `7f5ff700..485fccd1`（`origin/main..HEAD` 恰一条、单独一步列出）→ dry-run 零阻断（基线 `9ebaa5c3`）→ apply `submitted`
+  → status **ok、5/5 healthy、零 warning、`release_sha` = `running_release_sha` = `485fccd1`** → verify **`verified`**
+  （`20260920T055706Z-485fccd.json`，`minimax:MiniMax-M3`，lock e2e）；第二个 release 同链：push `485fccd1..8e403d5c` → dry-run 零阻断 → apply →
+  status ok 5/5 零 warning → verify `verified`（`20260920T063543Z-8e403d5.json`）。
+- 真栈（`minimax:MiniMax-M3`）：
+  - `485fccd1`：`--cases RS7,RS8,RS9,CD9 --repeat 2` **8/8**。RS7 两趟都由 `constraint_recall` 出口逐字答「您这次说过：不吃辣、不想排队。…」，
+    「今天可以排队」之后再问答「不吃辣、可以排队」；RS8「帮我找家不辣的餐厅」出 place_list 10 家（话术带「您说了不要辣，这次就不按平时爱吃的
+    川菜找了」），修前是一句「记下了」；CD9 第 4 批顶掉第 1 批后「万象城那批第二家评分多少」两趟逐字答「「万象城」那批已经不在手边了，我只留
+    最近几批…」、「科技园那批」绑第 2 轮卡第 2 项、裸序数绑第 4 轮；RS9 两句持久订阅都零动作零声称、不追问时间——**但没有走到 reminder 的
+    拒绝出口**：planner 把「只要有堵车就提醒我」给了 road-safety（问路线）、「之后一旦下雨就通知我」给了 info.weather（答今天没雨）。
+    reminder 侧的拒绝只有离线证据；订阅句的落域方差归 W19 / 范例。
+  - `485fccd1` `continuity` persona（`--silence-scale 1`）：**41/43，在 CONT-SILENCE 末尾中止**。通过的检查点：约束陈述后 11 轮再问由读出口
+    答出、改口后答改口后的（T12 / T14）；两批共存时点名第 1 批绑第 1 批（T11）；四批后点名被顶掉那批 ⇒「不在手边」、点名活着的绑活着的、
+    裸序数绑最新（T17–T19）；挂起 → 插话 → 取消 → 「确认」⇒「没有待确认」（T21–T24 之外的 T6–T8）；执行史读出口 2 个操作（T27）；
+    TF1 改口「到达时限改为19:30」（T29）；**沉默 600 s + 重连后**「第二家评分多少」仍由候选台账答出沉默前那批的第 2 项（T37）、
+    后备箱确认已过期（T38「当前没有待确认」/ T39）、约束仍在（T40「不吃辣、可以排队」）。两条红都是真的：T21 路况补槽吞掉「把全车门解锁」
+    （见上表「真栈逼出的两条」①）；末尾 AUTO-CANCEL 对过期的后备箱确认得到「已经不在了」而零 closed id ⇒ 台账证不了关闭 ⇒ 中止
+    （②）。顺带：T5「明天呢」qweather 预报一次「没查到「深圳」的天气」（provider 瞬断，judge 只要求城市不漂）。
+  - `8e403d5c` `continuity` 复跑（`--silence-scale 1`）：**59/61，跑完整趟不中止**（53 计划轮 + 2 次 AUTO-CANCEL + 恢复 3 轮 + 导航 / 车态清理 3 轮；
+    零 open operation、车态恢复 verified、release 连续、TTS 取证零失败）。两条修各自兑现：T21「把全车门解锁」在路况补槽下**判换题 ⇒ 出确认**
+    （上一趟被吞）；T42 对过期后备箱确认的 AUTO-CANCEL 得到「已经不在了」且 `closed_operation_ids` 点名它 ⇒ 台账闭合、不再中止。新跑到的检查点：
+    **断连重连**后「现在还有待确认的操作吗」念出重连前挂起的「把全车门解锁」（T44），带寻址键取消关掉它（T45），再重连后约束仍在（T46）；
+    CA5「取消导航 → 换条路走」不复活旧路线（T49）；PU7 两段接人路线；SF4 困倦劝停不改口。**两条红是同一件事**：T11 / T18 点名旧批
+    绑对了组（collector `named_groups=1`），但三次检索（万象城 / 科技园 / 南山书城）的卡片**逐字相同**——planner 把地名填进 `keyword`
+    （T2 `keyword=万象城`）、未声明的 `near`（T16）或什么都不填（T9），nearby 只认 `location` ⇒ 三次都按车辆位置搜，
+    `not_names_item_from` 在相同列表上分不开。上一趟同一句 planner 填的是 `location` ⇒ 列表各不相同、判绿。修在 Agent（`31e8fefc`，
+    见下一条），不改判据。
+  - 第三条修 `31e8fefc`（nearby）：原话「X 附近 / 周边 / 一带」的 X（排除那 / 这 / 我等指代）或 `near` / `around` / `area` 别名槽 ⇒ 中心，
+    地名被填进 `keyword` 时剥掉它；`location` 槽照旧优先。nearby 116（+3 参数化 +2 对照）、变异「不锚定」红 3。真栈证据见 `cf1d0f96` 那条。
+  - W19 单变量（`8e403d5c`，同一语料 4 组 × 2 次、T1 立指代物 → 两轮插话 → T4 省略回指，判 T4 的 `cloud.planning` 槽里有没有指代物）：
+    **视窗 2 对（生产缺省）指代解出 4/8**（3 轮 clarify / unresolved_object、1 轮落 chitchat），**4 对 7/8**（全部 completed；
+    `history_pairs_kept=3` 证明 pin 生效——T4 时历史恰 3 对）。n=8 / 单模型 / 共享 e2e 用户的长期记忆里有探针留下的同题情景记忆，
+    这是**仪器验证读数**，不据此改缺省（评审 F02：先量再定档）；下一步是 ≥30 组语料 + 干净用户再比 2 / 4 / 6 三档。
+- 第三个 release `cf1d0f96`（2026-09-20 15:4x，用户裁决「授权推送」）：push `8e403d5c..cf1d0f96`（6 条：另一会话的四个 mobile 提交
+  `59088760` / `8df1d117` / `6faa3c75` / `e7a83638` + `31e8fefc` + 本文档 `cf1d0f96`，推前单独列出）；主工作树被对方的两份未提交文档弄脏 ⇒
+  按 dev-guide 用隔离 worktree（`git worktree add --detach` + 只复制 `dev-stack.local`）deploy：dry-run 零阻断（基线 `8e403d5c`）→ apply
+  `submitted` → status ok 5/5 零 warning、`release_sha` = `running_release_sha` = `cf1d0f96` → verify `verified`（`20260920T074422Z-cf1d0f9.json`，
+  `minimax:MiniMax-M3`，lock e2e）。真栈 `--cases CD9,RS7 --repeat 3` **6/6**：CD9 第 1 趟 T1 planner 又把地名填进 `keyword`
+  （`{"keyword": "万象城", "category": "餐厅"}`），列表照样锚在万象城（首项「蟹叁寳(深圳湾万象城店)」，与 `location=万象城` 那两趟同一份）；
+  四个地名四份各不相同的列表、点名被顶掉的那批三趟都答「不在手边」（第 3 趟按 planner 填的 `location=深圳湾万象城` 念成「深圳湾万象城」那批）。
+- 留给后续：持久订阅句的落域方差（road-safety / info.weather 各接走一次，reminder 的拒绝出口真栈没走到）归 W19 / 范例；`memory_unavailable`
+  真栈不可触发，看生产 `turns.outcome` 分布；探针写进共享 e2e 用户的长期记忆（W19 语料的同题情景记忆）——视窗实验要换干净用户；
+  T2 loop / 续接轮里下游步拿到的 `raw_text` 是补槽句而不是任务起点原话（T20 的 reminder 步在 T21 才跑、看不见「只要有堵车」），
+  reminder 侧的事件触发判据因此在多步计划里够不着，归 W16 胶囊的下一步（步级 origin text 投影）。
+
+
+## 8. 批 6 方案与裁决（2026-09-20 晚，用户授权提交 / 推送 / 部署 / 真栈验证）
+
+批 5 §7.1 末尾留下四条。先对 HEAD `4cf5ab04`（生产 `cf1d0f96`）重证，再定每条做到哪：
+
+| 留项 | 现状（代码事实） | 本批做什么 | 刻意不做 |
+|---|---|---|---|
+| W16-b 步级起点原话 | `Intent.raw_text` 在三条执行路径上一律取 `ctx.raw_text` = **本轮**原话（`clients._exec_request`）。续接轮（补槽 / 确认）里它是槽答案 / 「确认」——对**被续接的那一步**这是对的（reminder 在 pending 下读它解时间）；对同一份计划里**还没跑的下游步**它是错的：下游步的槽是按任务起点原话规划的，它读到的却是另一步的槽答案。离线复现：`reminder.create` 槽 `title=有堵车`、`raw_text=去宝安机场的路` ⇒ 「好的，有堵车。什么时候提醒你？」；同槽 `raw_text=只要有堵车就提醒我` ⇒ 诚实拒绝。这一族不止事件触发：下游 reminder 的 `user_time_signal` 读 raw ⇒ 规划好的 `time_text` 被无视再追问一遍；`parse_place_text(raw)` 读槽答案可能把它当地点；nearby「X 附近」锚定、`_restore_slot_fidelity` 的「按原话补回限定词」在下游步上都读的是别的步的答案。T2 续接轮的 replan 步同族（`ctx.raw_text` 仍是槽答案） | `Step.origin_text`（服务端持有；engine 在 `planner.build` 之后与 `safety_origin_text` 同处盖章；`step_record` 持久化；`_restore` 对旧记录用持久化的 `safety_origin_text` 回填，与既有「只允许服务端持有的文本回填」同一条规则）+ 进程内 `Step.resumed`（`_restore` 给 `pending_step_id` 那一步打标）。判据一份 `models.step_raw_text`：**被续接的那一步看本轮原话，其余步看自己的起点原话，没有起点原话的旧记录退回本轮原话**；`step_call_context` 只在两者不同时给传输层一个 `raw_text` 换掉的浅拷贝（同一句时返回 ctx 本身 ⇒ 新计划零拷贝、逐字同旧）。三条执行路径各接一处（dispatcher 云端调用 + legacy adapter / engine `_stream_single_step` / loop T2 单步流式），`_restore_slot_fidelity` 读同一判据；T2 replan 步在 `to_plan` 后盖 `safety_origin_text`；澄清预解析步盖 `chosen_text`。step span 加 `raw_text_from=origin`（只在换了时出现） | escalate mini-plan **不盖**（保持本轮原话）：改派是当前这一步在处理当前这句话时的改派，`test_resumed_escalate_uses_origin_but_agent_keeps_current_slot_answer` 钉的就是它；edge 下发本就不带 raw_text；不改 SDK / Agent；不把 `safety_origin_text` 下发替代 raw_text（它是授权边界，不是「这一步从哪句话来」） |
+| W19-b 持久订阅落域 | `skills/guides/conditional-reminder.yaml` 只教三分判据（条件依赖 / 否定 / 顺承）；「之后一旦下雨就通知我」「只要有堵车就提醒我」都被它的 keywords（`下雨就` / `就提醒`）检回，再按「条件依赖 ⇒ 只规划查询步 + adaptive」读 ⇒ 真栈 RS9 各接走一次（info.weather 答今天没雨 / road-safety 问路线）。reminder 的诚实拒绝出口够不着。road-safety 没有「堵车」hint（LLM 落域，不是 hint 劫持） | guide 加第四分「持久订阅」：`一旦 / 只要 / 每当 / 每次 / 凡是 … 就通知我 / 提醒我`、没有一个「现在能查」的前件 ⇒ 用户要的是盯着世界变化，**只规划 `reminder.create`**（整句交给提醒域，它会说做不到并给替代），不查、不 adaptive；keywords 补 `一旦 / 只要 / 每当 / 每次 / 凡是 / 就通知我 / 就告诉我`；golden 两条 + holdout 一条（`expect_intents [reminder.create]`、`expect_not` 查询族）；范例 `reminder.yaml` 追加两条（source: trace，RS9 真栈句）。预算：headroom 守卫 + `test_skills_budget_headroom` 的真实候选混合 | 不给 road-safety / info 加 hint；不在 engine 造第二份事件触发判据（领域知识留在 Agent）；不把「要是下雨就提醒我带伞」这种单条件句改判——它仍按条件依赖查一次 |
+| W19-c 视窗实验换干净用户 | 云端网关只有一条 `AUTH_TOKENS`（u1）；签名身份车道 `E2E_IDENTITY_ENABLED` 根 `.env` 未开、compose 缺省 false ⇒ 换 user 必须改 `.env` + 重启网关（红线，通用授权不覆盖）；`mem_on=false` 会一并关掉历史 / 焦点装配（评审 F11），不是干净用户的替身 | **不做**；把「开签名身份车道」作为独立决策项交用户（改 `.env` 一行 + 网关重启）；开了之后 W19 三档 A/B 才有意义 | 不用 nonce 化语料冒充干净用户（情景记忆按语义召回，同模板旧轮次照样回来） |
+| `memory_unavailable` 生产分布 | 只读 collector | 本批部署后读一次 `turns.outcome` 分布（含 `unsupported` 是否出现）作为 W05 读数 | 不停别人的 PG / Redis 去触发 |
+
+裁决顺序与发布：**两个 release**，每个只推进一个变量——release A = W16-b（探针 RS10：「只要有堵车就提醒我」在**当前**知识下仍是
+road-safety 先问路线、reminder 步在续接轮才跑，正好是 W16-b 的活体证据：T2 答路线后 reminder 应诚实拒绝而不是「什么时候提醒你」）；
+release B = W19-b（RS9 / RS11 复跑：订阅句应直接落 `reminder.create` 并拒绝；A 臂读数取自 release A 同题）。W16-b 先发是因为 W19-b
+落地后 RS10 的多步形态就不再出现（订阅句直接落 reminder），活体证据只有这一趟窗口。
+
+### 批 6 验收
+
+- 每包先红测试再改实现；定向套件（cloud / runtime / reminder / skills gates）+ 四门禁 + smoke_edge；全量固定口径一次；变异各自判红
+  （不盖章 / 续接步也换成起点原话 / 旧记录不回填 / T2 replan 不盖 / guide 第四分删掉）。
+- 真栈：push → dry-run → apply → status / verify → 探针：release A 跑 `RS10 --repeat 3`（多步续接：下游 reminder 步读起点原话）；
+  release B 跑 `RS9,RS11 --repeat 3`（订阅句直落 reminder 并拒绝，`turns.outcome=unsupported`）+ `contrast` CT2 复跑；两臂读数单独成表。
+
+### 8.1 落地记录（2026-09-20 晚，release A `cc331315` → release B `eb87b571`）
+
+| 包 | 提交 | 做了什么 | 本地证据 |
+|---|---|---|---|
+| W16-b 步级起点原话 | `cc331315`（release A）+ `eb87b571`（两条流式路径的 span 格） | `Step.origin_text`（engine 在 `planner.build` 后与 `safety_origin_text` 同处盖章；`step_record` 持久化；`_restore` 旧记录用持久化的 `safety_origin_text` / `raw_text` 回填、给 `pending_step_id` 打 `resumed`；澄清预解析步盖 `chosen_text`；loop replan 步盖任务起点；escalate mini-plan 不盖）；判据 `models.step_raw_text` + 传输视图 `step_call_context`（同一句返回 ctx 本身）；三条执行路径各接一处 + `_restore_slot_fidelity`；step span `raw_text_from=origin`（三条路径同一格，只在换了时出现） | 新 `test_step_origin_text` 19（补槽 / 确认续接走真实 engine、旧记录回填只认服务端文本、T2 replan + 单步流式、三处传输接线、槽值保真、PlanContext replace 安全、三条路径 span 格）；六处变异各判红（不盖章 / 忽略 resumed / 不回填 / loop 不盖 / dispatcher 传 ctx / 保真读 ctx）；既有 `test_resumed_escalate_uses_origin_but_agent_keeps_current_slot_answer` 钉住 escalate 不变 |
+| W19-b 持久订阅落域 | `ca2725b0`（release B） | guide v6 第四分「持久订阅」+ keywords 只加订阅框架词（`只要 / 每次 / 凡是` 常用词刻意不做）+ golden 两条 + holdout 一条；范例 `reminder.yaml` 追加两句真栈原句；知识压到与 charging-strategy 并列最大（headroom 守卫 +1，与修前相同）。踩到两条：① 知识写 `data.condition` 会被架构守卫读成 intent 形 token（`data` 变成业务词 ⇒ `verify.py` 的 `data` 形参被判违规），改回 `` `data` 中 `condition` ``；② 每加一句都要回量预算（四次才放得进） | `test_skills` +1（第四分名字 / 词形 / 落点、两句 golden 的另一半、keyword 纪律）；四门禁 + smoke_edge + 架构守卫全过 |
+| 探针 | `cc331315` | RS10（W16-b 活体：T1 订阅句 → T2 答路线）、RS11（W19-b：两句真栈原句 + holdout） | `--list` 通过 |
+
+- 全量固定口径（包含批 6 两包的工作树，`TZ=UTC0` `-n 8`）：**8733 passed / 0 failed / 32 skipped / 12 warnings，248 s**（上一基线 8710 / 1 / 32）；
+  cloud 目录在 `eb87b571` 工作树 1525 passed；四门禁 + smoke_edge 13/13、架构守卫全过。
+- 发布链（两个 release 各推进一个变量；主树被另一会话的两份未提交文档弄脏 ⇒ 隔离 worktree deploy）：
+  push `4cf5ab04..cc331315`（恰一条、单独列出）→ dry-run 零阻断（基线 `cf1d0f96`）→ apply `submitted` → status **ok、5/5 healthy、零 warning、
+  `release_sha` = `running_release_sha` = `cc331315`** → verify **`verified`**（`20260920T085748Z-cc33131.json`，`minimax:MiniMax-M3`，lock e2e）；
+  push `cc331315..eb87b571`（两条：`ca2725b0` + `eb87b571`，单独列出）→ dry-run 零阻断（基线 `cc331315`）→ apply → status ok 5/5 零 warning
+  `eb87b571` → verify `verified`（`20260920T090840Z-eb87b57.json`）。
+- 真栈 release A `cc331315`（`--cases RS10,RS9 --repeat 3`，MiniMax-M3）：判据 **6/6**。
+  - **RS10 第 3 趟就是 W16-b 的活体**：T1「只要有堵车就提醒我」被规划成 adaptive 单步 `safety.road_condition`（goal「查询路况，根据是否拥堵决定是否提醒」——
+    正是 W19-b 要改的读法），问「哪条路线」挂起；T2「去宝安机场的路况」续接，T2 loop 再规划出 `reminder.create`（单步流式路径），Agent 日志
+    **「reminder.create 拒建（事件触发不支持）：只要有堵车就提醒我」**——`ctx.raw_text` 是路线答案，它读到的是起点原话，final 里带着诚实拒绝。
+    修前同形（离线复现）是「好的，有堵车。什么时候提醒你？」。span 上没有 `raw_text_from` 格（当时只接了 dispatcher 那一路）⇒ `eb87b571` 补齐两条流式路径。
+    另两趟 T1 把两步排在同一轮并行（无续接，行为逐字同旧）。
+  - **RS9 = W19-b 的 A 臂**：「只要有堵车就提醒我」**0/3 直落 reminder**（3/3 先 `safety.road_condition`：2 趟问路线挂起、1 趟并行答「当前还没有正在导航的路线」+ 拒绝）；
+    「之后一旦下雨就通知我」2/3 直落 reminder `unsupported`，1/3 `info.weather` + reminder 并行 ⇒ 话术「今天深圳南山晴着…**等真下雨了我再跟你说一声**。我只能按时间或地点提醒…」
+    ——查询与拒绝拼在一起，前半句是系统兑现不了的承诺。
+- 真栈 release B `eb87b571`（`--cases RS11,RS9,RS10,CT2 --repeat 3`）：判据 **11/12**（RS11 第 1 趟 T1 落 `no_plan`「没听清」，F09 家族方差）。按 collector 逐轮：
+  - 「只要有堵车就提醒我」9 趟：`reminder.create` 单步 `unsupported` **4/9**、`reminder.create` + `safety.road_condition` 并列 **4/9**（首意图仍是 reminder；其中 2 趟路况步问路线挂起，
+    用户听到「做不到盯着…」+「您想查询哪条路线的路况？」）、`no_plan` 1/9；**0/9 只走路况**（A 臂 3/3 路况先行）。
+  - 「之后一旦下雨就通知我」9 趟（RS9 / RS11 / CT2）：**9/9** `reminder.create` 单步 `unsupported`（A 臂 2/3）。holdout「往后一有暴雨预警就马上告诉我」**3/3** `unsupported`
+    （事件短语念成「往后一有暴雨预警」，`_EVENT_STRIP_RE` 没剥「往后」，只是话术不够好看）。
+  - CT2 3/3：即时条件句仍走查询 + 提醒（T1「明天有雨…什么时候提醒你？」），订阅句拒绝——对比对两侧都稳。
+  - RS10 第 2 趟：T1 两步（reminder 拒绝 + 路况问路线挂起）→ T2 续接，span 上 **`raw_text_from=origin` 出现在下游 reminder 步与再规划的路况步上**、
+    被续接的路况步没有——三条路径的格子对齐了。
+- 生产 `turns.outcome` 读数（W05，collector 自 `485fccd1` 部署起 292 轮）：completed 148、fact_answered 47、**unsupported 18**（全部来自本批探针的 reminder 拒绝）、
+  constraint_noted 14、pending_slot 12、partial 9、candidate_missing 7、cancelled 6、pending_confirm 6、no_pending 4、clarify 3、pending_missing 2、
+  no_plan / unresolved_object / failed 各 1、空 13；**`memory_unavailable` 0**（如预期：真栈没触发过后端不可用）。
+- 留给后续：① T2 loop 在收到 `unsupported` 拒绝观察后仍会再规划（release A RS10 第 3 趟接着规划出 `reminder.cancel`，答「提醒方面也没找到」）——
+  `_refused: unsupported` 的观察应终止该诉求的再规划，归 W12 / T2 判重的下一步；② road-safety 零结果话术「为您找到 0 个…路况，推荐前三个：。」（空列表模板，
+  与本批无关）；③ 订阅句 4/9 仍并列一个路况步（首意图对、多一步），是 MiniMax-M3 方差，范例已在、不加 hint；④ reminder 事件短语剥前缀表可加「往后 / 今后 / 以后」；
+  ⑤ W19-c 干净用户仍需用户裁决开签名身份车道（改 `.env` 一行 + 网关重启）。
+
+### 8.2 W19-c 视窗单变量实验（2026-09-20 晚，用户授权「切换干净用户」）
+
+- **改的什么**：云端 `/opt/car-agent/shared/.env`（先备份 `.env.bak-w19c-<ts>`）与根 `.env` 各加两行 `E2E_IDENTITY_ENABLED=true` /
+  `E2E_IDENTITY_SECRET=<32 字节 base64url>`（同一个秘密；根 `.env` 是 gitignore 的唯一密钥源）。其余条目一字未动、`600 root:root`。
+  第一次写坏了：Windows 上 `subprocess` 文本模式的 stdin 把 LF 变成 CRLF，网关会读到 `true\r`——按备份整文件恢复后改用原始字节重写，
+  验证只看 `grep -c`（不回显值）。网关重启走**正式发布**（本 docs 提交作为新 SHA 部署，`up -d` 只重建 env 变了的容器），不手敲 compose
+  ——2026-09-10 那次手工 compose 漏 `RELEASE_SHA` 把 edge-gateway 换成八月镜像的事故就是这条路。
+- **装置** `scripts/probe_history_window.py`：签名身份车道每臂一个全新 user（`e2e-w19c-<run>-w<N>`），session `<user>-session-<g>`
+  （网关硬校验；前缀 `e2e-` 不做记忆抽取 ⇒ 臂内各组也不互相喂记忆）；每轮 `meta.planner_history_exchanges=<N>`；32 组语料
+  （16 组 k=2 区分 2 对 vs 4 对、16 组 k=4 区分 4 对 vs 6 对；指代物只活在对话历史——联网搜索主题 / 手册功能 / 球队，避开焦点块自己
+  记住的城市 / POI / 目的地 / 股票 / 车控对象 / 候选集；插话固定为闲聊 / 时间）；判据结构化：最后一轮 `cloud.planning` 的槽里有没有
+  关键词，另记 `history_pairs_kept`（pin 生效证明）、intents / outcome、话术提到与否（chitchat 自己那 8 条历史答对不算 planner 解出）。
+  守卫 `scripts/tests/test_probe_history_window.py` 38（T1 含关键词、其余轮不含、插话不碰焦点、判据读槽不读话术）。
+- **不做**：不据此改缺省（评审 F02：先量再定档位）；不换主模型；不在实验里 pin LLM（以 collector 的 provider/model 为准）。
+
+#### 8.2.1 读数（run `0920b`，2026-09-20 18:0x–19:0x，生产 `b0d79dbe`，planner `minimax:MiniMax-M3`，32 组 × 3 臂 = 96 个干净 session / 480 轮，52 min）
+
+首跑 `0920a`（插话全是闲聊）在视窗 2 对下 g02 / g03 的槽里照样出现「问界M9 / Model Y」（`pairs_kept=2, dropped=1`）：
+**W07 活动任务帧**把上一件任务的槽在焦点块里保 1800 s，闲聊是 response_only 不顶帧 ⇒ T1 的指代物经帧而不是历史到达 planner。
+语料改成「闲聊 + 一轮 read 任务（天气 / 空气质量）」把帧顶掉之后（`69c63e36`），视窗成为唯一变量：
+
+| k（插话轮数） | 视窗（对） | T1 在视窗内 | planner 槽解出 | 落 chitchat | 云端任务但槽无指代物 | 规划失败族 | 端侧劫持 | 话术提到（弱读数） | pin 生效 `pairs_kept` |
+|---|---|---|---|---|---|---|---|---|---|
+| 2 | 2 | 不在 | **0/16** | 9 | 4 | 1 | 2 | 5 | 13/13（期望 2） |
+| 2 | 4 | 在 | **8/16** | 3 | 1 | 2 | 2 | 8 | 12/12（期望 3） |
+| 2 | 6 | 在 | **8/16** | 4 | 2 | 0 | 2 | 7 | 14/14（期望 3） |
+| 4 | 2 | 不在 | **0/16** | 7 | 6 | 1 | 2 | 0 | 13/13（期望 2） |
+| 4 | 4 | 不在 | **0/16** | 6 | 6 | 2 | 2 | 0 | 12/12（期望 4） |
+| 4 | 6 | 在 | **7/16** | 3 | 4 | 0 | 2 | 6 | 14/14（期望 5） |
+
+- **视窗是决定性的**：T1 不在视窗内 **0/48**（去掉端侧劫持 0/42）；在视窗内 **23/48**（去掉端侧劫持 23/42）。人工复核判据漏掉的三格
+  （w6 g23「Liverpool next Premier League match」英文改写、w6 g25「GPT-6 Astra 的上下文长度」——从 T1 **答句**里的实体解出、w4 g15
+  「中国U23男足亚运会下一场对手」）算上是 **26/48**。
+- **4 对 vs 6 对没有差别**（k=2：8/16 vs 8/16；逐组翻面 g01 / g02 / g13 4 对解出 6 对没解、g04 / g11 / g15 相反）——T1 可见之后剩下的是
+  MiniMax-M3 的方差，不是视窗；6 对没有把 4 对能解的弄丢。**k=4 只有 6 对救得回来**（7/16 vs 0/16）。
+- **chitchat 是第二条通道**：T1 出视窗后 planner 把省略句交给 chitchat 7–9/16，它用自己那 8 条历史答对 k=2 的 5/16（用户听到的是
+  「凭记忆直答、不查」），k=4 时 T1 也出了它的 8 条 ⇒ 0/16。
+- **端侧劫持 4 组恒定**（g12 / g18 / g27「它续航多久 / 那它的纯电续航呢 / 那它的续航呢」⇒ `battery.query` 车辆电量；g14「它在什么条件下
+  会自动关闭」⇒ `media.stop`）：代词开头的省略追问在端侧就被规则接走，云端历史根本看不到——三臂同形，与视窗无关，归端侧规则的下一条
+  （代词开头 / 「那…呢」形态不该命中端侧对象规则）。
+- **真栈逼出的修（安全面）** `eb55e502`：w6 g05 座椅加热话题下「它有几档」被规划成 **`seat.heating.on` 并执行**（trace `611a4134c32745eb`，
+  actions=[seat.heating.on]、答「好的」）；同趟「它最多能设几档」→ `tire_pressure.query`、「它在什么条件下会自动关闭」→ `media.stop`。
+  `runtime.question_shape` 的表里没有「几」族数量疑问（几档 / 几级 / 几种 / 多少档）与条件疑问（什么条件 / 什么情况），问句写闸认不出它们在问。
+  两向测试 +7（五句认成提问、「调到三档」「座椅加热开到二档」仍是指令）；全量 **8781 / 0 / 32**、四门禁 + smoke_edge + 架构守卫全过。
+  **部署被云端磁盘容量闸挡住**（`insufficient disk capacity`：可用 29.7 GiB < 30 GiB 下限；93 份 release 目录 + 94 套镜像 + 109 个上传目录
+  + 25 GB 构建缓存），清理要用户逐项批准，见 §8.2.2。
+- 其它读数：w4 g32「它的通行费是多少」被解成「深圳通行费」——T1 出视窗后焦点块里插话留下的「上个城市=深圳」成了竞争指代物；
+  w2 g17「那它的售价呢」解成「瑞幸咖啡门店招商政策…」——什么都没有时 prompt 范例里的实体被当成指代物；w6 g13「它能在多少速度以上用」
+  把「定速巡航」写成「自适应巡航」（同类混淆）。
+- **不据此改缺省**（评审 F02）：数据说的是「视窗要盖住指代物所在那一对，多留两对不伤」；缺省 2 对在 k≥2 的插话下必失，4 对盖住 k=2、
+  6 对盖住 k=4。要不要把缺省抬到 4 或 6 还差两件：预算（`_CTX_BUDGET` 1400 字符是硬上限，6 对长回答会被裁——本实验里 `history_trimmed`
+  未出现，但 info.search 的长答句在预算下只留了尾巴）与 token 成本（每轮多 2–4 对历史）——留给用户裁决。
+
+#### 8.2.2 待用户批准的云端清理（部署 `eb55e502` 的前提）
+
+读数（read-only）：`/opt/car-agent` 可用 31.87 GB（74% 用）；docker：镜像 2523 个 / 51.4 GB（94 套 release × 26）、容器 446 个（31 活、415 停）、
+构建缓存 25.4 GB（可回收 15.3 GB）；`incoming/releases` 109 个上传目录 4.9 GB；`releases/` 93 份源码目录（每份 ≈ 205 MB）；备份 800 MB
+（`cleanup-candidates.txt` 已列 7 天以上的 observability dump）。候选按风险从低到高：① 构建缓存 `docker builder prune`（15.3 GB，纯缓存）；
+② 上传目录（除当前 release 的）4.9 GB；③ 停止的旧 release 容器（118 MB）；④ 旧 release 镜像集与源码目录（保留当前 + 上一基线 + 最近 N 份）。
+每一项都要单独批准后再执行；本批只做了列举。
+
+**执行记录（2026-09-20 晚，用户批准「①+②」）**：先确认无发布事务在跑；② 删除 `incoming/releases/` 下 108 个上传目录（5.14 GB，
+保留当前 release `b0d79dbe…` 那一个；清单先落 `/tmp/w19c-upload-cleanup.txt` 再 `xargs rm -rf`）；① `docker builder prune -af` 回收 25.43 GB。
+可用 31.9 GB → **55.1 GB**（74% → 55%）。③④ 未执行（④ 保留几份待定）。代价：下一次发布 26 个镜像全部从零构建（无缓存），耗时远超今天
+前几次的 3–4 分钟——实测 `eb55e502` 约 75 min（pip wheel 缓存也在 builder cache 里，每个 Python 镜像重新下载；共享基础层建好之后剩下的很快）。
+
+**部署 `eb55e502`（2026-09-21 12:0x–13:1x）**：dry-run 零阻断（可用 55.1 GB）→ apply `submitted` → status ok 5/5 零 warning、
+`release_sha` = `running_release_sha` = `eb55e502`（切换后锁未释放的几分钟报 `degraded` + `remote release lock is unavailable`）→ verify `verified`
+（`20260921T051142Z-eb55e50.json`，`minimax:MiniMax-M3`，lock e2e）。真栈复验（run `0921a`，视窗 6，三个曾经执行动作的格）：
+g05「它有几档」→ `manual.query`、零动作（修前 `seat.heating.on` 执行）；g14「它在什么条件下会自动关闭」→ 云端 `chitchat.talk`、零动作、
+答对了自适应远光的关闭条件（修前端侧劫持成 `media.stop`）；g29「它最多能设几档」→ `manual.query`，槽里带「自适应巡航」（修前 `tire_pressure.query`）。
+`battery.query` 那三格（g12 / g18 / g27）不在闸的否决面上（读操作），照旧归端侧规则的下一条。
+
+**清理 ④（2026-09-21，用户「清理保留按你的建议」）**：保留最近 6 份 release（`eb1dd6bd` 当前 / `eb55e502` / `b0d79dbe` / `eb87b571` / `cc331315` / `cf1d0f96`），
+删掉其余 89 份的镜像集（`car-agent-release/<svc>:<sha>` 26 个 + 构建工程的 `car-agent-release-<sha>-<svc>:latest` 26 个，两族都要删，
+只删一族层不会释放）与 `/opt/car-agent/releases/<sha>` 源码目录；备份、evidence、运行容器一律不碰。先落 keep / delete 清单到 `/tmp/w19c-*.txt`
+并校验 current 在 keep 里；第一批 30 份用 ssh 前台循环（每份重新 `docker images` 列 2500 个镜像 ⇒ 约 1 份/分钟，客户端 560 s 超时后远端循环照跑），
+后 59 份改成 `nohup` 分离作业、列一次镜像再删（约 20 min）。结果：镜像 2523 → **261**（51.4 → 29.9 GB）、release 目录 96 → **6**、
+可用 48.5 → **59 GB**（49% 用）；运行容器 30 个不变、26 个跑在当前 tag 上。**③ 不做**：那 415 个停止容器属于同机的 drone-agent 项目
+（`drone-agent-cloud` / `drone-agent-m0`），不是本项目的。留下一个 `bf92c22d` 的残缺构建工程（4 个 latest tag，非 release），未动。
+
+#### 8.2.3 缺省视窗 2 → 4 对（2026-09-21，用户裁决「抬到 4 对」并授权部署真栈验证）
+
+- 改的是代码缺省 `_HISTORY_EXCHANGES`（`eb1dd6bd`；compose 不透传 env、`.env.example` 是硬阻断类别，所以不走配置）：取回 10 条、渲染 4 对；
+  `_CTX_BUDGET` 1400 不动——0920b 全部 302 个云端规划轮里 `history_chars` 最大 676（p90 410）、零次 `history_trimmed`，4 对在本语料下放得进；
+  真实长回答会让 W02 从最旧整对丢起，`history_pairs_kept / dropped` 是读数。装置加 `--windows 0`（不 pin，按 span 自报的 `history_exchanges` 归档）。
+- 发布链：push `eb1dd6bd`（恰一条）→ dry-run `plan_rejected`（区间里有另一会话经用户批准的 CI 改动 `.github/workflows/mobile-apk.yml`，`5286c3ba`
+  「CI红线我批准」）→ 按 dev-guide 的一次性摘要批准流程：唯一阻断类别是 `ci_cd`、digest `671eff1d…`、`--approve-ci-cd-sha256` dry-run 零阻断 → apply
+  `submitted`（有缓存，几分钟）→ status ok 5/5 零 warning、`release_sha` = `running_release_sha` = `eb1dd6bd` → verify `verified`
+  （`20260921T065448Z-eb1dd6b.json`，`minimax:MiniMax-M3`）。
+- 真栈读数（run `0921b`，不 pin，k=2 的 16 组，新干净用户）：进了规划轮的 10 格 **`history_exchanges=4` 10/10、`pairs_kept=3` 9/10**（1 格 2：预算裁掉最旧一对）、
+  planner 槽解出 **8/10**；另 6 格最后一轮没进规划（clarify 2 / unresolved_object 2 / no_plan 1 / 端侧 `battery.query` 1）——F09 家族与端侧规则，与视窗无关。
+  合计 8/16，与 0920b 的 4 对 pin 臂 8/16 一致；g14「它在什么条件下会自动关闭」这次由 `manual.query` 解出（`eb55e502` 后端侧不再劫持成 `media.stop`）。
+
+## 9. 批 7 方案与裁决（2026-09-21，用户授权提交 / 推送 / 部署 / 真栈验证）
+
+批 6 §8.1 与 §8.2 留下的条目，先对 HEAD `994f582f`（生产 `eb1dd6bd`）重证，再定每条做到哪：
+
+| 留项 | 现状（代码事实） | 本批做什么 | 刻意不做 |
+|---|---|---|---|
+| ① T2 收到 `unsupported` 后仍再规划 | `loop.run` 每批执行完一律 `current = None` 回到 `planner.replan`；`summarize` 只透传 `retry_same_intent`，`_refused` 埋在 `data` 里（超 12 键还会被截掉）；`_REPLAN_SYSTEM` 只说「status=ok 的步不得以相同参数重复」，对「Agent 声明做不到」一个字没有。真栈 RS10 第 3 趟（`cc331315`）：reminder 诚实拒绝之后 loop 又规划出 `reminder.cancel`，用户听到「提醒方面也没找到」——**一句诚实拒绝被下一轮的换能力再试盖掉** | 判据一份 `runtime/outcome.py`（`refused_unsupported` / `all_refused_unsupported`，与终态账本同源）。loop：**这一批全部是 `unsupported` 声明式拒绝 ⇒ 该诉求有终态，不再 replan**（其余批照旧）。replan：观察显式带 `refused`；`_drop_refused_domain_steps` 丢掉与 `refused=unsupported` 观察**同域**（intent 前缀）的新步——同域换 intent 就是「换能力再试」；丢空 ⇒ `done`。`_REPLAN_SYSTEM` 补一句（prompt 是弱约束，确定性那两条才是闸） | 不按 agent 级封禁其他诉求（混合批里没被拒绝的诉求照常）；不改 `_refused` 保留键的语义（非 `unsupported` 的拒绝——「请重新选门店」那类——仍可再规划） |
+| ② `safety.road_condition` 零结果空模板 | `_road_condition` 调 `navigation.search_poi` `keyword="X 路况"`，把 POI 列表话术原样转发：空结果 ⇒「为您找到 0 个X 路况，推荐前三个：。需要导航过去吗？」；非空 ⇒ 几个名字碰巧带「路况」的 POI 加「需要导航过去吗」。**名字存在能力不可达**（CLAUDE.md §3 五段里的「执行 / 话术」两段都是假的），且 AMap 的实时路况在仓里从没接过——`get_route(with_polyline=True)` 请求的 `extensions=all` 已经返回逐段 `tmcs`（畅通 / 缓行 / 拥堵 / 严重拥堵），一直被丢掉 | 真 provider 已在，接真能力：**(a)** AMap `get_route(with_polyline=True)` 聚合 `tmcs` ⇒ `traffic`（各状态公里数 + 已知总公里）；`/v3/traffic/status/road`（路名 + 城市）⇒ `road_traffic`；`reverse_geocode` 多回 `city` / `adcode`（GeoPoint 加两格缺省空）。**(b)** navigation 新**内部**意图 `navigation.route_traffic`（不进 manifest：planner 不可见，只供 Agent 间调用——进 manifest 就是和 `safety.road_condition` 摆两个等价工具让 planner 掷硬币）：`road` ⇒ 路名态势（城市取当前位置 regeo）；`destination` ⇒ 解析地点 → 当前位置起算路 → 沿途拥堵；两者皆无 ⇒ 读 `meta.focus_active_route`（活动路线）。**(c)** road_safety 把 `route` 槽归一（「去 X 的路况 / 到 X 堵不堵」⇒ destination；「X 路 / 大道 / 高速 / 快速路 / 大桥 / 隧道 / G4」⇒ road；「路上 / 前面 / 这条路 / 高速（裸）」⇒ 活动路线），调 `route_traffic`，转发话术 + 卡，拥堵 / 严重拥堵 > 0 时补一句跟车提示。诚实降级三条：provider 没给 `tmcs` ⇒ 只报里程时长 +「实时拥堵数据这会儿拿不到」；无位置 ⇒ 说拿不到位置（路名查询无法定城市 / 路线查询无起点）；provider 失败 ⇒「暂时查不到」。mock provider 同构字段（离线 / nightly mock 车道） | manifest 与 catalog 不动（`test_catalog_budget` 钉精确字数）；`navigation.estimate` 话术不动（只在 `data` 多带 `traffic`）；不做「拥堵就自动换路」（写动作，用户没要）；路名查询不猜城市 |
+| ③ reminder 事件短语剥前缀 | `_EVENT_STRIP_RE` 只剥「之后 / 以后 / 后面 / 接下来 / 然后 / 等会儿 / 待会儿 / 回头」；「往后一有暴雨预警就马上告诉我」念成「盯着『往后一有暴雨预警』」；「一…就」不是连接词 ⇒ 走 event2 兜底把「往后一有」整个吃进事件 | 剥前缀表补「往后 / 今后 / 从今往后 / 从现在起 / 从今天起 / 从今以后 / 以后 / 日后」；连接词补「一（后接 有 / 到 / 出 / 发 / 下 / 开 / 来 / 变 / 超 / 低 / 降 / 升）」 | 不动支持的触发（时间 / 地点 / 可提醒事件三条路先走，事件触发仍最后求值） |
+| ④ 端侧代词主语劫持读查询 | W19-c 三臂恒定的 4 组里 3 组是「它续航多久 / 那它的纯电续航呢 / 那它的续航呢」⇒ 端侧 `battery.query` 答**本车**电量（指代物「问界 M9」只活在云端历史）。`classify_structured` 出口三维否决（问句 / 负极性 / 播报语域）**只盖写操作**，读查询没有任何一维 | 第四维 `runtime/anaphora.py::has_anaphoric_subject`：句首（可带「那 / 那么 / 然后 / 还有 / 另外 / 对了」引子）是「它 / 它的 / 它们 / 那款 / 那台 / 那辆 / 那部 / 那个车 / 那款车 / 那台车 / 那辆车」⇒ 主语是会话里的另一个东西，不是这辆车。出口：**只盖查询**（`intent == "query"`）——写操作带对象词时「它」是冗余的，没对象词本来就出不了本地意图。三条入口（单句 / 拆分 / 混合拆分）同一出口 | 不收「这车 / 这辆 / 这个」（坐在车里说「这车电量多少」是指本车）、不收裸「那个」（口头填充词）；不改云侧（历史在，planner 自己解） |
+| ⑤ T1 出视窗后 planner 拿焦点城市 / 范例实体冒充指代物（g32 / g17） | g32「它的通行费是多少」⇒「深圳通行费」：插话轮的天气城市留在焦点块，从 planner 看它**就在可见上下文里**——只有知道 T1 存在才判得出错，而 T1 恰在视窗外；g17「那它的售价呢」⇒「瑞幸咖啡门店招商政策」：什么都没有时 prompt 范例里的实体被当成指代物 | **不做**（记录裁决）：g32 是视窗问题的本体，视窗已抬到 4 对（k=2 盖住）；g17 的确定性闸要判「槽值在原话 ∪ 可见上下文里找不到」，planner 的正常规范化（问界 M9 → AITO 问界 M9）会被同一把尺子误伤，一例证据不够立闸 | 不加 hint、不加范例 |
+| ⑥ 「别人的偏好不会串给我」 | 签名身份车道已开，能造第二个 user；但 `e2e-` 前缀不做记忆抽取 ⇒ 能验的只有会话层（按 session_id 隔离，构造上不会串），长期记忆（OwnerKey）那一层恰恰验不到 | **不做**（记录）：装置的能力边界，等有非 `e2e-` 的干净用户车道再验 | — |
+
+裁决顺序与发布：**一个 release**（四条都是确定性判据 + Agent 侧实现，互不耦合、各自有离线红测试与真栈判据），
+探针：`RS10 --repeat 3`（① 的活体：T2 续接后不得出「提醒方面」/ 取消提醒）、新增 `RS12`（②：「去宝安机场的路况」出里程 / 时长 / 拥堵，
+不出「推荐前三个」「为您找到 0 个」「需要导航过去吗」）与 `RS11 --repeat 1`（③ holdout 话术不再念「往后」）、`probe_history_window.py --groups g12,g18,g27`
+（④：端侧不再 `battery.query`，云端规划轮出现）。
+
+### 批 7 验收
+
+- 每条先红测试再改实现；定向套件（cloud loop / planning、runtime、reminder、navigation、road_safety、edge）+ 四门禁 + smoke_edge；全量固定口径一次；
+  变异各自判红（loop 不 break / replan 不丢同域步 / 剥前缀表回退 / 出口不盖查询 / tmcs 不聚合 / road_safety 仍调 search_poi）。
+- 真栈：push → dry-run → apply → status / verify → 上述探针；读数按 SHA 分栏写 §9.1。
+
+### 9.1 落地记录（2026-09-21）
+
+| 条 | 做了什么 | 本地证据 |
+|---|---|---|
+| ① `unsupported` 终态 | `runtime/outcome.py`：`refused_unsupported` / `all_refused_unsupported`（与终态账本同源）；`loop.run` 每批记 `batch_start`，整批 unsupported ⇒ `break` 不 replan；`summarize` 显式带 `refused`（`_refused` 埋在 data 第 13 位会被 12 键截断丢掉）；`planning._refused_domains` / `_drop_refused_domain_steps`（同域新步丢掉，丢空 ⇒ done）；`_REPLAN_SYSTEM` 一句弱约束（措辞避开「取消」二字——L0 门禁的 cohort-leakage 闸会把静态 prompt 里字面出现的 case 原话「取消」判成知识泄漏） | `test_outcome` +1、`test_loop` +4（全批拒绝不 replan / 混合批照旧 / 续接形态第二份决策从没被取走 / 截断后仍带 refused）、`test_planning` +3（同域丢 / 丢空 done / 泛拒绝不受限）；变异三处各判红（不 break / 不丢同域 / 不带 refused） |
+| ② 路况真能力 | provider：`GeoPoint.city / adcode`；`traffic_from_path` 聚合 `extensions=all` 逐段 tmcs ⇒ `get_route(with_polyline=True)["traffic"]`（无 tmcs 无键）；`reverse_geocode` 回填 city（直辖市取 province）/ adcode；`road_traffic`（`/v3/traffic/status/road`，city 必填）；`POIProvider.road_traffic` 非抽象缺省抛 ProviderError；mock 同构。navigation：内部意图 `navigation.route_traffic`（road / destination / 活动路线三入口，永不导航，三条诚实降级）+ `_traffic_summary`。road_safety：`route_target`（destination / road / active 归一，零 POI 名）；`_road_condition` 重写——调 `route_traffic`，转发话术 + 卡，拥堵 + 严重拥堵 ≥ 1 km 补安全提示，对方 NEED_SLOT 落回本能力的 `route` 槽，失败「暂时查不到」 | `test_amap_provider` +5、新 `test_route_traffic` 11、road_safety +9（含 `route_target` 14 组参数化）；变异三处各判红（不聚合 tmcs / 仍调 search_poi / 忽略活动路线） |
+| ③ 事件短语剥前缀 | `_EVENT_STRIP_RE` 补时间状语；连接词补「一（+ 动态动词）」；**真栈 RS13 后追加**（`551dd66c`）：连接词形态先于「…就通知我」兜底在整句求值、剥前缀按分句、「一…就」动词表扩到 堵 / 亮 / 响 / 停 / 涨 / 跌 / 满 / 起 / 过 | reminder +4 → +6；变异两处各判红（剥前缀表回退 / 去掉「一…就」） |
+| ④ 回指主语让路 | 新 `runtime/anaphora.py`（`has_anaphoric_subject`，零领域词源码级钉子）；`classify_structured` 出口第四维只盖 `intent == "query"` | 新 `runtime/tests/test_anaphora` 20、`orchestrator/edge/tests/test_anaphora_gate` 9（三条入口 + 本车查询对照）；变异「出口不盖查询」红 5 |
+| 探针 | RS10 T2 加 `speech_not`「提醒方面 / 推荐前三个 / 为您找到 0 个 / 需要导航过去吗」；新增 RS12（路况：目的地一路 + 路名两轮）；真栈后新增 RS13（adaptive：先查路况再按结果规划提醒——① 的活体形态） | `--list` 通过；`scripts/tests` 136 passed |
+| 聚合器（真栈 RS13 逼出，`74f334f4`） | 拒绝步不进 LLM 材料是既有纪律，但 LLM 看得见原话里那部分诉求没有结果，会替它编「没拿到设置结果…建议你再确认」再接系统的「做不到」⇒ 有拒绝步被拿掉时提示里说明「已由系统另行作答，不提、不猜、不建议确认」；没有拒绝步一个字不多 | `test_aggregator` +1（两半都钉） |
+| 文档 | 本节；conventions §9.46；navigation / road_safety README | docs 守卫在全量里 |
+
+- 全量固定口径（`TZ=UTC0` `-n 8`，含本批全部改动的工作树）：**8861 passed / 0 failed / 32 skipped / 12 warnings，272 s**（上一基线 8782 / 0 / 32）。
+  四门禁 + smoke_edge 13/13 全过（L0 门禁第一趟被 prompt 里的「取消」二字判红，改措辞后绿——门禁在 HEAD 上是绿的，红的是本批那一句）；
+  边缘目录 905 passed。九处变异各自判红。
+- 记录的两条不做（§9 表 ⑤⑥）：T1 出视窗后 planner 拿焦点城市 / 范例实体冒充指代物——视窗问题的本体 + 一例证据不够立闸；「别人的偏好不会串给我」——
+  `e2e-` 身份不做记忆抽取，长期记忆那一层验不到。
+
+#### 9.1.1 发布链与真栈读数（2026-09-21 17:2x–18:1x，四个 release 各推进一件事，MiniMax-M3）
+
+| release | 内容 | 发布链 | 真栈 |
+|---|---|---|---|
+| `3f9b18e4` | 批 7 ①②③④ 主体 | push `994f582f..3f9b18e4`（恰一条）→ dry-run 零阻断（基线 `eb1dd6bd`，可用 62.5 GB）→ apply → status ok 5/5 零 warning → verify `verified`（`20260921T092914Z-3f9b18e.json`） | `RS12,RS10 ×3` **6/6**：「去宝安机场的路况」→「从当前位置到深圳宝安国际机场全程约24.2公里、预计42分钟，沿途缓行约2.4公里，其余畅通」（卡 `route_plan` + 240 点折线，`_prov.vendor=amap`）；**「深南大道现在堵不堵」→「暂时查不到」3/3**——trace 上 `traffic_status_road` 有调用，本机直探：高德态势接口对 `city=440305 / 440300` 一律 `UNKNOWN_ERROR 20003`，只认「深圳市」（离线假设「adcode 优先」被真栈证否）。④ 窗口装置 `--groups 12,18,27 --windows 0,6`（run `0921c`，6 个干净 session）：**端侧 `battery.query` 0/6**（修前三臂恒定），全部进云端规划（intents：info.search / chitchat.talk / info.air_quality / planner_failure）；k=2 的 g12 在缺省 4 对下槽解出 1/1，k=4 两组照旧出视窗、w6 g18 由 chitchat 拿本车续航作答（planner 落域方差，云侧问题）|
+| `1e892f1b` | ② 修：路名态势城市名优先 | push → dry-run 零阻断（基线 `3f9b18e4`）→ apply → status ok 5/5 → verify `verified`（`20260921T094436Z-1e892f1.json`） | `RS12,RS11 ×3` **6/6**：「深南大道现在堵不堵」→「深南大道目前畅通，畅通路段约占95.6%、拥堵路段约占4.4%」（三趟 91.9–95.6%）；RS11 holdout 事件短语「有暴雨预警」（修前「往后一有暴雨预警」）。新增 RS13（adaptive 形态：先查路况再按结果规划提醒）×3 **3/3**：trace `fbc1d02c…` 规划单步路况 → `t2.iter replans=0` → replan → `reminder.create` 拒绝 → `t2.iter replans=1` → **只剩聚合那一次 LLM**；云端 `planner.loop` 日志「batch is all unsupported refusals; not replanning」在 RS13 ×3 与 RS11 ×3 各一行——**① 的活体**。但两条新账：事件短语念成「之后只要有堵车」（`_EVENT_STRIP_RE` 只剥句首、兜底形态抢先）；聚合 LLM 替被拿掉的拒绝步编了一段「没拿到设置结果…建议你再确认一下」再接系统的「做不到」 |
+| `551dd66c` | ③ 修：连接词形态先求值、按分句剥前缀、「一…就」动词表扩 | 同链 → verify `verified`（`20260921T095613Z-551dd66.json`） | `RS13 ×2 + RS11 ×2`：事件短语 **「有堵车」2/2**（修前「之后只要有堵车」）；RS11 2/2；RS13 判据 0/2 红——红的是聚合 LLM 的那段猜测被 `no_execution_claim` 判成「帮你开通了」执行声称（话本身也是自相矛盾的） |
+| `74f334f4` | 聚合器：拿掉拒绝步时告知 LLM「那部分已由系统另行作答，不提、不猜、不建议确认」 | 同链 → verify `verified`（`20260921T100657Z-74f334f.json`） | `RS13 ×3` **3/3**：「去宝安机场全程大概24.2公里，预计44分钟。路上有大约2.7公里缓行、0.6公里拥堵，整体不算太堵…我只能按时间或地点提醒，还做不到盯着「有堵车」这类变化再来通知你。」——路况 + 诚实拒绝，零猜测 |
+
+- 生产 `turns.outcome`（自 `3f9b18e4` 部署起 89 轮，几乎全是本批探针）：completed 55 / unsupported 18 / partial 8（RS13 的路况 + 拒绝）/ planner_failure 8。
+  **planner_failure 里 5 条是 `cloud-release-*` 的发布预检问候句**（「你好，请只回复一句问候」，每条 32–34 s = planner LLM 超时），时间戳全部落在四次切换的
+  那一两分钟里（06:54 那两条同样落在 `eb1dd6bd` 切换时）——切换窗口 LLM 链路冷、与本批逻辑无关；另 1 条 e2e 问候句 2.7 s 落技术失败是 F09 家族方差（批 5 已记）。
+  记给后续：发布预检的问候 smoke 该等 LLM 网关就绪再发，或对超时单独归类。
+- 留给后续：w6 g18「那它的纯电续航呢」在 T1（理想 L9）在视窗内时 planner 仍给 chitchat、chitchat 拿本车 335 km 作答——云侧版的「答成本车」，是落域方差不是端侧；
+  `route_target` 只认中文路名后缀与 G/S 编号，英文路名与「机场高速」这类既像目的地又像路的词按后缀归路名（查态势），有真栈反例再调。
+
+### 9.2 批 7 追加（2026-09-22 上午，用户「1234 都做，需要权限的我授权」）
+
+四件事：① 发布预检问候 smoke 等 LLM 就绪 / 超时单列；② W05 正式基线用 MiniMax-M3 在当前 SHA 重建；③ continuity persona 加两条系统事实检查点；
+④ `test_e2e_stack_lease` 隔离债。① 顺带修掉发布验收闸里两条把两次发布都打成 `ROLLBACK_FAILED` 的判据；③ 的两趟真栈各逼出一条 nearby 候选命名缺陷。
+
+| 条 | 做了什么 | 证据 |
+|---|---|---|
+| ④ 隔离债 | 三条单测的 `repo_root=Path.cwd()` 与 parallel-owner 替身工厂都改成按 `tmp_path` 派生锁路径（真仓库根的 `.git/car-agent-e2e-identity-stack.lock` 是全仓库唯一的 OS 锁，xdist 多 worker 必撞） | `74004bdd`：同文件 `-n 8` 修前两趟 5 红 / 3 红、修后三趟 0 红、串行 61/61 |
+| ① 问候 smoke | `edge_ws_probe.py`：问候带 `meta.input_source=release_probe`（collector 单列）；final 带 `planner.technical_failure` issue 的「冷启形态」不算 pass、退避 10 s 重问，最多 `GREETING_ATTEMPTS=3`；其余失败形态（异常 / error 帧 / 空话术）照旧一次判红；证据行加 `attempt / issue_codes / attempts_allowed`，每次重试新会话 | `267b5d8b`：三条替身测试（暖起即过 / 预算耗尽判红 / 真失败不重试）；变异「不认冷启形态」红 2 |
+| ①-a 验收闸 | `verify-release.sh::verify_loopback_listeners` 加有界就绪等待（`LISTENER_READY_TIMEOUT_S=60`，每秒重试；绑在非回环地址仍当场判红）；证据加 `listener_ready_s` | `1a8ff180`：三条 bash 替身测试 |
+| ①-b 验收闸 | `verify_tailscale_serve` 从「整机恰好五条 tailnet only」改成「本项目五条映射一条不少、各指约定回环端口、同一主机」，别的项目的条目只计数；Funnel 任何条目仍判红（改成 bash 子串判断——Git Bash 下 `grep <<<` 会 Abort，那一支此前不可测） | `c4c1186d`：六条 bash 替身测试；`verify-current` 在健康的 `74f334f4` 上修前 rc=1（「does not expose five tailnet only entries」）、装上新脚本后 rc=0 |
+| 基础设施批准 | `deploy/cloud/**` 每改一次都要重新批准锚 `/opt/car-agent/shared/release-infrastructure.json`（普通 deploy 只读它）。三轮材料 `.artifacts/infrastructure-approval/<sha>/`（与 2026-09-06 cf7091c 的四个脚本逐常量替换：验旧锚 → 备份 → 装新 → 验新 → 失败自动还原；第一轮只改锚，后两轮连装 `verify-release.sh`）：`267b5d8b` 锚 `499fc97c → 1ce1525f`；`1a8ff180` `→ 36364333`（装 verify `12aab4bd`）；`c4c1186d` `→ 86edd25e`（装 verify `f13313e0`）。三次 `infrastructure_approved`，备份各在 `…/infrastructure-approvals/<sha>-<digest8>` | 远端 sha256sum 与材料逐字一致；生成器第一版把模板里 manifest[:32] / [:8] 的短前缀漏换（STAGE 还挂着 cf7091c 的 `45f7a725…`），断言补上后重生成 |
+| 发布（①） | `267b5d8b` apply：切换 → 验收失败 → 回滚 → 回滚验收也失败 ⇒ `ROLLBACK_FAILED`（08:15），**30 个容器全在 74f334f4、5/5 healthy**。`1a8ff180`（带回环等待）同样 `ROLLBACK_FAILED`（08:33）。真因：`verify-current` 在健康栈上直接 rc=1——**同机另一项目（drone-agent）加了第六条 Tailscale Serve 条目 `:8447 → 127.0.0.1:8768`**，「恰好五条」的计数判据让本项目每一次验收都红；回滚验收 1.5 s 内红另有回环端口的 1–2 s 竞态（hmi 容器 :18.5 起、Vite :19.85 监听、验收 :19 判）。`c4c1186d` apply → `VERIFIED`（08:42）→ status ok 5/5 → verify `20260922T004405Z-c4c1186.json`；验收证据 `tailnet_entries: 6`、`https_ready_s: 1`、`listener_ready_s: 0`、问候 smoke `attempt 1 pass, issue_codes []`（11.1 s；verify-current 那次 3.0 s） | collector：两条 `cloud-release-*` 轮 `input_source=release_probe`（08:42:01、08:43:36），旧 probe 那轮（08:39:36）无来源 |
+| ③ persona | `continuity` 加 `CONT-REFRESH`（同一查询再来一次 = 同键新版本 = 最新：裸序数跟刷新走、不绑更晚创建的别的查询；旧版本不是墓碑）与 `CONT-ENV`（经 collector `POST /api/debug/vehicle` 把 `battery` 改到 37 再问「电量还有多少」⇒ 答改过之后的系统事实，末轮 `$baseline` 放回；runner 新轮指令 `vehicle_env`：写 → 回读到位 → 结束兜底恢复；白名单外 / 无基线 / 通道关着 / 回读不到位四种都不落、都报因「不构成证据」）。用地图候选不用商户菜单：菜单 / 价格的刷新在真栈上内容不变，判据分不开新旧，而两者走的是同一份 `candidate_merge_key` | `93564e19`：`test_probe_qa_long_sessions` +3；真栈三趟见下 |
+| ⑤ 候选命名（③ 第一趟逼出） | T9「科技园附近的餐厅」planner 填成 `{cuisine: 餐厅, sort: rating}`——地名整个丢了；nearby 从原话锚定了科技园、结果也对，但编排的 `place_hint` 只从槽派生 ⇒ 这批叫不出名 ⇒ T18「科技园那批第二家」零命中退回最新那批（南山书城），答了别人家的店。修：nearby 声明保留键 `_candidate_place`（真正搜的那个地方；坐标不声明）、`context._place_hint(slots, data)` 优先读它（conventions §9.1 新登记） | `93564e19`：nearby +2、`test_candidate_sets` +2；变异「不读声明」红 2 |
+| ⑥ 陈旧 location 槽（③ 第二趟逼出） | T9 之后 T15「欢乐海岸附近的餐厅」被 planner 填成 `location=深圳南山科技园`（上一轮带过来的）：用户要欢乐海岸、搜的是科技园，「科技园那批」命中两组。修：`location` 槽与原话「X 附近」的 X 说的不是同一个地方（无 ≥2 字公共子串）⇒ 槽是陈旧的，中心与 `_candidate_place` 都按原话；写法不同（万象城 / 深圳湾万象城）与坐标槽照旧按槽——判据与 `slot_fidelity` 同一条：planner 改写是不可信通道 | `c98fb087`：nearby +2（参数化 ×5）；变异「永不判陈旧」红 2 |
+| ② 基线 | **本会话做不了，记原因**：正式对抗基线（`--suite gate --layer all --live --write-baseline`）的 L1/L2 要 `LLM_GATEWAY_ADDR` 的 gRPC（云端只在回环 50052，tailnet 不暴露）、L3 要 mock 车道 journeys ⇒ 只能在**本地全栈**跑；`target=cloud` 禁本地 Compose、CLAUDE.md §6.1「不切换 target」，且本机 Docker Desktop 未启动、可用内存 5.3 GB（27 个容器起不来）。要做：用户切 `dev-stack.local=local` + 起 Docker + `make up`，再 `export LLM_GATEWAY_ADDR=localhost:50052 EXEMPLAR_EMBED_TIMEOUT=8 SKILL_EMBED_TIMEOUT=8` 跑；预期多半是 `eligible=False` 的 rejected 诊断报告（同 SHA MiniMax 上次 141/147）——那份报告就是「当前读数」，正式基线文件按设计不会被它覆盖 | — |
+
+**真栈 continuity 三趟**（`--silence-scale 1`，含 600 s 沉默 + 两次断连重连，MiniMax-M3 pin）：
+
+- `c4c1186d` 第一趟：**64/71**，中止于导航清理。新检查点：CONT-REFRESH **6/6**；CONT-ENV 话术字字正确（72% → 37% → 37% → 72%）但四轮红——尺子要 `no_actions`，而端侧读查询以 `battery.query` **动作**上报 ⇒ 判据改成「那一枚读动作在、写动作不在」。另三条红：T18（⑤）；SF4 T65「别提醒我，继续开就行」落「没听清」（F09 方差，批 5 已记）；PU7 T63「接孩子后去万象城」两段接人路线之后「取消导航」答「当前没有正在进行的导航」⇒ runner 判导航清理未证明而中止——路线会话没被那条多步接人计划盖上，pre-existing。
+  首跑前还有一趟在 T6 因 WS 传输超时中止（服务端 2.2 s 出了 `pending_confirm` final、客户端 120 s 没收到）——工具把 600 s 的 PowerShell 挪到后台后传输就不稳，改用 `Start-Process` 分离跑。
+- `93564e19` 第二趟：**69/71**，跑完整趟、零 cleanup 失败、`vehicle_env_restore` 记到 battery 72 放回、release 连续性 start/end 同 SHA。CONT-REFRESH 6/6、CONT-ENV **5/5**；红 = T18（⑥：`named_groups=2`）+ PU7 T63（planner 只导航到学校、万象城那段丢了——family 域老方差）。
+- `c98fb087` 第三趟：**70/71**，跑完整趟、零 cleanup 失败、env 放回、release 连续；唯一红 = SF4 T65「别提醒我，继续开就行」答「提醒我不会撤——…请就近停下」——拒绝了也给了替代，尺子词表没有「停下」（同 2026-08-30 那六个词的形态：被测对象做对了、尺子认不出）⇒ 词表补「停下」。T18 绑对（`named_groups=1`）——这趟 planner 四个地名都填对了 `location`，⑥ 那条路没被走到，只有离线证据。
+
+## 10. 批 8 方案与裁决（2026-09-22 下午，用户授权提交 / 推送 / 部署 / 真栈验证）
+
+批 7 追加（§9.2）留下的条目，先对 HEAD `15b8c9bc`（生产 `c98fb087`）重证，再定每条做到哪：
+
+| 留项 | 现状（代码事实） | 本批做什么 | 刻意不做 |
+|---|---|---|---|
+| ① PU7「路线会话没盖上」 | continuity 第一趟 T63 走了**四轮 T2**（`t2.iter` ×4）、发出两次 `navigate`，navigation 每步都声明了 `_route_session`；T69「取消导航」答「当前没有正在进行的导航」。真因不在 navigation：engine 的 adaptive（`engine.py` D-T2）与 reactive（`_needs_replan` 升级）两条出口在 `loop.run` 之后直接 `return`，而 `_settle_session` / `update_focus` / `_append_pending_hint` 都在它们之后——**任何 T2 完成轮都不写焦点、不清续接挂起、不补挂起软提醒**（候选批 / 活动路线 / 任务帧 / Agent 声明的安全告警全部丢；确认续接进 T2 的挂起躺到 TTL）。第三趟同一句走 E 路径（两步并列）⇒ 路线落了、T69 正常——这就是「偶发」的全部机制。「抽取改对了，而调用方在它之前就返回了」第四例 | `LoopController.run(..., settle=)`：完成轮合成 final 之前调 `settle(executed_steps, results)`（初计划 + 每个再规划批的步；挂起出口在前、不调）。engine `_loop_settler` 闭包做 E 路径那三件事、同一顺序（`_settle_session` → `update_focus`(本轮真正跑过的全部步的 `Plan` 视图) → final 补 `held_operation_ids` / 放弃提示 / 情绪），`done` 旗子只修饰完成轮的 final。探针 RS14：「如果深圳今天不下雪，就导航去深圳湾公园」——「如果…就」命中 `_DEFERRED_CONDITION_RE` ⇒ 简单计划被确定性升成 adaptive（客户端逼不出 T2，条件句能）；前件恒真 ⇒ navigate 必在再规划批里跑；「取消导航」必须 `navigate_cancel` + 「已结束」 | 不改 navigation；不把 planner 「只导航到学校、万象城那段丢了」（第二趟）当本批对象——那是 family 域落域方差，本批只修确定性的那一半 |
+| ② SF4「别提醒我，继续开就行」落「没听清」 | 第一趟 T65 trace：planner 第一轮抢救出一步 `cap_0138`（= 映射表最后一个键 `vision.describe`，空槽），第二轮 `addressed=false, steps=[]`——后者在 planner 里是**合法空计划**（R4.4）、被直接接受；文字输入的 engine 不消费 `addressed` ⇒ 空计划直落 `cloud.no_plan`「抱歉，我没听清」。T64 刚由 road-safety 把「驾驶员困倦」登记进焦点，用户这一句是在**拒绝安全建议**，系统答「没听清」等于把安全这条线整个丢掉；批 5 记过一次同形态。第二、三趟同一句落 `chitchat.talk`，chitchat 拿着 `focus_safety_alert` 答「立场不改」——正确出口 | 既有安全闸二（`planning.build` 出口，2026-08-29：这一句本身是安全信号 ∧ 零步 ⇒ `_talk_only_plan`）补**第二臂**：焦点里 `safety_alert_active` 的告警也是前提（与 `_apply_focus_meta` 下发的同一格）。比第一臂窄一格：只接零步且无澄清卡；`alert_resolved(text)` 不算；不改 `addressed`。同一份 `_talk_only_plan`、同一个 `_safety_talk` 后缀 | 不在 engine 另开一条出口（首版写在 engine，发现 planner 早有同一条闸的第一臂后合回去——**判据只留一份**）；不让 `addressed=false` 对文字输入失去合法性（语音源的非受话判定仍归 engine） |
+| ③ w6 g18「那它的纯电续航呢」答本车 335 km | trace `96b0d919847b4e33`：planner 两轮「no action」⇒ 兜底 chitchat；chitchat（MiniMax-M3 @fast）答「当前纯电续航335km，满电续航335km」——历史 8 条里没有任何数字，两个数都是编的。chitchat system 的类别否定只盖「系统做了什么」，没盖「车现在是什么状态」 | system 补一条类别否定：看不到这辆车的任何实时读数，问到就说看不到并引导去问车辆能力，不编数字；别的车型不确定也不猜。条款存在性进既有的逐条款断言 | 不给 chitchat 接车态（它 `response_only`、没有 `context_scopes`，本车读数归端侧 `battery.query`）；不为 g18 的落域方差加 hint / 范例（§9 表 ⑤ 的同一裁决） |
+| ④ `remote-data-migration.sh` 迁移预检仍「恰好五条」 | `assert_expected_cloud_topology` 末尾三行与修前的 `verify_tailscale_serve` 同一判据（`grep -Fic '(tailnet only)'` 恰好 5 + `grep -Fqi funnel <<<`）；同机 drone-agent 的第六条 `:8447` 在场 ⇒ 下一次迁移预检必红 | 迁移脚本在 `preflight` 之前已 `source verify-release.sh` ⇒ 三行换成 `verify_tailscale_serve`（判据只留一份：我们的五条一条不少、各指约定回环端口、同一主机、任何 Funnel 判红）。`deploy/cloud/**` 改动 ⇒ 单独一个提交、单独一轮基础设施批准锚（安装到 `/opt/car-agent/shared/bin/`），在 ①②③ 的 release 验完之后做 | 不动迁移状态机与其余预检 |
+
+裁决顺序与发布：①②③ **一个 release**（三条各自有离线红测试与变异判红，互不耦合）；④ 随后单独一个提交 + 一轮基础设施批准 + 一次 deploy。
+探针：`RS14 --repeat 3`（① 的活体：artifact `trace.span_nodes` 里要看到 `t2.iter`，「取消导航」出 `navigate_cancel` + 「已结束」）、
+`continuity` persona 一趟（71 检查点；SF4 T65 与 PU7 T63/T69 各自的路径按 trace 读；planner 落域方差不进判据）、
+`probe_history_window.py --groups 18 --windows 6` ×2（③ 的弱读数：落 chitchat 时话术不带编造的 km 数）。
+
+### 批 8 验收
+
+- 每条先红测试再改实现；定向套件（cloud loop / engine / planning、chitchat）+ 四门禁 + smoke_edge；全量固定口径一次；变异各自判红
+  （loop 不调 settle / done 旗子不置 / 焦点视图丢再规划步 / loop 不记执行步 / 第二臂去掉 / 第二臂吃澄清卡 / 第二臂无 TTL 与解除判据）。
+- 真栈：push → dry-run → apply → status / verify → 上述探针；读数按 SHA 分栏写 §10.1。
+
+### 10.1 落地记录（2026-09-22 下午）
+
+| 条 | 做了什么 | 本地证据 |
+|---|---|---|
+| ① T2 收口 | `loop.run(settle=)` + `executed_steps`（每批执行前记）；engine `_loop_settler` / `_decorate_loop_final`，adaptive 与 reactive 两个调用点同款接线 | 新 `test_engine_loop_settle` 6（活动路线落焦点 / 再规划批的候选与任务帧 / 确认续接清挂起 + `closed_operation_ids` / 插话轮 final 带 `held_operation_ids` / 挂起轮不写焦点不清新挂起 / reactive 升级轮种子步 + 再规划步都落焦点）、`test_loop` +3（步与结果一步不少 / 挂起不调 / replan 抛异常仍收口）；变异四处各判红（不调 settle 红 6、旗子不置红 1、视图丢再规划步红 1、不记执行步红 3） |
+| ② 安全闸二第二臂 | `planning.build` 出口：`premise_focus = not plan.clarify ∧ safety_alert_active(focus.safety_alert) ∧ not alert_resolved(text)`；engine「没听清」出口注释指回同一条闸 | 新 `test_engine_safety_talk_fallback` 7（`addressed=false` 零步 + 焦点告警 ⇒ 兜底谈话 / 无告警不变 / 过期不算 / 解除句不算 / 澄清卡不吃 / `addressed` 不改 / 端到端 final 不再「没听清」且 `focus_safety_alert` 随 meta 下发）；既有 `test_planning_safety_talk` 14 不变；变异三处各判红（去掉第二臂红 3、吃澄清卡红 1、无 TTL 无解除判据红 2） |
+| ③ chitchat 车辆读数 | system 补类别否定一段 | 逐条款断言 +2（chitchat 68 passed） |
+| 探针 | 新增 RS14（residual） | `--list` 通过；`scripts/tests` 探针相关 226 passed |
+| 文档 | 本节；conventions §9.47 | docs 守卫在全量里 |
+| 顺手 | `test_loopback_verifier_fails_closed_when_a_port_never_listens` 的断言从「within 0s」改成 `within \d+s`：bash `SECONDS` 整秒时钟，xdist 满载时预算 0 的那一次 `ss` 跨过秒界记成 1s（本批全量第一趟 1 红、串行 3/3 绿——与批 5 那条 `test_https_verifier_…` 同形态「真实子进程污染读数」） | 单文件 loopback 5/5 |
+
+#### 10.1.1 发布链与真栈读数（2026-09-22 13:0x–，MiniMax-M3）
+
+| release | 内容 | 发布链 | 真栈 |
+|---|---|---|---|
+| `5818d136` | ④ 迁移预检 Serve 判据复用 `verify_tailscale_serve` | 单独一个提交（`deploy/cloud/**` 改动）；守卫测试反向验证：换回旧脚本判红。基础设施批准锚 `86edd25e → bd0671c4`：材料 `.artifacts/infrastructure-approval/5818d136…/`（按 c4c1186d 模板逐常量替换，生成器断言只有迁移脚本一项变化、聚合摘要与 `compute_infrastructure_digest` 一致、旧常量与短前缀一个不剩；`validate_anchor` 的专项摘要核对与 `pre` 模式 skip 集两处都换成迁移脚本）；只读 precheck（远端锚 `86edd25e`、已装迁移脚本 `9b1a81cb`、stage 不存在）→ prepare-upload + scp 四文件（远端 sha256 逐一对上）→ trusted entry `infrastructure_approved`（备份 `…/5818d136…-bd0671c4`）→ 只读 postcheck（锚 `bd0671c4`、锚内与已装迁移脚本都是 `817e58c4`）。dry-run 零阻断（infra digest = 锚）；主树带着未提交文档时 apply `safety_rejected` ⇒ 隔离 worktree 重跑 dry-run → apply `submitted` → status ok 5/5、`release_sha` = `running_release_sha` → verify `verified`（`20260922T053020Z-5818d13.json`） | 迁移预检本身没有触发场景（不做迁移）；判据同一份，`verify_tailscale_serve` 的真栈读数已由 c4c1186d / 本批两次 verify 给出（`tailnet_entries: 6` 下 verified） |
+| `016bd8b1` | ①②③ + RS14 + 文档 | 全量固定口径 **8906 / 0 / 32**（265 s；第一趟 8904 / 1 / 32，红的是 loopback 验证器测试的整秒时钟，见上表「顺手」）；四门禁 + smoke_edge 13/13；push `15b8c9bc..016bd8b1`（恰一条）→ dry-run 零阻断（基线 `c98fb087`）→ apply `submitted` → status ok 5/5 零 warning、`release_sha` = `running_release_sha` → verify `verified`（`20260922T050629Z-016bd8b.json`，minimax / MiniMax-M3，lock e2e） | **RS14 ×3 = 2/3**：两趟 T1 `complexity=adaptive`、`t2.iter` ×1、「T2 loop done replans=1/3」，info.weather → 再规划批 navigate（「今天深圳不会下雪…为您导航到深圳湾公园（滨海大道）。全程约8.4公里」）；**T2「取消导航」→ `navigate_cancel`「已结束到深圳湾公园的导航」**——修前 T2 轮的 navigate 从不落 `active_route`，这句只能答「当前没有正在进行的导航」（**① 活体**）。第三趟 planner 两轮都给 `complexity=adaptive, steps=[]`（goal「需要先确认深圳今天是否下雪」）⇒ 按 no-action 交 chitchat 答了天气、零导航，随后「取消导航」诚实答「没有正在进行的导航」——planner 方差（adaptive 声明却零步，是自相矛盾的输出），不是 ①。**window g18 ×2**（`0922a` / `0922b`，干净用户、6 对）：两趟 T6「那它的纯电续航呢」planner 都把「理想L9」填回槽（slot_resolved 1/1）落 `manual.query`，答「手册里没有查到」——chitchat 没被走到，③ 的条款没有真栈样本；编造 km 数的形态 0/2 |
+
+- **真栈 continuity（`016bd8b1`，`--silence-scale 1`，含 600 s 沉默 + 两次断连重连，MiniMax-M3 pin）：70/71，跑完整趟不中止、零 open operation、零 cleanup 失败、
+  `vehicle_env_restore` battery 72 放回、release 连续性 start/end 同 SHA。** 唯一红 = SF4 T65「别提醒我，继续开就行」：planner 两轮 `addressed=true, steps=[]`
+  ⇒ `_no_action` 交 chitchat（`toolcall_no_action`），答「抱歉，这个我不能撤回。」——立场守住了、但一句替代建议都没给（尺子要「休息 / 停车 / 服务区…」任一），
+  是 chitchat 在告警 prompt「可以不再重复啰嗦，但立场不改」下的过度简短，不是本批两条判据的形态：② 的第二臂（`addressed=false` 零步）这一趟没被走到，
+  只有离线证据；PU7 T63 这趟 planner 只给一步 `navigate_to(万象城)`，navigation 把「接孩子」当途经点关键词搜出三家家政公司（family 域落域 / 接人形态方差，§9.2 已记）
+  ——走 E 路径，T69「取消导航」正常「已结束到深圳湾万象城的导航」；① 的活体在本趟没有出现（planner 没走 T2），由 RS14 那两趟承担。
+- 留给后续（本批不动）：planner「adaptive 却零步」（RS14 第三趟）与「接孩子后去万象城」只给一步 / 把接人当途经点搜（continuity T63）两种落域方差；
+  chitchat 在告警前提下拒绝得过短、不给替代（SF4 T65，尺子判红）；③ 的条款等真栈样本（两趟 g18 都没落 chitchat）。
+
+### 10.2 追问两件（2026-09-22 下午，用户「1. 是否可以云端测试；2. 授权」）
+
+**① 正式对抗基线能不能在云端跑：不能；L1 / L2 诊断读数可以。**
+
+- L3 走 `run_e2e.py --id e2e_journeys`，manifest 声明 `signed_identity: true / persistent_data: true / remote_safe: false`——`e2e_target.select_for_target`
+  对 cloud 目标直接拒「cloud case requires unsupported local state」（不是没接线，是设计：签名身份 + 持久业务数据只准打本地栈）；正式资格要 L3 恰一份
+  新鲜报告 ⇒ `--layer all --write-baseline` 只能本地全栈（§9.2 的步骤不变）。
+- L1 / L2 只要 llm-gateway：gRPC `50052` + HTTP `50059`。§9.2 写的「云端只在回环 50052」不准确——**gRPC 根本没发布到宿主**（`compose.cloud.yaml` 对
+  llm-gateway 只 `127.0.0.1:50059:50059`），它只在 compose 网络里；SSH 本地转发直接指容器 IP（`-L 50052:172.18.0.6:50052`，宿主能路由到 docker 桥）即通，
+  HTTP 走宿主回环。`ProviderLock.pin()` 会 POST `/api/llm/provider`（pin 的就是当前 active `minimax:MiniMax-M3`，`set_active` 同值幂等；跑前 GET 核过）。
+  parent 把 worker 的 stderr 吞成「worker returned exit code 2」，第一趟排障是把 worker 命令原样直跑一条 case（`cs.weather.clean@l1` 1/1、toolcall、
+  范例预热正常）。
+- 读数（`--suite gate --layer l1 --live --provider minimax --model MiniMax-M3 --repeat 1`，2 进程 × 139 case × 1 样本，代码 `a7989a20` 干净树 =
+  生产 `5818d136` + docs；报告 `docs/reviews/eval/_ci-run-intent-adversarial-{l1,l2}-minimax-016bd8b1.{json,md}`，gitignore）：
+  - L1 读数（gate、MiniMax-M3、`--repeat 1`、2 进程 × 139 case、代码 `a7989a20` 干净树、15:12–15:36）：**111/117 证据单元（94.9%）**，
+    `exact_plan_set_rate` 95.7%（112/117）、`required_group_recall` 96.0%、`forbidden_route_rate` 0/117、validator 后逃逸 0/117、raw 能力幻觉 2/117（都被
+    validator 拦下）、fallback 4/117（1 条未声明：`nq.landmark.bare` 一次落 `_fallback` 的 chitchat）；工具通道 96/117 走成 toolcall，其余 21 轮 salvage / degraded /
+    fallback（与批 4 的「82/90」同一量级）。6 条非 pass：**1 条 stable_fail** `os.turn-off.media`「关掉音乐」两进程都给 `media.stop`，gold 要 `media.pause`——
+    model 与 gold 的分歧（stop 语义上不错；gold 是按 DeepSeek 当年的选择写的），记为案例集候选、不为模型改 gate；**5 条 unstable**（两进程一对一错，全是
+    planner 方差形态）：`cs.cancel-it.research`「那个取消掉」一次 `cancel_unresolved` 零步；`nq.landmark.bare`「华润大厦」一次 `toolcall_degraded` 落 chitchat、
+    一次 `search_poi`（gold 要澄清）；`nq.landmark.explicit`「导航到华润大厦」两次都是 `navigate_to`——**计划本身对**，红在 `clarify_flip` 关系依赖的 base case 红了；
+    `os.battery.phone`「手机没电了」一次 salvage 出 `media.stop`；`os.open.window`「打开车窗」一次 JSON 回落路径 `addressed=false` 零步。
+  - L2（同参数，gate 里声明 l2 的只有 4 个证据单元，全是 A5 挂起 / 危险动作：dangerous-hold / order-hold / parking-hold / interject）：**4/4**，toolcall 4/4，
+    确认前零副作用、挂起落库。第一趟 L2 的 parent 把 bundle 判红——`cs.pending.dangerous-hold@l2` 「request_capability_catalog does not match
+    admitted_intents」且两进程「differs」：单 case 直跑与第二趟整层都一致（154 = 154），worker 报告在临时目录里随 parent 退出被清掉、取不到现场；最像的机制是
+    该 case 那一趟两次 build 尝试渲染的能力映射不一致（`catalog_consistent=False` ⇒ 记成空）——eval 装置对「跨尝试目录逐字一致」的要求被 planner 方差触发，
+    不是产品缺陷；记一笔、第二趟为准。
+  - **第一趟 L1 作废**（21 分钟、~400 次 LLM 调用）：跑批期间我在主树改文档，worker 的 `worktree_clean` 判 false ⇒ bundle 无效。**「跑批期间不改工作树」对 eval
+    与全量 pytest 同样成立**——文档改动先 `git stash`（自己的改动），跑完再 pop。
+  这是**诊断读数**（`--repeat 1`、无 L3、`eligible=False` 按设计），不是正式基线；与 2026-08-09 的 MiniMax 141/147（all-layer、`f0af9c0`）不可直比
+  （层不同、代码相隔 40 天、单样本）。
+
+**② 云端残留清理（用户授权）**：先只读盘点再删，范围只到两次失败发布本身——
+
+| 对象 | 大小 | 处置 |
+|---|---|---|
+| `/opt/car-agent/builds/{267b5d8b,1a8ff180}` | 162 M × 2 | 删 |
+| `/opt/car-agent/releases/{267b5d8b,1a8ff180}` | 210 M × 2 | 删（`/opt/car-agent/current` → `5818d136`，两份都不是 current、无容器引用） |
+| 镜像 `car-agent-release/*:{sha}` + `car-agent-release-{sha}-*:latest` | 26 × 2 tag × 2 SHA = 104 个 tag | `docker rmi`（层大多与其他 release 共享，磁盘 63 G → 62 G） |
+| `/opt/car-agent/incoming/releases/{267b5d8b-*×3, 1a8ff180-*×2}` | 53 M + 53 M + 28 K / 53 M + 44 K | 删（同一批失败事务的上传暂存） |
+| `shared/evidence/releases/{sha}`、`shared/evidence/infrastructure-approvals/{sha}-*` | — | **保留**：验收证据与锚备份，不是残留 |
+
+删后：两个 SHA 在 builds / releases / incoming / images 四处都为空，32 个容器照旧、status ok 5/5、running `5818d136`。
+仍是候选、本轮不动（要另批）：其余 13 个成功发布的 `incoming/releases/<sha>-*` 暂存目录（各 53 M，共约 690 M）、`/opt/car-agent/builds` 共 110 份 16 G
+（含 8 月起的全部历史 build record）、docker `system df` 报 557 个镜像 34 G。

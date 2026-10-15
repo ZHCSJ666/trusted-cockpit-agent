@@ -1,0 +1,367 @@
+{
+  "passed": true,
+  "at": "2026-10-11T16:47:07.273133+00:00",
+  "checks": [
+    "Typed explicit endpoints, legitimate origin disambiguation, continued original route and real map geometry",
+    "Typed today's general news, verified published dates or honest no-current-items result",
+    "Unmatched natural wording reaches actual model and news provider after prior route/news conversation"
+  ],
+  "count": 3,
+  "model_replies_mocked": false,
+  "provider_results_mocked": false,
+  "browser_input": "typed original phrases, not feature buttons",
+  "records": [
+    {
+      "input": "从杭州西湖出发，到杭州东站，帮我规划驾车路线",
+      "status": "clarify",
+      "message": "起点有多个匹配，请补充完整地址。",
+      "calls": [
+        {
+          "tool": "plan_route",
+          "args": {
+            "origin": "杭州西湖",
+            "destination": "杭州东站"
+          },
+          "status": "clarify",
+          "source": "workspace_service"
+        }
+      ],
+      "model": null,
+      "orchestration": {
+        "tier": "T0",
+        "rounds": 0,
+        "tool_count": 1,
+        "max_tools": 8,
+        "max_rounds": 4,
+        "request_id": "workspace-1791737221255134998"
+      },
+      "trace": [
+        {
+          "stage": "input",
+          "status": "ok",
+          "detail": {
+            "text": "从杭州西湖出发，到杭州东站，帮我规划驾车路线",
+            "source": "user",
+            "vehicle_source": "simulated"
+          }
+        },
+        {
+          "stage": "schema",
+          "status": "ok",
+          "detail": {
+            "tool": "plan_route",
+            "step": "s1"
+          }
+        },
+        {
+          "stage": "tool_result",
+          "status": "clarify",
+          "detail": {
+            "step": "s1",
+            "tool": "plan_route",
+            "message": "起点有多个匹配，请补充完整地址。"
+          }
+        }
+      ],
+      "steps": [
+        {
+          "tool": "plan_route",
+          "args": {
+            "origin": "杭州西湖",
+            "destination": "杭州东站"
+          },
+          "status": "clarify"
+        }
+      ]
+    },
+    {
+      "input": "第3个",
+      "status": "executed",
+      "message": "已规划到杭州东的路线，约15.1公里，预计18分钟。不含实时路况。",
+      "calls": [
+        {
+          "tool": "plan_route",
+          "args": {
+            "origin": "relation/13164471",
+            "destination": "杭州东站"
+          },
+          "status": "executed",
+          "source": "workspace_service"
+        }
+      ],
+      "model": null,
+      "orchestration": {
+        "tier": "T2",
+        "rounds": 0,
+        "tool_count": 1,
+        "max_tools": 8,
+        "max_rounds": 4,
+        "request_id": "workspace-1791737221348767032"
+      },
+      "trace": [
+        {
+          "stage": "input",
+          "status": "ok",
+          "detail": {
+            "text": "第3个",
+            "source": "user",
+            "vehicle_source": "simulated"
+          }
+        },
+        {
+          "stage": "schema",
+          "status": "ok",
+          "detail": {
+            "tool": "plan_route",
+            "step": "s1"
+          }
+        },
+        {
+          "stage": "continuation_authorization",
+          "status": "ok",
+          "detail": {
+            "tool": "plan_route",
+            "original_request": "从杭州西湖出发，到杭州东站，帮我规划驾车路线",
+            "user_reply": "第3个",
+            "scope": "pending_task_only",
+            "ttl_seconds": 120
+          }
+        },
+        {
+          "stage": "tool_result",
+          "status": "executed",
+          "detail": {
+            "step": "s1",
+            "tool": "plan_route",
+            "message": "已规划到杭州东的路线，约15.1公里，预计18分钟。不含实时路况。"
+          }
+        }
+      ],
+      "steps": [
+        {
+          "tool": "plan_route",
+          "args": {
+            "origin": "relation/13164471",
+            "destination": "杭州东站"
+          },
+          "status": "executed"
+        }
+      ]
+    },
+    {
+      "input": "给我查一下今天有什么新闻",
+      "status": "answered",
+      "message": "今天（2026-10-12，上海时间）新闻：1. 特朗普称俄乌进入“能源停火” 泽连斯基回应说“这是个新闻” - 新华网客户端",
+      "calls": [
+        {
+          "tool": "get_news",
+          "args": {
+            "period": "today"
+          },
+          "status": "answered",
+          "source": "workspace_service"
+        }
+      ],
+      "model": null,
+      "orchestration": {
+        "tier": "T0",
+        "rounds": 0,
+        "tool_count": 1,
+        "max_tools": 8,
+        "max_rounds": 4,
+        "request_id": "workspace-1791737221841002056"
+      },
+      "trace": [
+        {
+          "stage": "input",
+          "status": "ok",
+          "detail": {
+            "text": "给我查一下今天有什么新闻",
+            "source": "user",
+            "vehicle_source": "simulated"
+          }
+        },
+        {
+          "stage": "schema",
+          "status": "ok",
+          "detail": {
+            "tool": "get_news",
+            "step": "s1"
+          }
+        },
+        {
+          "stage": "tool_result",
+          "status": "answered",
+          "detail": {
+            "step": "s1",
+            "tool": "get_news",
+            "message": "今天（2026-10-12，上海时间）新闻：1. 特朗普称俄乌进入“能源停火” 泽连斯基回应说“这是个新闻” - 新华网客户端"
+          }
+        }
+      ],
+      "steps": [
+        {
+          "tool": "get_news",
+          "args": {
+            "period": "today"
+          },
+          "status": "answered"
+        }
+      ],
+      "news": {
+        "items": [
+          {
+            "title": "特朗普称俄乌进入“能源停火” 泽连斯基回应说“这是个新闻” - 新华网客户端",
+            "url": "https://news.google.com/rss/articles/CBMimgFBVV95cUxOX1VVTFdrUWprejkzZ0c2eXlpSDlBUE9wdzJvNGNxYnZjdzMtVEZpRWFienMtaGo1bTdCcGFDV1pGZlljTTkyelV6aVNlTzJvLXd6bmZmaGJyVWlBUkl6ZTV5aHNJZzBmZTdlaEd4Z2ZJNmhYbW03bEVWX0NfU29vQnM2RFB1dlREOUxwTTNpNm1iUzhjVkYzWjZ3?oc=5",
+            "snippet": "特朗普称俄乌进入“能源停火” 泽连斯基回应说“这是个新闻”    新华网客户端    泽连斯基告诉消息人士......_7x24快讯_新浪财经    手机新浪网    泽连斯基，最凶险的时刻来了    凤凰网    泽连斯基喊话特朗普：请转告普京给我们60天全面停火，我们就会组织选举    RFI    美俄柴油协议引欧洲多国反对，英国、德国等力挺乌克兰    观察者网",
+            "published_at": "Sun, 11 Oct 2026 16:17:24 GMT",
+            "source": "新华网客户端"
+          }
+        ],
+        "provider": "Google News RSS",
+        "fetched_at": "2026-10-11T16:47:02.912504+00:00",
+        "data_mode": "live",
+        "cache_age_seconds": 0,
+        "content_trust": "external_untrusted",
+        "topic": "综合新闻",
+        "period": "today",
+        "timezone": "Asia/Shanghai",
+        "requested_date": "2026-10-12",
+        "notice": "按Asia/Shanghai当天及源站发布时间筛选；不使用旧新闻、未来或缺少可核验发布时间的条目补足数量。"
+      }
+    },
+    {
+      "input": "劳驾找点汽车行业资讯给我看看",
+      "status": "answered",
+      "message": "新闻：1. 人民日报重申：刹车踏板绝不许断裂，这是汽车业最硬底线 - 新浪网；2. 新能源汽车行业烂透了 - 新浪网；3. 小螺号｜是时候整治“速成车”了，汽车创新不能拿消费者当测试员 - finance.sina.com.cn；4. 两年亏140亿的“车圈恒大”，终于开始断臂求生 - 风闻；5. 中国新能源车9月销量同比转负12%，乘用车零售降24% - 华尔街见闻；6. 超话车｜欧洲“限制进口”论调再起，德国经销商却在排队争取中国汽车代理权 - 人民网；7. 汽车行业裁员19.8万人，岚图还给应届生发了500+个offer - 搜狐；8. 今日经济 - 巴黎国际车展 中国品牌参展规模创纪录 欧洲车企应对 - RFI",
+      "calls": [
+        {
+          "tool": "get_news",
+          "args": {
+            "limit": 8,
+            "topic": "汽车行业"
+          },
+          "status": "answered",
+          "source": "workspace_service"
+        }
+      ],
+      "model": {
+        "model": "moonshotai/Kimi-K3",
+        "usage": {
+          "prompt_tokens": 14488,
+          "completion_tokens": 356,
+          "total_tokens": 14844
+        },
+        "latency_ms": 1744.0,
+        "finish_reason": "tool_calls"
+      },
+      "orchestration": {
+        "tier": "T2",
+        "rounds": 2,
+        "tool_count": 2,
+        "max_tools": 8,
+        "max_rounds": 4,
+        "request_id": "workspace-1791737223286589912"
+      },
+      "trace": [
+        {
+          "stage": "input",
+          "status": "ok",
+          "detail": {
+            "text": "劳驾找点汽车行业资讯给我看看",
+            "source": "user",
+            "vehicle_source": "simulated"
+          }
+        },
+        {
+          "stage": "planner",
+          "status": "ok",
+          "detail": {
+            "round": 1,
+            "tier": "T1",
+            "model": "moonshotai/Kimi-K3",
+            "usage": {
+              "prompt_tokens": 10402,
+              "completion_tokens": 97,
+              "total_tokens": 10499
+            },
+            "latency_ms": 1065.7,
+            "finish_reason": "tool_calls"
+          }
+        },
+        {
+          "stage": "schema",
+          "status": "ok",
+          "detail": {
+            "tool": "get_news",
+            "step": "s1"
+          }
+        },
+        {
+          "stage": "tool_result",
+          "status": "answered",
+          "detail": {
+            "step": "s1",
+            "tool": "get_news",
+            "message": "新闻：1. 人民日报重申：刹车踏板绝不许断裂，这是汽车业最硬底线 - 新浪网；2. 新能源汽车行业烂透了 - 新浪网；3. 小螺号｜是时候整治“速成车”了，汽车创新不能拿消费者当测试员 - finance.sina.com.cn；4. 两年亏140亿的“车圈恒大”，终于开始断臂求生 - 风闻；5. 中国新能源车9月销量同比转负12%，乘用车零售降24% - 华尔街见闻；6. 超话车｜欧洲“限制进口”论调再起，德国经销商却在排队争取中国汽车代理权 - 人民网；7. 汽车行业裁员19.8万人，岚图还给应届生发了500+个offer - 搜狐；8. 今日经济 - 巴黎国际车展 中国品牌参展规模创纪录 欧洲车企应对 - RFI"
+          }
+        },
+        {
+          "stage": "planner",
+          "status": "ok",
+          "detail": {
+            "round": 2,
+            "tier": "T2",
+            "model": "moonshotai/Kimi-K3",
+            "usage": {
+              "prompt_tokens": 14488,
+              "completion_tokens": 356,
+              "total_tokens": 14844
+            },
+            "latency_ms": 1744.0,
+            "finish_reason": "tool_calls"
+          }
+        },
+        {
+          "stage": "schema",
+          "status": "ok",
+          "detail": {
+            "tool": "finish",
+            "step": "s2"
+          }
+        },
+        {
+          "stage": "tool_result",
+          "status": "answered",
+          "detail": {
+            "step": "s2",
+            "tool": "finish",
+            "message": ""
+          }
+        },
+        {
+          "stage": "workflow",
+          "status": "stopped",
+          "detail": "需要补槽、确认或出现硬性拒绝时停止后续执行，不自动绕过。"
+        }
+      ],
+      "steps": [
+        {
+          "tool": "get_news",
+          "args": {
+            "limit": 8,
+            "topic": "汽车行业"
+          },
+          "status": "answered"
+        },
+        {
+          "tool": "finish",
+          "args": {
+            "message": "为您找到以下汽车行业资讯（按新闻源返回顺序，含发布时间）：\n\n1. 人民日报重申：刹车踏板绝不许断裂，这是汽车业最硬底线 — 新浪网（10-11 23:25 上海时间）\n2. 新能源汽车行业烂透了 — 新浪网（10-12 00:14）\n3. 小螺号｜是时候整治\"速成车\"了，汽车创新不能拿消费者当测试员 — 新浪财经（10-11 16:26）\n4. 两年亏140亿的\"车圈恒大\"，终于开始断臂求生 — 风闻（10-11 15:38）\n5. 中国新能源车9月销量同比转负12%，乘用车零售降24% — 华尔街见闻（10-10 19:51）\n6. 超话车｜欧洲\"限制进口\"论调再起，德国经销商却在排队争取中国汽车代理权 — 人民网（10-10 16:53）\n7. 汽车行业裁员19.8万人，岚图还给应届生发了500+个offer — 搜狐（10-11 21:30）\n8. 巴黎国际车展：中国品牌参展规模创纪录，欧洲车企应对 — RFI（10-09 23:35）\n\n以上为公开新闻源标题与发布时间，部分并非今日发布。需要我打开某条的来源链接或按主题再细查吗？"
+          },
+          "status": "answered"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "upstream": "https://github.com/SuperdeMan/cockpit-agent",
+  "sha": "c705f8c40e76436e06dd7163fa3865451b35ca5d",
+  "files": 2362,
+  "license": "Apache-2.0",
+  "copy": "tracked source snapshot; no .git, environment credentials or runtime data copied"
+}

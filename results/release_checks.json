@@ -1,0 +1,108 @@
+{
+  "release": "GitHub packaging edition",
+  "date": "2026-10-15",
+  "status": "passed",
+  "runtime": {
+    "python": "3.12.9",
+    "node": "22.23.3",
+    "minimum_documented_python": "3.11",
+    "minimum_documented_node": "22"
+  },
+  "checks": {
+    "fresh_python_dependency_install": {
+      "passed": true,
+      "command": "python -m pip install -r requirements.txt -c requirements-lock.txt"
+    },
+    "backend_tests": {
+      "passed": 181,
+      "failed": 0,
+      "command": "python run_tests.py"
+    },
+    "frontend_tests": {
+      "passed": 420,
+      "failed": 0,
+      "command": "npm --prefix cockpit-agent/hmi test"
+    },
+    "frontend_typecheck": {
+      "passed": true
+    },
+    "frontend_production_build": {
+      "passed": true
+    },
+    "http_and_browser_smoke": {
+      "passed": true,
+      "checks": [
+        "frontend_and_api_available",
+        "ambiguous_request_has_no_vehicle_effect",
+        "passenger_window_changes_correct_position",
+        "unsupported_capability_rejected",
+        "moving_vehicle_door_blocked",
+        "curated_manual_evidence_available_without_pdf_download",
+        "browser_chat_four_pages_and_mobile_layout"
+      ],
+      "model_calls": 0,
+      "external_provider_queries": 0,
+      "vehicle_source": "simulated"
+    },
+    "clean_git_file_export": {
+      "passed": true,
+      "method": "Exported only Git-add candidates using a temporary external Git index; no repository or remote created in deliverable."
+    },
+    "clean_export_setup": {
+      "passed": true,
+      "command": "bash setup.sh",
+      "note": "Fresh virtual environment and npm dependencies created in a temporary exported source directory using Node 22."
+    },
+    "clean_export_http_smoke": {
+      "passed": true,
+      "checks": [
+        "frontend_and_api_available",
+        "ambiguous_request_has_no_vehicle_effect",
+        "passenger_window_changes_correct_position",
+        "unsupported_capability_rejected",
+        "moving_vehicle_door_blocked",
+        "curated_manual_evidence_available_without_pdf_download"
+      ],
+      "model_calls": 0,
+      "external_provider_queries": 0,
+      "vehicle_source": "simulated"
+    },
+    "manual_downloader": {
+      "passed": true,
+      "scope": "Offline fixtures: matching hash accepted, mismatching hash rejected, partial download removed. Official URLs were not freshly downloaded."
+    },
+    "private_data_scan": {
+      "known_api_key_matches": 0,
+      "private_provider_endpoint_matches": 0,
+      "personal_absolute_path_matches": 0,
+      "real_credentials_copied": false
+    },
+    "historical_archive": {
+      "files_byte_identical": 11,
+      "source_hashes_verified": 7,
+      "primary_summaries_and_trials_unchanged": true
+    },
+    "maintained_markdown_links": {
+      "broken": 0
+    }
+  },
+  "limitations": [
+    "No real model benchmark rerun, no external map/news/weather provider validation during packaging.",
+    "No real microphone, camera or vehicle verification; browser smoke covers local simulated controls and rendering.",
+    "Historical full-manual PDFs, user SQLite data, credentials, installed dependencies and build output are excluded.",
+    "Node 18.12.1 failed retained upstream node:test hook behavior; Node 22 passed. Published setup requires Node 22+."
+  ],
+  "source_sha256": {
+    "start.py": "636d1db5cfa408e020646a937f0ec1bb1b5370e9b929f1b9e9eed47e53c4bb04",
+    "setup.sh": "94488801a98e78fd54f4ca019db92f3b4ef0949c29b7cfb3ce8b3a380a2c7c5f",
+    "requirements.txt": "3035b136f6ba0523f4193b4e767c3a70267651e0146ac5b94421e6df875f5d8e",
+    "requirements-lock.txt": "7226fac0e2cc1cb7e26c1793e82ce3a814d333580138c0b53a84ef19e6bbd6f6",
+    "cockpit-agent/interview/config.py": "288f0c11571402e0bd75de50e0e7adfbc0fca4748bbdf3628455008d8acf3a27",
+    "cockpit-agent/interview/llm.py": "7245f6de57b4caedbc4fa3f676d6ae4bc2e058c1d4a6fe6847b168bfe7de5049",
+    "cockpit-agent/interview/media.py": "7cb29e25822075e5adc1509b44801a4438003d4d0cd9256b92b61ff932dcad64",
+    "scripts/download_manuals.py": "066aa506affeb3d5489efd5fa23bc463cb08803c566e50dc06187497d814b628",
+    "tests/test_release_config.py": "84cf622fd566d52b6052b3590df74862ae1266e9b0c8ac1874260d75f1b06d97",
+    "tests/release_smoke.py": "262ff681ae5b4de50f08b3e8c68b5bbff1410127dc7cb330d4e7f810d6995dee",
+    "run_tests.py": "5806d6103a42fca12dd2610c35a4491ebce2952e92b53adb38acce2c14dd7357"
+  }
+}

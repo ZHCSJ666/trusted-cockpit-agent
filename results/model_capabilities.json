@@ -1,0 +1,100 @@
+{
+  "checked_at": "2026-10-11T15:43:36.416609+00:00",
+  "catalog": [
+    "vllm/DeepSeek-V4-Flash",
+    "vllm/Qwen/Qwen3.5-27B",
+    "vllm/Qwen/Qwen3.8-27B",
+    "vllm/deepseek-ai/DeepSeek-V4.1-Flash",
+    "vllm/google/gemma-4-26B-A4B-it",
+    "vllm/google/gemma-4-31B-it",
+    "vllm/moonshotai/Kimi-K3",
+    "vllm/openai/gpt-oss-120b"
+  ],
+  "vision": [
+    {
+      "model": "vllm/google/gemma-4-26B-A4B-it",
+      "accepted": true,
+      "answer": "A red square is on the left and a blue circle is on the right.",
+      "latency_ms": 300.0
+    },
+    {
+      "model": "vllm/google/gemma-4-31B-it",
+      "accepted": true,
+      "answer": "There is a red square on the left and a blue circle on the right.",
+      "latency_ms": 438.7
+    },
+    {
+      "model": "vllm/moonshotai/Kimi-K3",
+      "accepted": true,
+      "answer": "A red square on the left and a blue circle on the right.",
+      "latency_ms": 378.9
+    },
+    {
+      "model": "vllm/Qwen/Qwen3.8-27B",
+      "accepted": true,
+      "answer": "\n\nA red square is on the left and a blue circle is on the right.",
+      "latency_ms": 3177.8
+    },
+    {
+      "model": "vllm/Qwen/Qwen3.5-27B",
+      "accepted": true,
+      "answer": "\n\nA red square is on the left and a blue circle is on the right.",
+      "latency_ms": 9604.2
+    }
+  ],
+  "audio": [
+    {
+      "endpoint": "audio/transcriptions",
+      "http_status": 404,
+      "available": false
+    },
+    {
+      "endpoint": "audio/speech",
+      "http_status": 400,
+      "available": false
+    }
+  ],
+  "test": "synthetic image: red square left and blue circle right; no personal data",
+  "speech_models": [
+    {
+      "model": "vllm/DeepSeek-V4-Flash",
+      "http_status": 400,
+      "available": false
+    },
+    {
+      "model": "vllm/Qwen/Qwen3.5-27B",
+      "http_status": 400,
+      "available": false
+    },
+    {
+      "model": "vllm/Qwen/Qwen3.8-27B",
+      "http_status": 400,
+      "available": false
+    },
+    {
+      "model": "vllm/deepseek-ai/DeepSeek-V4.1-Flash",
+      "http_status": 400,
+      "available": false
+    },
+    {
+      "model": "vllm/google/gemma-4-26B-A4B-it",
+      "http_status": 400,
+      "available": false
+    },
+    {
+      "model": "vllm/google/gemma-4-31B-it",
+      "http_status": 400,
+      "available": false
+    },
+    {
+      "model": "vllm/moonshotai/Kimi-K3",
+      "http_status": 400,
+      "available": false
+    },
+    {
+      "model": "vllm/openai/gpt-oss-120b",
+      "http_status": 400,
+      "available": false
+    }
+  ]
+}

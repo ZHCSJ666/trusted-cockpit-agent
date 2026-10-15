@@ -1,0 +1,66 @@
+"""Mock POI Provider。PoC / 离线 / 单测用。"""
+from __future__ import annotations
+from .base import POIProvider, POI, GeoPoint
+
+
+class MockPOIProvider(POIProvider):
+    async def search(self, keyword: str, near: GeoPoint = None,
+                     category: str = "", rating_min: float = 0,
+                     limit: int = 5, page: int = 1,
+                     meta: dict | None = None, *, rank: str = "",
+                     radius_m: int = 0, region: str = "") -> list[POI]:
+        items = []
+        start = (max(1, page) - 1) * limit  # 翻页：不同 page 给不同示例，便于"换一批"
+        for i in range(start + 1, start + limit + 1):
+            poi = POI(
+                id=f"mock_{keyword}_{i}",
+                name=f"{keyword}·示例{i}",
+                address=f"示例路{i}号",
+                lat=31.23 + 0.01 * i,
+                lng=121.47 + 0.01 * i,
+                rating=round(4.0 + 0.2 * (i % 5), 1),
+                distance_km=round(0.5 * i, 1),
+                category=category or keyword,
+            )
+            if poi.rating >= rating_min:
+                items.append(poi)
+        return items
+
+    async def get_route(self, origin: GeoPoint, destination: GeoPoint,
+                        meta: dict | None = None, with_polyline: bool = False,
+                        waypoints: list[GeoPoint] | None = None,
+                        strategy: str = "") -> dict:
+        route = {
+            "distance_km": 12.5,
+            "duration_min": 25,
+            "steps": ["直行 2km", "右转进入示例路", "到达目的地"],
+        }
+        if with_polyline:
+            # 与 amap 同构的沿途取点面：等距四个采样点（供沿途候选/充电取点单测）
+            route["points"] = [
+                {"lng": 121.48 + 0.01 * i, "lat": 31.24 + 0.01 * i,
+                 "cum_km": round(12.5 * i / 4, 1)} for i in range(1, 5)]
+            # 与 amap 同构的折线面（[lat, lng]）：route_plan 卡带它，Android 地图页画路线（2026-09-11）
+            route["path"] = [[31.24 + 0.01 * i, 121.48 + 0.01 * i] for i in range(0, 5)]
+            # 与 amap 同构的沿途路况面（批 7 ②）：各状态公里数
+            route["traffic"] = {"expedite_km": 9.8, "slow_km": 1.9, "congested_km": 0.8,
+                                "blocked_km": 0.0, "unknown_km": 0.0}
+        return route
+
+    async def reverse_geocode(self, lng: float, lat: float,
+                              meta: dict | None = None) -> GeoPoint:
+        return GeoPoint(lat=lat, lng=lng, address=f"示例市示例路1号({lng:.3f},{lat:.3f})",
+                        city="示例市", adcode="000000")
+
+    async def road_traffic(self, name: str, city: str,
+                           meta: dict | None = None) -> dict:
+        return {"name": name, "status": 2, "description": "整体缓行",
+                "expedite_pct": 60.0, "congested_pct": 10.0, "blocked_pct": 0.0,
+                "unknown_pct": 0.0}
+
+    async def poi_detail(self, poi_id: str,
+                         meta: dict | None = None) -> POI:
+        return POI(
+            id=poi_id, name=f"示例POI({poi_id})", address="示例路1号",
+            lat=31.23, lng=121.47, rating=4.5, category="餐饮服务",
+        )

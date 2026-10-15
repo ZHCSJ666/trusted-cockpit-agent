@@ -1,0 +1,2393 @@
+from __future__ import annotations
+
+import ast
+import json
+import os
+import socket
+import ssl
+import subprocess
+import sys
+import threading
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from types import SimpleNamespace
+from urllib.error import HTTPError, URLError
+
+import pytest
+
+from scripts.tests import conftest
+from scripts import cloud_release
+from scripts import dev_stack_lib as dev
+from scripts import dev_stack as cli
+from scripts.cloud_release_lib import (
+    CloudReleaseResult,
+    CommandResult,
+    ControlledChange,
+    ReleaseError,
+    ReleasePlan,
+    ReleaseRequest,
+    RemoteState,
+    SshConfig,
+    SubprocessRunner,
+)
+
+
+def _stub_launcher(directory: Path, name: str = "npm") -> Path:
+    """Install a runnable stand-in for a launcher, named the way this OS names it."""
+    directory.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        stub = directory / f"{name}.cmd"
+        stub.write_text("@echo off\r\necho stub-launcher-ok\r\n", encoding="ascii")
+    else:
+        stub = directory / name
+        stub.write_text("#!/bin/sh\necho stub-launcher-ok\n", encoding="ascii")
+        stub.chmod(0o755)
+    return stub
+
+
+def test_development_stack_cli_exposes_all_actions():
+    result = subprocess.run(
+        [sys.executable, "scripts/dev_stack.py", "--help"],
+        cwd=Path(__file__).resolve().parents[2],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert all(
+        action in result.stdout
+        for action in (
+            "target", "status", "capacity", "retention", "infra-approval", "deploy", "verify", "hmi", "dashboard",
+        )
+    )
+
+
+@contextmanager
+def temporary_http_server(handler_type: type[BaseHTTPRequestHandler]):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_type)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+
+def write_stack_target(repo: Path, content: bytes) -> Path:
+    target = repo / "dev-stack.local"
+    target.write_bytes(content)
+    return target
+
+
+def test_resolve_target_defaults_to_local_when_root_file_is_missing(tmp_path: Path):
+    assert dev.resolve_target(tmp_path) == dev.TargetSelection(
+        name="local", source="default"
+    )
+
+
+def test_resolve_target_accepts_exact_file_and_explicit_argument(tmp_path: Path):
+    write_stack_target(tmp_path, b"target=cloud\n")
+
+    assert dev.resolve_target(tmp_path) == dev.TargetSelection(
+        name="cloud", source="file"
+    )
+    assert dev.resolve_target(tmp_path, target="local") == dev.TargetSelection(
+        name="local", source="argument"
+    )
+
+
+@pytest.mark.parametrize(
+    ("content", "name"),
+    [
+        (b"target=local\n\n", "local"),
+        (b"target=cloud\n\n\n", "cloud"),
+    ],
+)
+def test_resolve_target_accepts_empty_lines_after_the_target(
+    tmp_path: Path, content: bytes, name: str
+):
+    write_stack_target(tmp_path, content)
+
+    assert dev.resolve_target(tmp_path) == dev.TargetSelection(
+        name=name, source="file"
+    )
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"target=remote\n",
+        b"target=cloud\ntarget=local\n",
+        b"target=cloud\nextra=value\n",
+        b"target=cloud+extra=x\n",
+        b"target=\n",
+        b"\xef\xbb\xbftarget=cloud\n",
+    ],
+    ids=[
+        "unknown-target",
+        "duplicate-key",
+        "second-nonempty-line",
+        "extra-assignment",
+        "empty-value",
+        "bom",
+    ],
+)
+def test_resolve_target_rejects_malformed_root_file(
+    tmp_path: Path, content: bytes
+):
+    write_stack_target(tmp_path, content)
+
+    with pytest.raises(dev.DevStackError):
+        dev.resolve_target(tmp_path)
+
+
+def test_resolve_target_rejects_invalid_utf8(tmp_path: Path):
+    write_stack_target(tmp_path, b"target=cloud\n\xff")
+
+    with pytest.raises(dev.DevStackError):
+        dev.resolve_target(tmp_path)
+
+
+def test_resolve_target_rejects_target_larger_than_the_declared_limit(tmp_path: Path):
+    write_stack_target(
+        tmp_path, b"target=cloud\n" + (b"\n" * dev.TARGET_FILE_MAX_BYTES)
+    )
+
+    with pytest.raises(dev.DevStackError):
+        dev.resolve_target(tmp_path)
+
+
+def test_resolve_target_rejects_windows_reparse_point(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    target = write_stack_target(tmp_path, b"target=cloud\n")
+    real_lstat = os.lstat
+
+    def reparse_lstat(path: os.PathLike[str] | str):
+        result = real_lstat(path)
+        if Path(path) == target:
+            return SimpleNamespace(
+                st_mode=result.st_mode,
+                st_dev=result.st_dev,
+                st_ino=result.st_ino,
+                st_size=result.st_size,
+                st_file_attributes=0x400,
+            )
+        return result
+
+    monkeypatch.setattr(dev.os, "lstat", reparse_lstat)
+
+    with pytest.raises(dev.DevStackError):
+        dev.resolve_target(tmp_path)
+
+
+def test_resolve_target_rejects_path_identity_change_after_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    target = write_stack_target(tmp_path, b"target=cloud\n")
+    replacement = tmp_path / "replacement"
+    replacement.write_bytes(b"target=local\n")
+    real_lstat = os.lstat
+    calls = 0
+
+    def swap_before_second_lstat(path: os.PathLike[str] | str):
+        nonlocal calls
+        if Path(path) == target:
+            calls += 1
+            if calls == 2:
+                os.replace(replacement, target)
+        return real_lstat(path)
+
+    monkeypatch.setattr(dev.os, "lstat", swap_before_second_lstat)
+
+    with pytest.raises(dev.DevStackError):
+        dev.resolve_target(tmp_path)
+
+
+def test_resolve_target_rejects_symbolic_link(tmp_path: Path):
+    source = tmp_path / "elsewhere"
+    source.write_bytes(b"target=cloud\n")
+    target = tmp_path / "dev-stack.local"
+    try:
+        target.symlink_to(source)
+    except OSError as exc:
+        pytest.skip(f"symbolic links unavailable: {type(exc).__name__}")
+
+    with pytest.raises(dev.DevStackError):
+        dev.resolve_target(tmp_path)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="FIFO creation is POSIX-only")
+def test_resolve_target_rejects_fifo_without_blocking(tmp_path: Path):
+    fifo = tmp_path / "dev-stack.local"
+    os.mkfifo(fifo)
+
+    with pytest.raises(dev.DevStackError):
+        dev.resolve_target(tmp_path)
+
+
+@pytest.mark.parametrize("target", ["", "remote", "cloud\n", "local "])
+def test_set_target_allows_only_exact_local_or_cloud(tmp_path: Path, target: str):
+    with pytest.raises(dev.DevStackError):
+        dev.set_target(tmp_path, target)
+
+
+def test_set_target_atomically_replaces_only_the_target_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    stack_target = write_stack_target(tmp_path, b"target=local\n")
+    root_env = tmp_path / ".env"
+    root_env.write_bytes(b"SECRET_VALUE=must-not-be-read-or-changed\n")
+    observed: list[tuple[str, Path]] = []
+    real_fsync = os.fsync
+    real_replace = os.replace
+
+    def record_fsync(fd: int) -> None:
+        observed.append(("fsync", tmp_path / "dev-stack.local.partial"))
+        real_fsync(fd)
+
+    def record_replace(source: os.PathLike[str], destination: os.PathLike[str]) -> None:
+        source_path = Path(source)
+        destination_path = Path(destination)
+        observed.append(("replace", source_path))
+        assert source_path.parent == tmp_path
+        assert source_path.name.startswith(".dev-stack.local.")
+        assert source_path.name.endswith(".partial")
+        assert source_path.read_bytes() == b"target=cloud\n"
+        assert destination_path == stack_target
+        assert stack_target.read_bytes() == b"target=local\n"
+        real_replace(source, destination)
+
+    monkeypatch.setattr(dev.os, "fsync", record_fsync)
+    monkeypatch.setattr(dev.os, "replace", record_replace)
+
+    dev.set_target(tmp_path, "cloud")
+
+    assert stack_target.read_bytes() == b"target=cloud\n"
+    assert not list(tmp_path.glob(".dev-stack.local.*.partial"))
+    assert root_env.read_bytes() == b"SECRET_VALUE=must-not-be-read-or-changed\n"
+    assert [event for event, _ in observed] == ["fsync", "replace"]
+
+
+def test_set_target_leaves_an_unrelated_partial_file_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    stack_target = write_stack_target(tmp_path, b"target=local\n")
+    partial = tmp_path / "dev-stack.local.partial"
+    partial.write_bytes(b"user-created-partial")
+
+    dev.set_target(tmp_path, "cloud")
+
+    assert stack_target.read_bytes() == b"target=cloud\n"
+    assert partial.read_bytes() == b"user-created-partial"
+
+
+def test_set_target_rejects_replaced_temporary_file_before_os_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    stack_target = write_stack_target(tmp_path, b"target=local\n")
+    real_lstat = os.lstat
+    replace_called = False
+    armed = False
+
+    def foreign_temporary_lstat(path: os.PathLike[str] | str):
+        result = real_lstat(path)
+        if armed and str(path).endswith(".partial"):
+            return SimpleNamespace(
+                st_mode=result.st_mode,
+                st_dev=result.st_dev,
+                st_ino=result.st_ino + 1,
+                st_size=result.st_size,
+                st_file_attributes=getattr(result, "st_file_attributes", 0),
+            )
+        return result
+
+    real_fsync = os.fsync
+
+    def arm_race(fd: int) -> None:
+        nonlocal armed
+        real_fsync(fd)
+        armed = True
+
+    def record_replace(source: os.PathLike[str], destination: os.PathLike[str]) -> None:
+        nonlocal replace_called
+        replace_called = True
+
+    monkeypatch.setattr(dev.os, "lstat", foreign_temporary_lstat)
+    monkeypatch.setattr(dev.os, "fsync", arm_race)
+    monkeypatch.setattr(dev.os, "replace", record_replace)
+
+    with pytest.raises(dev.DevStackError):
+        dev.set_target(tmp_path, "cloud")
+
+    assert not replace_called
+    assert stack_target.read_bytes() == b"target=local\n"
+
+
+def test_set_target_fails_when_os_replace_receives_a_swapped_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    stack_target = write_stack_target(tmp_path, b"target=local\n")
+    real_replace = os.replace
+
+    def swap_source_then_replace(
+        source: os.PathLike[str], destination: os.PathLike[str]
+    ) -> None:
+        source_path = Path(source)
+        displaced = tmp_path / "displaced-owned-temporary"
+        real_replace(source_path, displaced)
+        source_path.write_bytes(b"target=local\n")
+        real_replace(source_path, destination)
+
+    monkeypatch.setattr(dev.os, "replace", swap_source_then_replace)
+
+    with pytest.raises(dev.DevStackError):
+        dev.set_target(tmp_path, "cloud")
+
+    assert stack_target.read_bytes() == b"target=local\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="real temporary replacement requires POSIX unlink semantics")
+def test_set_target_rejects_real_temporary_file_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    stack_target = write_stack_target(tmp_path, b"target=local\n")
+    real_mkstemp = dev.tempfile.mkstemp
+    real_fsync = os.fsync
+    real_replace = os.replace
+    temporary: Path | None = None
+    replace_called = False
+
+    def capture_mkstemp(*args, **kwargs):
+        nonlocal temporary
+        fd, name = real_mkstemp(*args, **kwargs)
+        temporary = Path(name)
+        return fd, name
+
+    def replace_temporary_after_fsync(fd: int) -> None:
+        real_fsync(fd)
+        assert temporary is not None
+        displaced = tmp_path / "displaced-owned-temporary"
+        real_replace(temporary, displaced)
+        temporary.write_bytes(b"target=local\n")
+
+    def record_replace(source: os.PathLike[str], destination: os.PathLike[str]) -> None:
+        nonlocal replace_called
+        replace_called = True
+        real_replace(source, destination)
+
+    monkeypatch.setattr(dev.tempfile, "mkstemp", capture_mkstemp)
+    monkeypatch.setattr(dev.os, "fsync", replace_temporary_after_fsync)
+    monkeypatch.setattr(dev.os, "replace", record_replace)
+
+    with pytest.raises(dev.DevStackError):
+        dev.set_target(tmp_path, "cloud")
+
+    assert not replace_called
+    assert stack_target.read_bytes() == b"target=local\n"
+    assert temporary is not None
+    assert temporary.read_bytes() == b"target=local\n"
+
+
+@pytest.mark.parametrize(
+    "fqdn",
+    ["car-agent-dev.example.ts.net", "a.ts.net", "with-hyphen.ts.net"],
+)
+def test_cloud_endpoints_builds_the_single_declared_endpoint_model(fqdn: str):
+    assert dev.cloud_endpoints(fqdn) == dev.StackEndpoints(
+        hmi=f"https://{fqdn}",
+        edge_http=f"https://{fqdn}:8443",
+        edge_ws=f"wss://{fqdn}:8443/ws",
+        audio=f"https://{fqdn}:8444",
+        dashboard=f"https://{fqdn}:8445",
+        collector_http=f"https://{fqdn}:8446",
+        collector_ws=f"wss://{fqdn}:8446/stream",
+    )
+
+
+@pytest.mark.parametrize(
+    "fqdn",
+    [
+        "",
+        "example.com",
+        "https://example.ts.net",
+        "UPPER.ts.net",
+        ".ts.net",
+        "a..b.ts.net",
+        "a.-b.ts.net",
+        "a-.b.ts.net",
+        f"{'a' * 64}.ts.net",
+    ],
+)
+def test_cloud_endpoints_rejects_missing_or_invalid_tailnet_fqdn(fqdn: str):
+    with pytest.raises(dev.DevStackError, match="TAILNET_FQDN is missing or invalid"):
+        dev.cloud_endpoints(fqdn)
+
+
+def test_local_endpoints_are_the_declared_fixed_values():
+    assert dev.LOCAL_ENDPOINTS == dev.StackEndpoints(
+        hmi="http://localhost:5173",
+        edge_http="http://localhost:8090",
+        edge_ws="ws://localhost:8090/ws",
+        audio="http://localhost:50059",
+        dashboard="http://localhost:5174",
+        collector_http="http://localhost:8092",
+        collector_ws="ws://localhost:8092/stream",
+    )
+
+
+def test_read_root_env_returns_only_requested_keys(tmp_path: Path):
+    (tmp_path / ".env").write_text(
+        "TAILNET_FQDN=car-agent-dev.example.ts.net\n"
+        "UNREQUESTED_SECRET=must-not-leak\n"
+        "QUOTED_VALUE='supported literal value'\n",
+        encoding="utf-8",
+    )
+
+    assert dev.read_root_env(tmp_path, {"TAILNET_FQDN", "MISSING"}) == {
+        "TAILNET_FQDN": "car-agent-dev.example.ts.net"
+    }
+
+
+def test_read_root_env_parses_only_the_safe_nonexecuting_dotenv_subset(
+    tmp_path: Path,
+):
+    (tmp_path / ".env").write_text(
+        "# full-line comment\n"
+        "DOUBLE=\"double # literal and \\\"quote\\\"\" # comment\n"
+        "SINGLE='single # literal and \\'quote\\'' # comment\n"
+        "UNQUOTED=value with spaces # comment\n"
+        "SPACED=  retained leading and trimmed trailing  # comment\n"
+        "SHELL=$(uname)-${HOME}-`id`\n"
+        "UNREQUESTED_SECRET=must-not-leak\n",
+        encoding="utf-8",
+    )
+
+    assert dev.read_root_env(
+        tmp_path, {"DOUBLE", "SINGLE", "UNQUOTED", "SPACED", "SHELL"}
+    ) == {
+        "DOUBLE": 'double # literal and "quote"',
+        "SINGLE": "single # literal and 'quote'",
+        "UNQUOTED": "value with spaces",
+        "SPACED": "retained leading and trimmed trailing",
+        "SHELL": "$(uname)-${HOME}-`id`",
+    }
+
+
+def test_read_root_env_distinguishes_unquoted_hashes_from_comments(
+    tmp_path: Path,
+):
+    (tmp_path / ".env").write_text(
+        "LITERAL=abc#def\n"
+        "COMMENT=abc # comment\n"
+        "OUTER_SPACE=  abc  # comment\n",
+        encoding="utf-8",
+    )
+
+    assert dev.read_root_env(tmp_path, {"LITERAL", "COMMENT", "OUTER_SPACE"}) == {
+        "LITERAL": "abc#def",
+        "COMMENT": "abc",
+        "OUTER_SPACE": "abc",
+    }
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"VALUE=\"unterminated\n",
+        b"VALUE='unterminated\n",
+        b"VALUE=\"closed\" trailing\n",
+        b"VALUE='closed' trailing\n",
+        b"VALUE=unquoted \"quote\"\n",
+        b"UNREQUESTED='unterminated\nREQUESTED=ok\n",
+    ],
+    ids=[
+        "unterminated-double",
+        "unterminated-single",
+        "double-trailing-junk",
+        "single-trailing-junk",
+        "unquoted-quote",
+        "unrequested-malformed",
+    ],
+)
+def test_read_root_env_rejects_dotenv_syntax_even_for_unrequested_keys(
+    tmp_path: Path, content: bytes
+):
+    (tmp_path / ".env").write_bytes(content)
+
+    with pytest.raises(dev.DevStackError):
+        dev.read_root_env(tmp_path, {"REQUESTED"})
+
+
+def test_read_root_env_rejects_bare_string_keys(tmp_path: Path):
+    (tmp_path / ".env").write_text("TAILNET_FQDN=a.ts.net\n", encoding="utf-8")
+
+    with pytest.raises(dev.DevStackError):
+        dev.read_root_env(tmp_path, "TAILNET_FQDN")
+
+
+def test_read_root_env_rejects_file_larger_than_the_declared_limit(tmp_path: Path):
+    (tmp_path / ".env").write_bytes(
+        b"TAILNET_FQDN=a.ts.net\n" + (b"#\n" * dev.ROOT_ENV_MAX_BYTES)
+    )
+
+    with pytest.raises(dev.DevStackError):
+        dev.read_root_env(tmp_path, {"TAILNET_FQDN"})
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"TAILNET_FQDN=a.ts.net\nTAILNET_FQDN=b.ts.net\n",
+        b"TAILNET_FQDN\n",
+        b"TAILNET_FQDN=a.ts.net\x00\n",
+        b"TAILNET_FQDN='unterminated\n",
+        b"TAILNET_FQDN=a.ts.net'\n",
+    ],
+    ids=[
+        "duplicate-key",
+        "missing-equals",
+        "nul",
+        "unterminated-quote",
+        "trailing-unmatched-quote",
+    ],
+)
+def test_read_root_env_fails_closed_on_malformed_input(
+    tmp_path: Path, content: bytes
+):
+    (tmp_path / ".env").write_bytes(content)
+
+    with pytest.raises(dev.DevStackError) as caught:
+        dev.read_root_env(tmp_path, {"TAILNET_FQDN"})
+
+    message = str(caught.value)
+    assert "TAILNET_FQDN" not in message
+    assert "a.ts.net" not in message
+
+
+def test_read_root_env_fails_closed_when_file_is_missing(tmp_path: Path):
+    with pytest.raises(dev.DevStackError):
+        dev.read_root_env(tmp_path, {"TAILNET_FQDN"})
+
+
+def test_read_root_env_fails_closed_when_path_is_not_a_readable_file(tmp_path: Path):
+    (tmp_path / ".env").mkdir()
+
+    with pytest.raises(dev.DevStackError):
+        dev.read_root_env(tmp_path, {"TAILNET_FQDN"})
+
+
+class FakeStatusRunner:
+    def __init__(
+        self,
+        command_results: list[object],
+        endpoint_results: dict[str, object],
+    ) -> None:
+        self.command_results = list(command_results)
+        self.endpoint_results = endpoint_results
+        self.commands: list[tuple[str, ...]] = []
+        self.urls: list[str] = []
+
+    def run(self, argv, *, cwd, **_kwargs):
+        self.commands.append(tuple(argv))
+        result = self.command_results.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    def get(self, url: str, *, timeout_s: float):
+        self.urls.append(url)
+        result = self.endpoint_results[url]
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+
+def command_result(*argv: str, stdout: str = "", returncode: int = 0) -> CommandResult:
+    return CommandResult(tuple(argv), returncode, stdout, "")
+
+
+def test_inspect_local_status_only_reads_compose_and_checks_five_fixed_endpoints(
+    tmp_path: Path,
+):
+    containers = "\n".join(
+        json.dumps({"Service": service, "State": "running"})
+        for service in (
+            "postgres",
+            "redis",
+            "edge-gateway",
+            "llm-gateway",
+            "observability-collector",
+            "hmi",
+            "dashboard",
+        )
+    )
+    urls = {
+        "http://localhost:5173/": dev.HttpResponse(200),
+        "http://localhost:8090/healthz": dev.HttpResponse(200),
+        "http://localhost:50059/api/llm/providers": dev.HttpResponse(200),
+        "http://localhost:5174/": dev.HttpResponse(200),
+        "http://localhost:8092/healthz": dev.HttpResponse(200),
+    }
+    runner = FakeStatusRunner(
+        [
+            command_result("docker", "info"),
+            command_result(
+                "docker", "compose", "-f", "compose.yaml", "ps", "--all", "--format", "json",
+                stdout=containers,
+            ),
+        ],
+        urls,
+    )
+
+    status = dev.inspect_local_status(tmp_path, dev.LOCAL_ENDPOINTS, runner)
+
+    assert status.target == "local"
+    assert status.release_sha is None
+    assert (status.container_total, status.container_running) == (7, 7)
+    assert status.healthy_endpoints == 5
+    assert not status.warnings
+    assert runner.commands == [
+        ("docker", "info"),
+        ("docker", "compose", "-f", "compose.yaml", "ps", "--all", "--format", "json"),
+    ]
+    assert runner.urls == list(urls)
+    assert all("up" not in command and "build" not in command for command in runner.commands)
+
+
+def test_inspect_cloud_status_is_read_only_and_serializes_no_sensitive_transport_data(
+    tmp_path: Path,
+):
+    identity = tmp_path / "agent.pem"
+    identity.write_text("not-a-real-key\n", encoding="utf-8")
+    request = ReleaseRequest(
+        repo=tmp_path,
+        revision="1" * 40,
+        artifact_root=tmp_path / "artifacts",
+        ssh=SshConfig(host="server.example.invalid", user="ubuntu", identity=identity),
+    )
+    remote_state = json.dumps(
+        {
+            "current_release": "1" * 40,
+            "current_path": f"/opt/car-agent/releases/{'1' * 40}",
+            "runtime_project_name": "caragent",
+            "running_release_tags": ["1" * 40],
+            "approved_infrastructure_digest": None,
+            "disk_available_bytes": 9,
+            "memory_available_bytes": 8,
+            "release_lock_available": True,
+            "runtime_project_ready": True,
+            "shared_scripts_ready": True,
+            "shared_models_ready": True,
+        }
+    )
+    endpoints = dev.cloud_endpoints("demo.ts.net")
+    urls = {
+        "https://demo.ts.net/": dev.HttpResponse(200),
+        "https://demo.ts.net:8443/healthz": dev.HttpResponse(200),
+        "https://demo.ts.net:8444/api/llm/providers": dev.HttpResponse(200),
+        "https://demo.ts.net:8445/": dev.HttpResponse(200),
+        "https://demo.ts.net:8446/healthz": dev.HttpResponse(503),
+    }
+    runner = FakeStatusRunner(
+        [command_result("ssh", "remote-preflight", stdout=remote_state)], urls
+    )
+
+    status = dev.inspect_cloud_status(request, endpoints, runner)
+    serialized = json.dumps(dev.stack_status_to_dict(status))
+
+    assert status.target == "cloud"
+    assert status.release_sha == "1" * 40
+    assert (status.container_total, status.container_running) == (None, None)
+    assert status.healthy_endpoints == 4
+    assert runner.commands[0][0] == "ssh"
+    assert all(
+        forbidden not in " ".join(command)
+        for command in runner.commands
+        for forbidden in ("deploy", "docker", "tailscale")
+    )
+    assert "super-secret-token" not in serialized
+    assert "postgresql://" not in serialized
+    assert "PRIVATE KEY" not in serialized
+
+
+def _cloud_status_with_tags(tmp_path: Path, tags: list[str], *, release: str = "1" * 40):
+    """只换「运行中的镜像 tag」这一个变量，其余一切保持健康（五端点全 200）。"""
+    identity = tmp_path / "agent.pem"
+    identity.write_text("not-a-real-key\n", encoding="utf-8")
+    request = ReleaseRequest(
+        repo=tmp_path,
+        revision="1" * 40,
+        artifact_root=tmp_path / "artifacts",
+        ssh=SshConfig(host="server.example.invalid", user="ubuntu", identity=identity),
+    )
+    remote_state = json.dumps(
+        {
+            "current_release": release,
+            "current_path": f"/opt/car-agent/releases/{release}",
+            "runtime_project_name": "caragent",
+            "running_release_tags": tags,
+            "approved_infrastructure_digest": None,
+            "disk_available_bytes": 9,
+            "memory_available_bytes": 8,
+            "release_lock_available": True,
+            "runtime_project_ready": True,
+            "shared_scripts_ready": True,
+            "shared_models_ready": True,
+        }
+    )
+    endpoints = dev.cloud_endpoints("demo.ts.net")
+    urls = {
+        "https://demo.ts.net/": dev.HttpResponse(200),
+        "https://demo.ts.net:8443/healthz": dev.HttpResponse(200),
+        "https://demo.ts.net:8444/api/llm/providers": dev.HttpResponse(200),
+        "https://demo.ts.net:8445/": dev.HttpResponse(200),
+        "https://demo.ts.net:8446/healthz": dev.HttpResponse(200),
+    }
+    runner = FakeStatusRunner(
+        [command_result("ssh", "remote-preflight", stdout=remote_state)], urls
+    )
+    return dev.inspect_cloud_status(request, endpoints, runner)
+
+
+def test_low_disk_is_an_advisory_capacity_level_not_a_health_warning(tmp_path: Path):
+    """容量低于预警线 / 构建闸时 status 仍按健康判：长会话验收要求 status ok 且零 warning。"""
+    status = _cloud_status_with_tags(tmp_path, ["1" * 40])  # 远端预检读数 disk=9 字节
+
+    assert status.warnings == ()
+    assert cli._status_code(status) == (0, "ok")
+    assert dev.stack_status_to_dict(status)["capacity"] == {
+        "level": "below_build_gate",
+        "disk_available_bytes": 9,
+        "warn_below_bytes": 40 * 1024**3,
+        "build_gate_bytes": 30 * 1024**3,
+    }
+
+
+def test_local_status_has_no_capacity_reading():
+    status = dev.StackStatus("local", None, None, 7, 7, 5, (), ())
+    assert dev.stack_status_to_dict(status)["capacity"] is None
+
+
+def test_cli_capacity_requires_cloud_target_and_never_touches_the_runner(tmp_path: Path):
+    class _Forbidden:
+        def run(self, *args, **kwargs):
+            raise AssertionError("capacity must not run against a local target")
+
+    events: list[dict[str, object]] = []
+    assert cli.main(["capacity"], repo=tmp_path, status_runner=_Forbidden(), emit=events.append) == 2
+    assert events[-1]["status"] == "configuration_rejected"
+
+
+def test_cli_capacity_reports_attributed_usage_from_one_read_only_probe(tmp_path: Path):
+    from scripts.tests.test_cloud_capacity import SHA_B, _payload
+
+    dev.set_target(tmp_path, "cloud")
+    runner = FakeStatusRunner(
+        [command_result("ssh", "capacity-probe", stdout=json.dumps(_payload()))], {}
+    )
+    events: list[dict[str, object]] = []
+    arguments = ["--host", "dev.example", "--identity", str(_valid_identity(tmp_path)), "capacity"]
+
+    assert cli.main(arguments, repo=tmp_path, status_runner=runner, emit=events.append) == 0
+
+    event = events[-1]
+    assert (event["action"], event["status"], event["target"]) == ("capacity", "ok", "cloud")
+    assert event["car_agent"]["current_release"] == SHA_B
+    assert event["capacity"]["level"] == "warn"
+    assert len(runner.commands) == 1 and runner.commands[0][0] == "ssh"
+
+
+def test_cli_capacity_fails_closed_on_an_untrusted_probe_reply(tmp_path: Path):
+    dev.set_target(tmp_path, "cloud")
+    runner = FakeStatusRunner([command_result("ssh", stdout="not json")], {})
+    events: list[dict[str, object]] = []
+    arguments = ["--host", "dev.example", "--identity", str(_valid_identity(tmp_path)), "capacity"]
+
+    assert cli.main(arguments, repo=tmp_path, status_runner=runner, emit=events.append) == 1
+    assert events[-1]["status"] == "failed"
+    assert "car_agent" not in events[-1]
+
+
+def _retention_reply(status: str = "planned", *, kinds=("releases", "backups")) -> str:
+    records = {
+        "releases": {
+            "kind": "releases", "status": status, "free_bytes_before": 1, "free_bytes_after": 2,
+            "plan": {
+                "current": "c" * 40,
+                "keep": [{"sha": "c" * 40, "reasons": ["current"]}],
+                "retire": [{
+                    "sha": "2" * 40, "reason": "outside-retention-window", "tags": ["t1", "t2"],
+                    "release_dir": "2" * 40, "build_dir": None, "upload_dirs": ["u"], "staging_dirs": [],
+                }],
+                "finalize": [], "report": [],
+            },
+        },
+        "backups": {
+            "kind": "backups", "status": status,
+            "plan": {"sets": 5, "complete_sets": 5, "keep_sets": ["a", "b"],
+                     "delete_files": [["postgres", "x"]], "unknown_files": []},
+        },
+    }
+    return "\n".join(json.dumps(records[kind]) for kind in kinds) + "\n"
+
+
+def test_cli_retention_requires_cloud_target(tmp_path: Path):
+    class _Forbidden:
+        def run(self, *args, **kwargs):
+            raise AssertionError("retention must not run against a local target")
+
+    events: list[dict[str, object]] = []
+    assert cli.main(["retention"], repo=tmp_path, status_runner=_Forbidden(), emit=events.append) == 2
+    assert events[-1]["status"] == "configuration_rejected"
+
+
+@pytest.mark.parametrize(("flag", "remote", "status"), [
+    ((), "retention --dry-run", "planned"),
+    (("--apply",), "retention --apply", "applied"),
+])
+def test_cli_retention_defaults_to_dry_run_and_summarizes_both_records(
+    tmp_path: Path, flag: tuple[str, ...], remote: str, status: str,
+):
+    dev.set_target(tmp_path, "cloud")
+    runner = FakeStatusRunner([command_result("ssh", stdout=_retention_reply(status))], {})
+    events: list[dict[str, object]] = []
+    arguments = ["--host", "dev.example", "--identity", str(_valid_identity(tmp_path)), "retention", *flag]
+
+    assert cli.main(arguments, repo=tmp_path, status_runner=runner, emit=events.append) == 0
+
+    assert runner.commands[0][-1].endswith(remote)
+    event = events[-1]
+    assert (event["action"], event["status"], event["mode"]) == ("retention", "ok", remote.split("--")[1])
+    assert event["releases"]["retire"] == [
+        {"sha": "2" * 40, "reason": "outside-retention-window", "tags": 2, "dirs": 2}
+    ]
+    assert event["backups"]["delete_files"] == 1
+
+
+def test_cli_retention_fails_on_an_incomplete_or_mismatched_reply(tmp_path: Path):
+    dev.set_target(tmp_path, "cloud")
+    arguments = ["--host", "dev.example", "--identity", str(_valid_identity(tmp_path)), "retention"]
+    for reply in (_retention_reply("error"), _retention_reply(kinds=("releases",)), "no json at all\n"):
+        runner = FakeStatusRunner([command_result("ssh", stdout=reply)], {})
+        events: list[dict[str, object]] = []
+        assert cli.main(arguments, repo=tmp_path, status_runner=runner, emit=events.append) == 1
+        assert events[-1]["status"] == "failed"
+
+
+def test_cli_retention_surfaces_the_remote_error_instead_of_a_bare_failure(tmp_path: Path):
+    """2026-09-28 真机：releases 在 inspect 竞态里报错，backups 没跑——CLI 只剩一个空的 failed。"""
+    dev.set_target(tmp_path, "cloud")
+    reply = json.dumps({"kind": "releases", "status": "error",
+                        "error": "command failed: docker inspect --format"}) + "\n"
+    runner = FakeStatusRunner([command_result("ssh", stdout=reply, returncode=2)], {})
+    events: list[dict[str, object]] = []
+    arguments = ["--host", "dev.example", "--identity", str(_valid_identity(tmp_path)), "retention"]
+
+    assert cli.main(arguments, repo=tmp_path, status_runner=runner, emit=events.append) == 1
+
+    event = events[-1]
+    assert event["status"] == "failed"
+    assert event["releases"]["error"] == "command failed: docker inspect --format"
+    assert event["backups"]["status"] == "missing"
+
+
+def test_cli_infra_approval_requires_cloud_target(tmp_path: Path):
+    class _Forbidden:
+        def run(self, *args, **kwargs):
+            raise AssertionError("an approval must not run against a local target")
+
+    events: list[dict[str, object]] = []
+    assert cli.main(["infra-approval"], repo=tmp_path, release_runner=_Forbidden(), emit=events.append) == 2
+    assert events[-1]["status"] == "configuration_rejected"
+
+
+@pytest.mark.parametrize(("flag", "mode", "step"), [((), "prepare", "prepare_approval"),
+                                                    (("--apply",), "apply", "apply_approval")])
+def test_cli_infra_approval_prepares_unless_apply_is_explicit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: tuple[str, ...], mode: str, step: str,
+):
+    dev.set_target(tmp_path, "cloud")
+    runner, calls = object(), []
+
+    def record(name: str):
+        def step_function(request, used_runner):
+            calls.append((name, request.revision, request.artifact_root, used_runner))
+            return {"status": "prepared" if name == "prepare_approval" else "approved"}
+        return step_function
+
+    monkeypatch.setattr(cli, "prepare_approval", record("prepare_approval"))
+    monkeypatch.setattr(cli, "apply_approval", record("apply_approval"))
+    events: list[dict[str, object]] = []
+    arguments = ["--host", "dev.example", "--identity", str(_valid_identity(tmp_path)),
+                 "infra-approval", "--sha", "a" * 40, *flag]
+
+    assert cli.main(arguments, repo=tmp_path, release_runner=runner, emit=events.append) == 0
+
+    assert calls == [(step, "a" * 40, tmp_path / ".artifacts" / "infrastructure-approval", runner)]
+    assert (events[-1]["action"], events[-1]["mode"]) == ("infra-approval", mode)
+
+
+def test_cli_infra_approval_reports_a_refusal_as_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    dev.set_target(tmp_path, "cloud")
+
+    def refuse(request, runner):
+        raise cli.ApprovalError("the installed anchor changed after these materials were prepared; prepare again")
+
+    monkeypatch.setattr(cli, "apply_approval", refuse)
+    events: list[dict[str, object]] = []
+    arguments = ["--host", "dev.example", "--identity", str(_valid_identity(tmp_path)), "infra-approval", "--apply"]
+
+    assert cli.main(arguments, repo=tmp_path, release_runner=object(), emit=events.append) == 1
+    assert events[-1]["status"] == "failed" and "prepare again" in events[-1]["error"]
+
+
+def test_cloud_status_reports_the_image_that_is_actually_running(tmp_path: Path):
+    """一致时才算一致：五端点全绿 + tag 与记录相符 ⇒ 零 warning。"""
+    status = _cloud_status_with_tags(tmp_path, ["1" * 40])
+
+    assert status.healthy_endpoints == 5
+    assert status.release_sha == "1" * 40
+    assert status.running_release_sha == "1" * 40
+    assert not status.warnings
+
+
+def test_cloud_status_catches_a_release_that_did_not_take_effect(tmp_path: Path):
+    """记录说新版、跑的是旧镜像 ⇒ 必须报出来，且两个 SHA 都点名。
+
+    这正是 2026-09-10 那次生产回退的形态：五个健康端点全绿、`current` 软链没动，
+    只有「跑的是哪一份代码」不对，而当时的 status 一个字都说不出来。
+    """
+    status = _cloud_status_with_tags(tmp_path, ["a" * 40])
+
+    assert status.healthy_endpoints == 5, "端点健康不代表跑的是对的代码"
+    assert status.running_release_sha == "a" * 40
+    assert any("a" * 40 in w and "1" * 40 in w for w in status.warnings)
+    assert cli._status_code(status)[1] == "degraded"
+
+
+def test_cloud_status_does_not_call_an_unknown_image_a_match(tmp_path: Path):
+    """读不到 tag 时既不报一致、也不静默——「没读到」和「读到了但不对」分开报。"""
+    status = _cloud_status_with_tags(tmp_path, [])
+
+    assert status.running_release_sha is None
+    assert any("unknown" in w for w in status.warnings)
+    assert cli._status_code(status)[1] == "degraded"
+
+
+def test_cloud_status_flags_containers_running_different_releases(tmp_path: Path):
+    """一半新一半旧是最难发现的一种——半量替换后剩下的那半仍在跑旧代码。"""
+    status = _cloud_status_with_tags(tmp_path, ["1" * 40, "a" * 40])
+
+    assert status.running_release_sha is None
+    assert any("disagree" in w for w in status.warnings)
+    assert cli._status_code(status)[1] == "degraded"
+
+
+def test_inspect_status_does_not_store_sensitive_probe_exception_text(tmp_path: Path):
+    urls = {
+        "http://localhost:5173/": URLError(
+            "super-secret-token password=correct-horse "
+            "Bearer bearer-secret postgresql://user:pass@db/private "
+            "-----BEGIN PRIVATE KEY-----"
+        ),
+        "http://localhost:8090/healthz": dev.HttpResponse(200),
+        "http://localhost:50059/api/llm/providers": dev.HttpResponse(200),
+        "http://localhost:5174/": dev.HttpResponse(200),
+        "http://localhost:8092/healthz": dev.HttpResponse(200),
+    }
+    runner = FakeStatusRunner(
+        [command_result("docker", "info", returncode=1)], urls
+    )
+
+    status = dev.inspect_local_status(tmp_path, dev.LOCAL_ENDPOINTS, runner)
+    serialized = json.dumps(dev.stack_status_to_dict(status))
+
+    assert status.endpoint_results[0].status == "network_error"
+    assert status.healthy_endpoints == 4
+    assert runner.commands == [("docker", "info")]
+    assert status.warnings == ("local Docker daemon is unavailable",)
+    assert "super-secret-token" not in serialized
+    assert "correct-horse" not in serialized
+    assert "bearer-secret" not in serialized
+    assert "postgresql://" not in serialized
+    assert "PRIVATE KEY" not in serialized
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_status", "expected_code"),
+    [
+        (TimeoutError(), "timeout", None),
+        (ssl.SSLError("certificate failed"), "tls_error", None),
+        (URLError(socket.gaierror()), "dns_error", None),
+        (socket.gaierror(), "dns_error", None),
+        (HTTPError("http://localhost/", 503, "unavailable", {}, None), "http_error", 503),
+        (URLError("connection refused"), "network_error", None),
+    ],
+    ids=["timeout", "tls", "url-dns", "direct-dns", "http", "url"],
+)
+def test_endpoint_probe_classifies_expected_transport_failures(
+    failure: BaseException, expected_status: str, expected_code: int | None
+):
+    runner = FakeStatusRunner([], {"http://localhost:9999/": failure})
+
+    result = dev._endpoint_status("test", "http://localhost:9999", "/", runner)
+
+    assert result.status == expected_status
+    assert result.http_status == expected_code
+
+
+@pytest.mark.parametrize("failure", [AssertionError("bug"), TypeError("bug")])
+def test_endpoint_probe_propagates_unexpected_programming_errors(failure: BaseException):
+    runner = FakeStatusRunner([], {"http://localhost:9999/": failure})
+
+    with pytest.raises(type(failure)):
+        dev._endpoint_status("test", "http://localhost:9999", "/", runner)
+
+
+def make_cloud_request(tmp_path: Path) -> ReleaseRequest:
+    identity = tmp_path / "agent.pem"
+    identity.write_text("not-a-real-key\n", encoding="utf-8")
+    return ReleaseRequest(
+        repo=tmp_path,
+        revision="1" * 40,
+        artifact_root=tmp_path / "artifacts",
+        ssh=SshConfig(host="server.example.invalid", user="ubuntu", identity=identity),
+    )
+
+
+def test_inspect_cloud_status_propagates_unexpected_discovery_errors(tmp_path: Path):
+    runner = FakeStatusRunner([TypeError("programmer error")], {})
+
+    with pytest.raises(TypeError, match="programmer error"):
+        dev.inspect_cloud_status(
+            make_cloud_request(tmp_path),
+            dev.cloud_endpoints("demo.ts.net"),
+            runner,
+        )
+
+
+def _all_endpoints_ok() -> dict:
+    """五个端点全 200——这两条用例要测的是**SSH 那一跳失败时怎么报**，
+    端点健不健康不是变量，别让它进读数。"""
+    return {
+        "https://demo.ts.net/": dev.HttpResponse(200),
+        "https://demo.ts.net:8443/healthz": dev.HttpResponse(200),
+        "https://demo.ts.net:8444/api/llm/providers": dev.HttpResponse(200),
+        "https://demo.ts.net:8445/": dev.HttpResponse(200),
+        "https://demo.ts.net:8446/healthz": dev.HttpResponse(200),
+    }
+
+
+def test_unreachable_cloud_status_names_the_msys_ssh_cause_when_in_git_bash(
+        tmp_path: Path, monkeypatch):
+    """诊断出口要说出**最可能的成因**，不能只说「不可用」。
+
+    这条 warning 在 Git Bash 里的真实成因几乎总是 MSYS `ssh` 吃掉转义
+    （AGENTS.md §3.2：Windows 真栈命令一律走 PowerShell），但它露出来的样子是
+    `release_sha: null` + `status: degraded`——**读起来像「云端不健康」**。
+    2026-08-28 同一个人一天里踩了两次，第二次让长会话探针 fail-closed 中止、
+    一轮都没发。同「『读不到』与『读到了但不对』永远分开报」那条纪律。
+    """
+    runner = FakeStatusRunner([dev.ReleaseError("ssh failed")], _all_endpoints_ok())
+    monkeypatch.setenv("MSYSTEM", "MINGW64")
+    status = dev.inspect_cloud_status(
+        make_cloud_request(tmp_path), dev.cloud_endpoints("demo.ts.net"), runner)
+
+    assert status.release_sha is None
+    hint = next(w for w in status.warnings if "unavailable" in w)
+    assert "PowerShell" in hint and "MSYS" in hint
+
+
+def test_the_same_warning_stays_plain_outside_msys(tmp_path: Path, monkeypatch):
+    """误伤对照：PowerShell / Linux 下不许挂那句提示——**说错成因比不说更糟**。"""
+    runner = FakeStatusRunner([dev.ReleaseError("ssh failed")], _all_endpoints_ok())
+    monkeypatch.delenv("MSYSTEM", raising=False)
+    status = dev.inspect_cloud_status(
+        make_cloud_request(tmp_path), dev.cloud_endpoints("demo.ts.net"), runner)
+
+    assert "remote cloud status is unavailable" in status.warnings
+    assert not any("PowerShell" in w for w in status.warnings)
+
+
+def test_default_status_runner_does_not_follow_same_origin_redirect():
+    requests: list[str] = []
+
+    class SameOriginRedirect(BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append(self.path)
+            if self.path == "/":
+                self.send_response(302)
+                self.send_header("Location", "/redirected")
+            else:
+                self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, _format, *_args):
+            pass
+
+    with temporary_http_server(SameOriginRedirect) as server:
+        host, port = server.server_address
+        result = dev._endpoint_status(
+            "test", f"http://{host}:{port}", "/", dev.DefaultStackStatusRunner()
+        )
+
+    assert (result.status, result.http_status) == ("http_error", 302)
+    assert requests == ["/"]
+
+
+def test_default_status_runner_does_not_follow_cross_origin_redirect():
+    target_requests: list[str] = []
+
+    class Target(BaseHTTPRequestHandler):
+        def do_GET(self):
+            target_requests.append(self.path)
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, _format, *_args):
+            pass
+
+    with temporary_http_server(Target) as target:
+        target_host, target_port = target.server_address
+
+        class CrossOriginRedirect(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", f"http://{target_host}:{target_port}/target")
+                self.end_headers()
+
+            def log_message(self, _format, *_args):
+                pass
+
+        with temporary_http_server(CrossOriginRedirect) as source:
+            source_host, source_port = source.server_address
+            result = dev._endpoint_status(
+                "test",
+                f"http://{source_host}:{source_port}",
+                "/",
+                dev.DefaultStackStatusRunner(),
+            )
+
+    assert (result.status, result.http_status) == ("http_error", 302)
+    assert target_requests == []
+
+
+def test_inspect_local_status_handles_release_error_without_running_compose(
+    tmp_path: Path,
+):
+    urls = {
+        "http://localhost:5173/": dev.HttpResponse(200),
+        "http://localhost:8090/healthz": dev.HttpResponse(200),
+        "http://localhost:50059/api/llm/providers": dev.HttpResponse(200),
+        "http://localhost:5174/": dev.HttpResponse(200),
+        "http://localhost:8092/healthz": dev.HttpResponse(200),
+    }
+    runner = FakeStatusRunner(
+        [ReleaseError("super-secret-token postgresql://user:pass@db/private")], urls
+    )
+
+    status = dev.inspect_local_status(tmp_path, dev.LOCAL_ENDPOINTS, runner)
+    serialized = json.dumps(dev.stack_status_to_dict(status))
+
+    assert status.container_total is None
+    assert status.warnings == ("local Docker daemon is unavailable",)
+    assert runner.commands == [("docker", "info")]
+    assert all(
+        forbidden not in command
+        for command in runner.commands
+        for forbidden in ("up", "start", "restart", "build")
+    )
+    assert "super-secret-token" not in serialized
+    assert "postgresql://" not in serialized
+
+
+def test_inspect_local_status_aggregates_scaled_services_from_json_array(
+    tmp_path: Path,
+):
+    containers = json.dumps(
+        [
+            {"Service": "postgres", "State": "exited"},
+            {"Service": "redis", "State": "running"},
+            {"Service": "postgres", "State": "running"},
+            {"Service": "redis", "State": "exited"},
+            {"Service": "edge-gateway", "State": "exited"},
+            {"Service": "edge-gateway", "State": "exited"},
+            {"Service": "llm-gateway", "State": "running"},
+            {"Service": "observability-collector", "State": "running"},
+            {"Service": "hmi", "State": "running"},
+            {"Service": "dashboard", "State": "exited"},
+            {"Service": "unrelated-current-project-service", "State": "running"},
+        ]
+    )
+    urls = {
+        "http://localhost:5173/": dev.HttpResponse(200),
+        "http://localhost:8090/healthz": dev.HttpResponse(200),
+        "http://localhost:50059/api/llm/providers": dev.HttpResponse(200),
+        "http://localhost:5174/": dev.HttpResponse(200),
+        "http://localhost:8092/healthz": dev.HttpResponse(200),
+    }
+    runner = FakeStatusRunner(
+        [
+            command_result("docker", "info"),
+            command_result("docker", "compose", stdout=containers),
+        ],
+        urls,
+    )
+
+    status = dev.inspect_local_status(tmp_path, dev.LOCAL_ENDPOINTS, runner)
+
+    assert (status.container_total, status.container_running) == (11, 6)
+    assert status.warnings == (
+        "required local service is not running: dashboard",
+        "required local service is not running: edge-gateway",
+    )
+    assert not any("postgres" in warning for warning in status.warnings)
+    assert not any("redis" in warning for warning in status.warnings)
+
+
+def test_inspect_local_status_marks_counts_unknown_when_compose_json_is_malformed(
+    tmp_path: Path,
+):
+    urls = {
+        "http://localhost:5173/": dev.HttpResponse(200),
+        "http://localhost:8090/healthz": dev.HttpResponse(200),
+        "http://localhost:50059/api/llm/providers": dev.HttpResponse(200),
+        "http://localhost:5174/": dev.HttpResponse(200),
+        "http://localhost:8092/healthz": dev.HttpResponse(200),
+    }
+    runner = FakeStatusRunner(
+        [
+            command_result("docker", "info"),
+            command_result("docker", "compose", stdout="{not JSON"),
+        ],
+        urls,
+    )
+
+    status = dev.inspect_local_status(tmp_path, dev.LOCAL_ENDPOINTS, runner)
+
+    assert (status.container_total, status.container_running) == (None, None)
+    assert status.warnings == ("local Compose status returned invalid JSON",)
+
+
+def test_inspect_local_status_marks_counts_unknown_when_compose_command_fails(
+    tmp_path: Path,
+):
+    urls = {
+        "http://localhost:5173/": dev.HttpResponse(200),
+        "http://localhost:8090/healthz": dev.HttpResponse(200),
+        "http://localhost:50059/api/llm/providers": dev.HttpResponse(200),
+        "http://localhost:5174/": dev.HttpResponse(200),
+        "http://localhost:8092/healthz": dev.HttpResponse(200),
+    }
+    runner = FakeStatusRunner(
+        [
+            command_result("docker", "info"),
+            command_result("docker", "compose", returncode=1),
+        ],
+        urls,
+    )
+
+    status = dev.inspect_local_status(tmp_path, dev.LOCAL_ENDPOINTS, runner)
+
+    assert (status.container_total, status.container_running) == (None, None)
+    assert status.warnings == ("local Compose status is unavailable",)
+
+
+def test_parse_compose_ps_rejects_deeply_nested_json_without_recursion_error():
+    payload = "[" * 10_000 + "]" * 10_000
+
+    assert dev._parse_compose_ps(payload) is None
+
+
+def test_parse_compose_ps_rejects_oversized_and_overrecord_payloads():
+    oversized = " " * (dev.COMPOSE_STATUS_MAX_BYTES + 1)
+    overrecord = json.dumps(
+        [
+            {"Service": f"service-{index}", "State": "running"}
+            for index in range(dev.COMPOSE_STATUS_MAX_RECORDS + 1)
+        ]
+    )
+
+    assert dev._parse_compose_ps(oversized) is None
+    assert dev._parse_compose_ps(overrecord) is None
+
+
+@pytest.mark.parametrize(
+    "oneoff_labels",
+    [
+        {"com.docker.compose.oneoff": "True"},
+        "com.docker.compose.oneoff=True,com.docker.compose.project=car-agent",
+    ],
+    ids=["labels-dict", "labels-string"],
+)
+def test_oneoff_container_does_not_make_stopped_required_service_ready(
+    tmp_path: Path, oneoff_labels: object
+):
+    containers = json.dumps(
+        [
+            {"Service": "postgres", "State": "exited", "Labels": {}},
+            {"Service": "postgres", "State": "running", "Labels": oneoff_labels},
+            {"Service": "redis", "State": "running", "Labels": {}},
+            {"Service": "edge-gateway", "State": "running", "Labels": {}},
+            {"Service": "llm-gateway", "State": "running", "Labels": {}},
+            {"Service": "observability-collector", "State": "running", "Labels": {}},
+            {"Service": "hmi", "State": "running", "Labels": {}},
+            {"Service": "dashboard", "State": "running", "Labels": {}},
+        ]
+    )
+    urls = {
+        "http://localhost:5173/": dev.HttpResponse(200),
+        "http://localhost:8090/healthz": dev.HttpResponse(200),
+        "http://localhost:50059/api/llm/providers": dev.HttpResponse(200),
+        "http://localhost:5174/": dev.HttpResponse(200),
+        "http://localhost:8092/healthz": dev.HttpResponse(200),
+    }
+    runner = FakeStatusRunner(
+        [
+            command_result("docker", "info"),
+            command_result("docker", "compose", stdout=containers),
+        ],
+        urls,
+    )
+
+    status = dev.inspect_local_status(tmp_path, dev.LOCAL_ENDPOINTS, runner)
+
+    assert (status.container_total, status.container_running) == (8, 7)
+    assert status.warnings == ("required local service is not running: postgres",)
+
+
+def test_cloud_release_argv_is_a_python_delegate_with_dry_run_and_apply():
+    repo = Path("C:/repo")
+
+    assert dev.cloud_release_argv(repo, "deploy", "a" * 40, apply=False) == [
+        sys.executable,
+        str(repo / "scripts" / "cloud_release.py"),
+        "deploy",
+        "--sha",
+        "a" * 40,
+    ]
+    assert dev.cloud_release_argv(repo, "deploy", "a" * 40, apply=True)[-1] == "--apply"
+    assert dev.cloud_release_argv(repo, "verify", "HEAD", apply=True) == [
+        sys.executable,
+        str(repo / "scripts" / "cloud_release.py"),
+        "verify",
+    ]
+    with pytest.raises(dev.DevStackError, match="unsupported"):
+        dev.cloud_release_argv(repo, "rollback", "HEAD", apply=False)
+
+
+def test_cloud_release_argv_ci_approval_is_deploy_scoped_and_precedes_apply():
+    repo = Path("C:/repo")
+    digest = "e" * 64
+
+    dry_run = dev.cloud_release_argv(
+        repo,
+        "deploy",
+        "a" * 40,
+        apply=False,
+        approved_ci_cd_digest=digest,
+    )
+    applied = dev.cloud_release_argv(
+        repo,
+        "deploy",
+        "a" * 40,
+        apply=True,
+        approved_ci_cd_digest=digest,
+    )
+    verify = dev.cloud_release_argv(
+        repo,
+        "verify",
+        "HEAD",
+        apply=False,
+        approved_ci_cd_digest=digest,
+    )
+
+    assert dry_run[-2:] == ["--approve-ci-cd-sha256", digest]
+    assert applied[-3:] == ["--approve-ci-cd-sha256", digest, "--apply"]
+    assert "--approve-ci-cd-sha256" not in verify
+
+
+class FakeCliRunner:
+    def __init__(self, result: int = 0, stdout: str = "", stderr: str = "") -> None:
+        self.calls: list[tuple[str, ...]] = []
+        self.result = result
+        self.stdout = stdout
+        self.stderr = stderr
+
+    def run(self, argv, **kwargs):
+        self.calls.append(tuple(argv))
+        return CommandResult(tuple(argv), self.result, self.stdout, self.stderr)
+
+
+class SequenceCliRunner:
+    def __init__(self, *results: CommandResult) -> None:
+        self.calls: list[tuple[str, ...]] = []
+        self.results = list(results)
+
+    def run(self, argv, **kwargs):
+        self.calls.append(tuple(argv))
+        return self.results.pop(0)
+
+
+def _release_verify_stdout(release_sha: str = "a" * 40) -> str:
+    return json.dumps({"status": "verified", "release_sha": release_sha})
+
+
+def _e2e_verify_stdout(
+    *,
+    target: str,
+    release_sha: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+) -> str:
+    cloud = target == "cloud"
+    selection = [{
+        "argv": ["python", "test/e2e_remote_safe.py"],
+        "id": "e2e_remote_safe",
+        "profile": "root",
+        "remote_mutating": False,
+        "remote_safe": True,
+        "timeout_s": 180,
+    }] if cloud else []
+    results = [{
+        "id": "e2e_remote_safe",
+        "status": "PASS",
+        "returncode": 0,
+        "errors": [],
+        "counts": {"selected": 7, "executed": 7, "passed": 7, "failed": 0, "skipped": 0},
+        "outcome_case_ids": {"failed": [], "skipped": []},
+        "artifact_dir": "C:/safe-artifacts",
+        "artifacts": [],
+        "logs": [],
+        "diagnostic": "",
+        "result_file": "C:/safe-result.json",
+        "profile": "root",
+        "timeout_s": 180,
+    }] if cloud else []
+    payload = {
+        "allow_mutating": False,
+        "canonical": False,
+        "canonical_promoted": False,
+        "canonical_rejection_reasons": [],
+        "epochs": [],
+        "errors": [],
+        "exit_code": 0,
+        "full": not cloud,
+        "lane": None,
+        "milestone": None,
+        "mode": "run" if cloud else "check",
+        "model": model,
+        "profile_restore": {"count": 0, "profile": "default"},
+        "provider": provider,
+        "remote_lock": (
+            {"kind": "e2e", "run_id": "e2e-" + "1" * 32}
+            if cloud else None
+        ),
+        "results": results,
+        "runtime_freshness": "unverified",
+        "selection": selection,
+        "stale": {"reasons": [], "stale": False},
+        "target": target,
+        "target_release_sha": release_sha,
+        "warnings": [],
+    }
+    if cloud:
+        payload["run_id"] = "e2e-test-run"
+    return "E2E summary:\n" + json.dumps(payload, separators=(",", ":"))
+
+
+def _command_result(returncode: int, stdout: str = "") -> CommandResult:
+    return CommandResult(("fake",), returncode, stdout, "")
+
+
+def _valid_identity(tmp_path: Path, name: str = "identity") -> Path:
+    identity = tmp_path / name
+    identity.write_text("test-only identity", encoding="utf-8")
+    return identity
+
+def test_cli_target_show_and_set_emit_target_and_source(tmp_path: Path):
+    events: list[dict[str, object]] = []
+
+    assert cli.main(["target", "show"], repo=tmp_path, emit=events.append) == 0
+    assert events == [{"status": "target", "target": "local", "source": "default"}]
+    assert cli.main(["target", "set", "cloud"], repo=tmp_path, emit=events.append) == 0
+    assert (tmp_path / "dev-stack.local").read_text(encoding="utf-8") == "target=cloud\n"
+    assert events[-1] == {"status": "target", "target": "cloud", "source": "file"}
+
+
+def test_cli_deploy_rejects_local_and_delegates_cloud_without_echoing_identity(tmp_path: Path):
+    runner = FakeCliRunner(stdout=json.dumps(_cloud_release_payload()))
+    assert cli.main(["deploy"], repo=tmp_path, release_runner=runner) == 2
+    assert runner.calls == []
+
+    dev.set_target(tmp_path, "cloud")
+    identity = tmp_path / "actual-secret-identity.pem"
+    identity.write_text("test-only identity", encoding="utf-8")
+    events: list[dict[str, object]] = []
+    arguments = ["--host", "dev.example", "--user", "alice", "--identity", str(identity), "--kex-algorithms", "curve25519-sha256"]
+    assert cli.main([*arguments, "deploy", "--sha", "a" * 40], repo=tmp_path, release_runner=runner, emit=events.append) == 0
+    dry_run_argv = runner.calls[-1]
+    assert dry_run_argv[:11] == (sys.executable, str(tmp_path / "scripts" / "cloud_release.py"), "--host", "dev.example", "--user", "alice", "--identity", str(identity), "--kex-algorithms", "curve25519-sha256", "deploy")
+    assert dry_run_argv[-2:] == ("--sha", "a" * 40)
+    assert cli.main([*arguments, "deploy", "--sha", "a" * 40, "--apply"], repo=tmp_path, release_runner=runner, emit=events.append) == 0
+    assert runner.calls[-1][-1] == "--apply"
+    assert events[-1]["target"] == "cloud"
+    assert str(identity) not in json.dumps(events)
+
+
+def test_dev_stack_deploy_forwards_exact_ci_approval_and_release_audit_fields(
+    tmp_path: Path,
+):
+    dev.set_target(tmp_path, "cloud")
+    digest = "e" * 64
+    payload = _cloud_release_payload()
+    payload["target_ci_cd_sha256"] = digest
+    payload["approved_ci_cd_sha256"] = digest
+    runner = FakeCliRunner(stdout=json.dumps(payload))
+    events: list[dict[str, object]] = []
+
+    rc = cli.main(
+        [
+            "--host",
+            "dev.example",
+            "--identity",
+            str(_valid_identity(tmp_path)),
+            "deploy",
+            "--sha",
+            "b" * 40,
+            "--approve-ci-cd-sha256",
+            digest,
+        ],
+        repo=tmp_path,
+        release_runner=runner,
+        emit=events.append,
+    )
+
+    assert rc == 0
+    assert runner.calls[0][-2:] == ("--approve-ci-cd-sha256", digest)
+    assert events[-1]["target_ci_cd_sha256"] == digest
+    assert events[-1]["approved_ci_cd_sha256"] == digest
+
+
+def test_dev_stack_deploy_without_ci_approval_has_no_flag_or_env_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    dev.set_target(tmp_path, "cloud")
+    monkeypatch.setenv("CAR_AGENT_APPROVE_CI_CD_SHA256", "e" * 64)
+    payload = _cloud_release_payload()
+    runner = FakeCliRunner(stdout=json.dumps(payload))
+    events: list[dict[str, object]] = []
+
+    rc = cli.main(
+        [
+            "--host",
+            "dev.example",
+            "--identity",
+            str(_valid_identity(tmp_path)),
+            "deploy",
+        ],
+        repo=tmp_path,
+        release_runner=runner,
+        emit=events.append,
+    )
+
+    assert rc == 0
+    assert "--approve-ci-cd-sha256" not in runner.calls[0]
+    assert events[-1]["target_ci_cd_sha256"] is None
+    assert events[-1]["approved_ci_cd_sha256"] is None
+
+
+@pytest.mark.parametrize("command", ("status", "verify"))
+def test_dev_stack_non_deploy_commands_reject_ci_approval(
+    tmp_path: Path,
+    command: str,
+):
+    events: list[dict[str, object]] = []
+
+    assert cli.main(
+        [command, "--approve-ci-cd-sha256", "e" * 64],
+        repo=tmp_path,
+        emit=events.append,
+    ) == 2
+    assert events == [
+        {
+            "status": "parse_error",
+            "target": None,
+            "source": None,
+            "error": "invalid command arguments",
+        }
+    ]
+
+
+def _seed_cloud_verify_env(tmp_path: Path) -> None:
+    """A repo that can verify against cloud carries the stack's WS token."""
+    (tmp_path / ".env").write_text(
+        "TAILNET_FQDN=demo.ts.net\nVITE_WS_TOKEN=" + "t" * 64 + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_cloud_verify_runs_release_verify_then_remote_safe_runner(tmp_path: Path):
+    dev.set_target(tmp_path, "cloud")
+    _seed_cloud_verify_env(tmp_path)
+    identity = _valid_identity(tmp_path)
+    runner = SequenceCliRunner(
+        _command_result(0, _release_verify_stdout()),
+        _command_result(0, _e2e_verify_stdout(
+            target="cloud", release_sha="a" * 40,
+            provider="deepseek", model="deepseek-v4-flash",
+        )),
+    )
+
+    rc = cli.main(
+        ["--host", "demo.example", "--identity", str(identity), "verify"],
+        repo=tmp_path,
+        release_runner=runner,
+    )
+
+    assert rc == 0
+    assert runner.calls[0][-1] == "verify"
+    assert runner.calls[1][-4:] == (
+        "--target", "cloud", "--id", "e2e_remote_safe",
+    )
+
+
+def test_local_verify_keeps_existing_e2e_check_semantics(tmp_path: Path):
+    runner = SequenceCliRunner(
+        _command_result(0, _e2e_verify_stdout(target="local")),
+    )
+
+    assert cli.main(["verify"], repo=tmp_path, release_runner=runner) == 0
+    assert runner.calls == [(
+        sys.executable,
+        str(tmp_path / "scripts" / "run_e2e.py"),
+        "--target", "local", "--check",
+    )]
+    assert "cloud_release.py" not in " ".join(runner.calls[0])
+
+
+def test_cloud_verify_stops_after_release_failure(tmp_path: Path):
+    dev.set_target(tmp_path, "cloud")
+    _seed_cloud_verify_env(tmp_path)
+    runner = FakeCliRunner(result=1)
+
+    assert cli.main(
+        ["--host", "demo.example", "--identity", str(_valid_identity(tmp_path)), "verify"],
+        repo=tmp_path,
+        release_runner=runner,
+    ) == 1
+    assert len(runner.calls) == 1
+
+
+def test_verify_writes_private_allowlisted_evidence(tmp_path: Path):
+    events: list[dict[str, object]] = []
+    runner = SequenceCliRunner(
+        _command_result(0, _e2e_verify_stdout(target="local")),
+    )
+
+    assert cli.main(
+        ["verify"], repo=tmp_path, release_runner=runner, emit=events.append,
+    ) == 0
+    evidence_path = Path(events[-1]["artifact"])
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert evidence == {
+        "case_ids": [],
+        "lock_kind": None,
+        "lock_run_id": None,
+        "model": None,
+        "passed": True,
+        "provider": None,
+        "release_sha": None,
+        "target": "local",
+        "verified_at": evidence["verified_at"],
+    }
+    if os.name != "nt":
+        assert evidence_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_cloud_verify_merges_validated_child_evidence(tmp_path: Path):
+    dev.set_target(tmp_path, "cloud")
+    _seed_cloud_verify_env(tmp_path)
+    events: list[dict[str, object]] = []
+    runner = SequenceCliRunner(
+        _command_result(0, _release_verify_stdout()),
+        _command_result(0, _e2e_verify_stdout(
+            target="cloud", release_sha="a" * 40,
+            provider="deepseek", model="deepseek-v4-flash",
+        )),
+    )
+
+    assert cli.main(
+        ["--host", "demo.example", "--identity", str(_valid_identity(tmp_path)), "verify"],
+        repo=tmp_path, release_runner=runner, emit=events.append,
+    ) == 0
+
+    evidence = json.loads(Path(events[-1]["artifact"]).read_text(encoding="utf-8"))
+    assert evidence["release_sha"] == "a" * 40
+    assert evidence["provider"] == "deepseek"
+    assert evidence["model"] == "deepseek-v4-flash"
+    assert evidence["case_ids"] == ["e2e_remote_safe"]
+    assert evidence["lock_kind"] == "e2e"
+    assert evidence["lock_run_id"] == "e2e-" + "1" * 32
+
+
+@pytest.mark.parametrize(
+    "release_stdout,e2e_stdout",
+    [
+        ("", ""),
+        ('{"status":"verified","release_sha":"' + "a" * 40 + '","release_sha":"' + "a" * 40 + '"}', ""),
+        (json.dumps({"status": "verified", "release_sha": "a" * 40, "padding": "x" * (64 * 1024)}), ""),
+        (json.dumps({"status": "verified", "release_sha": "a" * 40, "nested": [[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]}), ""),
+        (json.dumps({"status": "verified"}), ""),
+        (_release_verify_stdout(), _e2e_verify_stdout(
+            target="cloud", release_sha="b" * 40,
+            provider="deepseek", model="deepseek-v4-flash",
+        )),
+        (_release_verify_stdout(), _e2e_verify_stdout(
+            target="cloud", release_sha="a" * 40,
+            provider=None, model=None,
+        )),
+    ],
+    ids=("missing", "duplicate", "oversized", "too-deep", "schema", "sha-mismatch", "missing-provider"),
+)
+def test_cloud_verify_rejects_rc_zero_invalid_or_inconsistent_evidence(
+    tmp_path: Path,
+    release_stdout: str,
+    e2e_stdout: str,
+):
+    dev.set_target(tmp_path, "cloud")
+    _seed_cloud_verify_env(tmp_path)
+    results = [_command_result(0, release_stdout)]
+    if e2e_stdout:
+        results.append(_command_result(0, e2e_stdout))
+    runner = SequenceCliRunner(*results)
+
+    assert cli.main(
+        ["--host", "demo.example", "--identity", str(_valid_identity(tmp_path)), "verify"],
+        repo=tmp_path, release_runner=runner,
+    ) == 1
+
+
+def test_local_verify_rejects_rc_zero_without_check_evidence(tmp_path: Path):
+    assert cli.main(
+        ["verify"], repo=tmp_path,
+        release_runner=SequenceCliRunner(_command_result(0, "")),
+    ) == 1
+
+
+def test_cloud_hmi_uses_local_vite_and_remote_endpoints(tmp_path: Path):
+    command = dev.frontend_command(
+        repo=tmp_path,
+        app="hmi",
+        target=dev.TargetSelection("cloud", "file"),
+        endpoints=dev.cloud_endpoints("demo.ts.net"),
+        selected_env={"VITE_WS_TOKEN": "secret"},
+    )
+
+    assert Path(command.argv[0]).name.lower().startswith("npm")
+    assert command.argv[1:] == ("run", "dev", "--", "--host", "127.0.0.1")
+    assert command.cwd == tmp_path / "hmi"
+    assert command.env["VITE_EDGE_GATEWAY_URL"] == "https://demo.ts.net:8443"
+    assert command.env["VITE_AUDIO_API_URL"] == "https://demo.ts.net:8444"
+    assert command.env["VITE_WS_TOKEN"] == "secret"
+    assert "docker" not in command.argv
+
+
+def test_dashboard_and_local_hmi_receive_explicit_selected_endpoints(tmp_path: Path):
+    dashboard = dev.frontend_command(
+        repo=tmp_path,
+        app="dashboard",
+        target=dev.TargetSelection("local", "default"),
+        endpoints=dev.LOCAL_ENDPOINTS,
+        selected_env={},
+    )
+    hmi = dev.frontend_command(
+        repo=tmp_path,
+        app="hmi",
+        target=dev.TargetSelection("local", "default"),
+        endpoints=dev.LOCAL_ENDPOINTS,
+        selected_env={},
+    )
+
+    assert dashboard.env == {
+        "VITE_COLLECTOR_URL": "http://localhost:8092",
+        "VITE_EDGE_GATEWAY_URL": "http://localhost:8090",
+        "VITE_COLLECTOR_TOKEN": "",
+    }
+    assert hmi.env["VITE_AUDIO_API_URL"] == "http://localhost:50059"
+
+
+def test_cloud_hmi_requires_ws_token(tmp_path: Path):
+    with pytest.raises(dev.DevStackError, match="VITE_WS_TOKEN"):
+        dev.frontend_command(
+            repo=tmp_path,
+            app="hmi",
+            target=dev.TargetSelection("cloud", "file"),
+            endpoints=dev.cloud_endpoints("demo.ts.net"),
+            selected_env={},
+        )
+
+
+def test_cli_hmi_runs_only_vite_and_redacts_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    dev.set_target(tmp_path, "cloud")
+    runner = FakeCliRunner()
+    events: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        cli,
+        "read_root_env",
+        lambda *_args: {
+            "TAILNET_FQDN": "demo.ts.net",
+            "VITE_WS_TOKEN": "top-secret-token",
+            "AMAP_JS_KEY": "fixture-map-public-key",
+            "AMAP_JS_SECURITY_CODE": "fixture-map-private-code",
+        },
+    )
+
+    assert cli.main(["hmi"], repo=tmp_path, release_runner=runner, emit=events.append) == 0
+    assert len(runner.calls) == 1
+    assert Path(runner.calls[0][0]).name.lower().startswith("npm")
+    assert runner.calls[0][1:] == ("run", "dev", "--", "--host", "127.0.0.1")
+    assert "docker" not in " ".join(runner.calls[0])
+    assert "top-secret-token" not in json.dumps(events)
+    assert "fixture-map-public-key" not in json.dumps(events)
+    assert "fixture-map-private-code" not in json.dumps(events)
+    assert events[-1]["environment"]["AMAP_JS_KEY"] == "[REDACTED]"
+    assert events[-1]["environment"]["AMAP_JS_SECURITY_CODE"] == "[REDACTED]"
+    assert events[-1]["environment"]["VITE_WS_TOKEN"] == "[REDACTED]"
+
+
+def test_cli_dashboard_injects_a_collector_token_only_into_the_dev_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    dev.set_target(tmp_path, "cloud")
+    seen: list[dict[str, object]] = []
+
+    class EnvRunner(FakeCliRunner):
+        def run(self, argv, **kwargs):
+            seen.append(kwargs)
+            return super().run(argv, **kwargs)
+
+    runner = EnvRunner()
+    events: list[dict[str, object]] = []
+    monkeypatch.setattr(cli, "read_root_env", lambda *_args: {"TAILNET_FQDN": "demo.ts.net"})
+    monkeypatch.setattr(cli, "operator_token", lambda **_kwargs: "obs.v1.top-secret.sig")
+
+    assert cli.main(["dashboard"], repo=tmp_path, release_runner=runner, emit=events.append) == 0
+    assert seen[0]["env"]["VITE_COLLECTOR_TOKEN"] == "obs.v1.top-secret.sig"
+    assert seen[0]["env"]["VITE_COLLECTOR_URL"] == "https://demo.ts.net:8446"
+    assert "top-secret" not in json.dumps(events)
+    assert events[-1]["environment"]["VITE_COLLECTOR_TOKEN"] == "[REDACTED]"
+
+
+def test_cloud_connection_defaults_stay_hidden_from_unit_tests(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The hand-written hide list must cover every CAR_AGENT_* the scripts read.
+
+    Exporting these turns four cases red without a code change, and CI never
+    sets them, so the leak is invisible exactly where it is not happening.
+    Deriving the expectation from the scripts means a fifth variable added on
+    one side only is a red rather than a surprise months later.
+    """
+    scripts_dir = Path(__file__).resolve().parents[1]
+    read_by_scripts: set[str] = set()
+    for source_file in sorted(scripts_dir.glob("*.py")):
+        tree = ast.parse(source_file.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            function = node.func
+            attribute = getattr(function, "attr", None)
+            if attribute not in {"getenv", "get", "__getitem__"}:
+                continue
+            for argument in node.args:
+                if (
+                    isinstance(argument, ast.Constant)
+                    and isinstance(argument.value, str)
+                    and argument.value.startswith("CAR_AGENT_")
+                ):
+                    read_by_scripts.add(argument.value)
+
+    assert read_by_scripts, "the scan found nothing, so it guards nothing"
+    assert read_by_scripts == set(conftest.OPERATOR_CLOUD_VARIABLES)
+
+    for name in sorted(read_by_scripts):
+        assert name not in os.environ
+
+
+def test_frontend_argv_names_a_launcher_this_platform_can_actually_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """`npm` is spawnable on POSIX and not on Windows, so argv must resolve first.
+
+    Popen never applies PATHEXT: the bare name raises FileNotFoundError there.
+    Asserting the literal name only proves the string, so this hands argv[0] to
+    the same runner the CLI uses and requires it to start.
+    """
+    launcher_dir = tmp_path / "bin"
+    _stub_launcher(launcher_dir)
+    monkeypatch.setenv("PATH", str(launcher_dir))
+
+    command = dev.frontend_command(
+        repo=tmp_path,
+        app="dashboard",
+        target=dev.TargetSelection("cloud", "file"),
+        endpoints=dev.cloud_endpoints("demo.ts.net"),
+        selected_env={},
+    )
+
+    result = SubprocessRunner().run((command.argv[0],), cwd=tmp_path, check=False)
+    assert result.returncode == 0
+    assert "stub-launcher-ok" in result.stdout
+
+
+def test_frontend_command_rejects_a_launcher_that_is_not_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    monkeypatch.chdir(empty)
+
+    with pytest.raises(dev.DevStackError, match="npm"):
+        dev.frontend_command(
+            repo=tmp_path,
+            app="dashboard",
+            target=dev.TargetSelection("cloud", "file"),
+            endpoints=dev.cloud_endpoints("demo.ts.net"),
+            selected_env={},
+        )
+
+
+def test_attached_commands_reach_the_operator_console_instead_of_a_capture_buffer(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str],
+):
+    stub = _stub_launcher(tmp_path / "bin", "streamer")
+
+    captured = SubprocessRunner().run((str(stub),), cwd=tmp_path, check=False)
+    assert "stub-launcher-ok" in captured.stdout
+    assert "stub-launcher-ok" not in capfd.readouterr().out
+
+    attached = SubprocessRunner().run(
+        (str(stub),), cwd=tmp_path, check=False, attached=True
+    )
+    assert attached.returncode == 0
+    assert "stub-launcher-ok" in capfd.readouterr().out
+
+
+def test_cli_frontend_reports_endpoints_before_the_dev_server_takes_the_console(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    dev.set_target(tmp_path, "cloud")
+    events: list[dict[str, object]] = []
+    observed: list[dict[str, object]] = []
+
+    class RecordingRunner:
+        def run(self, argv, **kwargs):
+            observed.append({"kwargs": kwargs, "events_so_far": len(events)})
+            return CommandResult(tuple(argv), 0, "", "")
+
+    monkeypatch.setattr(
+        cli,
+        "read_root_env",
+        lambda *_args: {"TAILNET_FQDN": "demo.ts.net", "VITE_WS_TOKEN": "t" * 64},
+    )
+
+    assert cli.main(
+        ["hmi"], repo=tmp_path, release_runner=RecordingRunner(), emit=events.append
+    ) == 0
+    assert observed[0]["kwargs"]["attached"] is True
+    assert observed[0]["events_so_far"] == 1
+    assert events[0]["status"] == "starting"
+    assert events[0]["environment"]["VITE_EDGE_GATEWAY_URL"] == "https://demo.ts.net:8443"
+    assert events[0]["environment"]["VITE_WS_TOKEN"] == "[REDACTED]"
+    assert events[-1]["status"] == "completed"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    (
+        ("target", "set", "remote"),
+        ("unknown-command",),
+        ("target", "set"),
+    ),
+)
+def test_cli_parser_errors_are_redacted_json_with_exit_two(
+    argv: tuple[str, ...], tmp_path: Path
+):
+    identity = str(tmp_path / "secret-identity.pem")
+    events: list[dict[str, object]] = []
+
+    assert cli.main(["--identity", identity, *argv], repo=tmp_path, emit=events.append) == 2
+    assert events == [
+        {
+            "status": "parse_error",
+            "target": None,
+            "source": None,
+            "error": "invalid command arguments",
+        }
+    ]
+    assert identity not in json.dumps(events)
+
+
+def _cloud_release_payload(status: str = "dry_run") -> dict[str, object]:
+    return {
+        "status": status,
+        "deployed_sha": "a" * 40,
+        "target_sha": "b" * 40,
+        "changed_paths": ["agents/example.py"],
+        "blocking_changes": [],
+        "target_infrastructure_sha256": "c" * 64,
+        "approved_infrastructure_sha256": "d" * 64,
+        "target_ci_cd_sha256": None,
+        "approved_ci_cd_sha256": None,
+        "target_database_schema_sha256": None,
+        "approved_database_schema_sha256": None,
+        "target_compose_sha256": None,
+        "approved_compose_sha256": None,
+        "artifact_directory": "/opt/car-agent/releases/ignored",
+        "bootstrap": {"status": "ready", "source_release": "/opt/ignored", "candidates": [], "details": []},
+        "remote": {"current_release": "a" * 40, "runtime_project_name": "car_agent", "disk_available_bytes": 1, "memory_available_bytes": 1, "release_lock_available": True, "runtime_project_ready": True, "shared_scripts_ready": True, "shared_models_ready": True},
+    }
+
+
+@pytest.mark.parametrize("identity_kind", ("missing", "directory"))
+def test_cli_cloud_status_and_deploy_reject_unusable_identity_before_runner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    identity_kind: str,
+):
+    dev.set_target(tmp_path, "cloud")
+    identity = tmp_path / "identity"
+    arguments = ["--host", "dev.example"]
+    if identity_kind == "directory":
+        identity.mkdir()
+        arguments.extend(["--identity", str(identity)])
+
+    inspected = False
+    def inspect(*args):
+        nonlocal inspected
+        inspected = True
+        raise AssertionError("cloud status runner must not execute")
+
+    monkeypatch.setattr(cli, "inspect_cloud_status", inspect)
+    status_events: list[dict[str, object]] = []
+    assert cli.main([*arguments, "status"], repo=tmp_path, emit=status_events.append) == 2
+    assert not inspected
+    assert status_events[-1]["status"] == "configuration_rejected"
+
+    release_runner = FakeCliRunner(stdout=json.dumps(_cloud_release_payload()))
+    deploy_events: list[dict[str, object]] = []
+    assert cli.main(
+        [*arguments, "deploy"],
+        repo=tmp_path,
+        release_runner=release_runner,
+        emit=deploy_events.append,
+    ) == 2
+    assert release_runner.calls == []
+    assert deploy_events[-1]["status"] == "configuration_rejected"
+
+def test_cli_status_uses_health_consistent_status_for_local_and_cloud(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    endpoints = tuple(
+        dev.EndpointStatus(str(index), "https://example.invalid", "healthy", 200)
+        for index in range(5)
+    )
+    healthy = dev.StackStatus("local", None, None, 7, 7, 5, endpoints, ())
+    monkeypatch.setattr(cli, "inspect_local_status", lambda *args: healthy)
+    local_events: list[dict[str, object]] = []
+    assert cli.main(["status"], repo=tmp_path, status_runner=object(), emit=local_events.append) == 0
+    assert local_events[-1]["status"] == "ok"
+
+    dev.set_target(tmp_path, "cloud")
+    degraded = dev.StackStatus("cloud", "a" * 40, "a" * 40, None, None, 4, (), ("remote status unavailable",))
+    monkeypatch.setattr(cli, "read_root_env", lambda *args: {"TAILNET_FQDN": "dev.ts.net"})
+    monkeypatch.setattr(cli, "inspect_cloud_status", lambda *args: degraded)
+    cloud_events: list[dict[str, object]] = []
+    assert cli.main(["--host", "dev.example", "--identity", str(_valid_identity(tmp_path)), "status"], repo=tmp_path, status_runner=object(), emit=cloud_events.append) == 1
+    assert cloud_events[-1]["status"] == "degraded"
+
+
+def _actual_cloud_release_payload(status: str) -> dict[str, object]:
+    plan = ReleasePlan(
+        deployed_sha="a" * 40,
+        target_sha="b" * 40,
+        changed_paths=("deploy/cloud/remote-release.sh",),
+        blocking_changes=(
+            ControlledChange("deploy/cloud/remote-release.sh", "infrastructure"),
+        ),
+        status=status,
+        target_infrastructure_digest="c" * 64,
+        approved_infrastructure_digest="d" * 64,
+    )
+    remote = RemoteState(
+        current_release="a" * 40,
+        current_path="/opt/car-agent/releases/" + "a" * 40,
+        runtime_project_name="car_agent",
+        running_release_tags=("a" * 40,),
+        approved_infrastructure_digest="d" * 64,
+        disk_available_bytes=1,
+        memory_available_bytes=1,
+        release_lock_available=True,
+        runtime_project_ready=True,
+        shared_scripts_ready=True,
+        shared_models_ready=True,
+    )
+    return cloud_release._result_payload(
+        CloudReleaseResult(status, plan, None, remote)
+    )
+
+
+def test_cli_uses_real_cloud_release_payload_for_plan_and_bootstrap_results():
+    plan_rejected = _actual_cloud_release_payload("plan_rejected")
+    plan_code, plan_payload = cli._release_result(3, json.dumps(plan_rejected))
+    assert plan_code == 3
+    assert plan_payload["blocking_changes"] == [
+        {"path": "deploy/cloud/remote-release.sh", "category": "infrastructure"}
+    ]
+    assert plan_payload["target_ci_cd_sha256"] is None
+    assert plan_payload["approved_ci_cd_sha256"] is None
+
+    bootstrap = _actual_cloud_release_payload("bootstrap_required")
+    bootstrap_code, bootstrap_payload = cli._release_result(3, json.dumps(bootstrap))
+    assert bootstrap_code == 1
+    assert bootstrap_payload["status"] == "bootstrap_required"
+    assert bootstrap_payload["bootstrap"]["status"] in {"ready", "bootstrap_required"}
+
+def test_cli_deploy_keeps_allowlisted_release_audit_fields(tmp_path: Path):
+    dev.set_target(tmp_path, "cloud")
+    payload = _cloud_release_payload()
+    runner = FakeCliRunner(stdout=json.dumps(payload))
+    events: list[dict[str, object]] = []
+    assert cli.main(["--host", "dev.example", "--identity", str(_valid_identity(tmp_path)), "deploy"], repo=tmp_path, release_runner=runner, emit=events.append) == 0
+    assert events[-1]["action"] == "deploy"
+    assert events[-1]["target_sha"] == payload["target_sha"]
+    assert events[-1]["current_release"] == payload["remote"]["current_release"]
+    assert events[-1]["changed_paths"] == ["agents/example.py"]
+    assert events[-1]["bootstrap"]["status"] == "ready"
+    assert events[-1]["bootstrap"]["source_release"] == "/opt/ignored"
+    assert events[-1]["target_ci_cd_sha256"] is None
+    assert events[-1]["approved_ci_cd_sha256"] is None
+    assert events[-1]["artifact_directory"] == payload["artifact_directory"]
+
+
+def test_cli_deploy_preserves_null_release_artifact_directory(tmp_path: Path):
+    dev.set_target(tmp_path, "cloud")
+    payload = _cloud_release_payload()
+    payload["artifact_directory"] = None
+    runner = FakeCliRunner(stdout=json.dumps(payload))
+    events: list[dict[str, object]] = []
+
+    assert cli.main(
+        [
+            "--host",
+            "dev.example",
+            "--identity",
+            str(_valid_identity(tmp_path)),
+            "deploy",
+        ],
+        repo=tmp_path,
+        release_runner=runner,
+        emit=events.append,
+    ) == 0
+    assert "artifact_directory" in events[-1]
+    assert events[-1]["artifact_directory"] is None
+
+
+@pytest.mark.parametrize("invalid", (True, 1, [], {}))
+def test_release_artifact_directory_rejects_non_string(invalid: object):
+    payload = _cloud_release_payload()
+    payload["artifact_directory"] = invalid
+
+    with pytest.raises(
+        dev.DevStackError,
+        match="cloud release response is invalid",
+    ):
+        cli._release_result(0, json.dumps(payload))
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ("target_ci_cd_sha256", "approved_ci_cd_sha256",
+     "target_database_schema_sha256", "approved_database_schema_sha256",
+     "target_compose_sha256", "approved_compose_sha256"),
+)
+def test_release_audit_fields_are_required_in_child_payload(
+    missing_field: str,
+):
+    payload = _cloud_release_payload()
+    del payload[missing_field]
+
+    with pytest.raises(
+        dev.DevStackError,
+        match="cloud release response is invalid",
+    ):
+        cli._release_result(0, json.dumps(payload))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("target_ci_cd_sha256", "A" * 64),
+        ("approved_ci_cd_sha256", True),
+        ("target_ci_cd_sha256", "a" * 63),
+        ("approved_ci_cd_sha256", "g" * 64),
+        ("target_ci_cd_sha256", 1),
+        ("target_database_schema_sha256", "A" * 64),
+        ("approved_database_schema_sha256", "g" * 64),
+        ("approved_database_schema_sha256", False),
+        ("target_compose_sha256", "A" * 64),
+        ("approved_compose_sha256", 1),
+    ),
+)
+def test_release_audit_fields_reject_malformed_ci_digests(
+    field: str,
+    value: object,
+):
+    payload = _cloud_release_payload()
+    payload[field] = value
+
+    with pytest.raises(
+        dev.DevStackError,
+        match="cloud release response is invalid",
+    ):
+        cli._release_result(0, json.dumps(payload))
+
+
+def test_release_audit_fields_still_reject_unknown_child_field():
+    payload = _cloud_release_payload()
+    payload["unknown"] = "value"
+
+    with pytest.raises(
+        dev.DevStackError,
+        match="cloud release response is invalid",
+    ):
+        cli._release_result(0, json.dumps(payload))
+
+
+@pytest.mark.parametrize(
+    ("returncode", "payload", "expected"),
+    (
+        (1, None, 1),
+        (2, {"status": "error", "error_category": "configuration"}, 2),
+        (2, {"status": "error", "error_category": "safety"}, 2),
+        (3, _cloud_release_payload("plan_rejected"), 3),
+        (3, _cloud_release_payload("bootstrap_required"), 1),
+    ),
+)
+def test_cli_deploy_maps_child_exit_codes_by_safe_payload_category(tmp_path: Path, returncode: int, payload: dict[str, object] | None, expected: int):
+    dev.set_target(tmp_path, "cloud")
+    runner = FakeCliRunner(returncode, json.dumps(payload) if payload else "", "secret-stderr")
+    events: list[dict[str, object]] = []
+    assert cli.main(["--host", "dev.example", "--identity", str(_valid_identity(tmp_path)), "deploy"], repo=tmp_path, release_runner=runner, emit=events.append) == expected
+    assert "secret-stderr" not in json.dumps(events)
+
+
+    if returncode == 2:
+        assert events[-1]["status"] == f"{payload['error_category']}_rejected"
+        assert events[-1]["error_category"] == payload["error_category"]
+    if returncode == 3 and payload["status"] == "bootstrap_required":
+        assert events[-1]["bootstrap"]["status"] == "ready"
+
+
+def test_cli_rejects_duplicate_keys_deep_json_and_boolean_numeric_fields():
+    with pytest.raises(dev.DevStackError):
+        cli._parse_child_payload('{"status":"dry_run","status":"submitted"}')
+    with pytest.raises(dev.DevStackError):
+        cli._parse_child_payload("[" * 5000 + "]" * 5000)
+    payload = _cloud_release_payload()
+    payload["remote"]["disk_available_bytes"] = True
+    with pytest.raises(dev.DevStackError):
+        cli._release_result(0, json.dumps(payload))
+
+@pytest.mark.parametrize("kind", ("malformed", "multiple", "oversize", "unknown_field"))
+def test_cli_deploy_rejects_malformed_multiple_or_oversize_child_output(tmp_path: Path, kind: str):
+    stdout = {
+        "malformed": "not-json",
+        "multiple": "{}\n{}",
+        "oversize": "{" + "x" * 70000 + "}",
+        "unknown_field": json.dumps({"status": "dry_run", "token": "secret"}),
+    }[kind]
+    dev.set_target(tmp_path, "cloud")
+    events: list[dict[str, object]] = []
+    assert cli.main(["--host", "dev.example", "--identity", str(_valid_identity(tmp_path)), "deploy"], repo=tmp_path, release_runner=FakeCliRunner(stdout=stdout, stderr="token=secret"), emit=events.append) == 1
+    assert events[-1]["status"] == "failed"
+    assert "secret" not in json.dumps(events)
+
+
+def test_cli_status_marks_local_degraded_and_cloud_healthy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    endpoints = tuple(
+        dev.EndpointStatus(str(index), "https://example.invalid", "healthy", 200)
+        for index in range(5)
+    )
+    local_degraded = dev.StackStatus("local", None, None, None, None, 4, endpoints, ())
+    monkeypatch.setattr(cli, "inspect_local_status", lambda *args: local_degraded)
+    local_events: list[dict[str, object]] = []
+    assert cli.main(["status"], repo=tmp_path, status_runner=object(), emit=local_events.append) == 1
+    assert local_events[-1]["status"] == "degraded"
+
+    dev.set_target(tmp_path, "cloud")
+    cloud_healthy = dev.StackStatus("cloud", "a" * 40, "a" * 40, None, None, 5, endpoints, ())
+    monkeypatch.setattr(cli, "read_root_env", lambda *args: {"TAILNET_FQDN": "dev.ts.net"})
+    monkeypatch.setattr(cli, "inspect_cloud_status", lambda *args: cloud_healthy)
+    cloud_events: list[dict[str, object]] = []
+    assert cli.main(["--host", "dev.example", "--identity", str(_valid_identity(tmp_path)), "status"], repo=tmp_path, status_runner=object(), emit=cloud_events.append) == 0
+    assert cloud_events[-1]["status"] == "ok"
+
+
+def test_endpoint_probe_timeout_fits_the_only_real_access_path():
+    """探测超时要按**唯一的真实访问路径**定：跨境 Tailnet HTTPS，不是局域网。
+
+    2026-08-18 切云当天实测：本机 → 腾讯云单次 2.3–3.1 秒（TLS 握手 + Tailscale 中继），
+    而原值 3.0 秒正好卡在这条时延带上 ⇒ 同一套健康的服务被随机报成 `degraded`
+    （5 个端点里 hmi 与 edge 报 timeout，手工 curl 五个全 200）。
+    > 判据同 RC1：**只有一种真实输入的守卫，阈值要按那个输入定。**
+    """
+    from scripts import dev_stack_lib
+
+    assert dev_stack_lib.ENDPOINT_TIMEOUT_S >= 8.0, (
+        "低于实测时延带就会把健康的云端报成 degraded"
+    )
+    source = (
+        Path(__file__).resolve().parents[2] / "scripts" / "dev_stack_lib.py"
+    ).read_text(encoding="utf-8")
+    assert "timeout_s=ENDPOINT_TIMEOUT_S" in source
+    assert "timeout_s=3.0" not in source, "别把它改回局域网的数"
+
+
+def test_cloud_verify_rejects_a_repo_without_the_stack_websocket_token(
+    tmp_path: Path,
+):
+    """The remote stack runs AUTH_REQUIRED=true, so the probe needs the token.
+
+    Without this the runner is spawned and the missing key only surfaces from
+    inside the child, minutes later, as an opaque child failure.
+    """
+    dev.set_target(tmp_path, "cloud")
+    (tmp_path / ".env").write_text("TAILNET_FQDN=demo.ts.net\n", encoding="utf-8")
+    events: list[dict[str, object]] = []
+    runner = SequenceCliRunner(
+        _command_result(0, _release_verify_stdout()),
+        _command_result(0, ""),
+    )
+
+    rc = cli.main(
+        ["--host", "demo.example", "--identity", str(_valid_identity(tmp_path)),
+         "verify"],
+        repo=tmp_path,
+        release_runner=runner,
+        emit=events.append,
+    )
+
+    assert rc == 2
+    assert events[-1]["status"] == "configuration_rejected"
+    assert runner.calls == []

@@ -1,0 +1,35 @@
+{
+  "notice": "发布副本中仅将历史日志/进程元数据的本机绝对路径替换成通用占位符；实验分数、逐例输出及 archive_250_source 均未改动。",
+  "files": [
+    {
+      "file": "results/expansion_core_tests.txt",
+      "before_sha256": "c0930916c69d372cdde45a175b5172b163678d73725792492f6c9cb837616b93",
+      "after_sha256": "257a64369ccdb1acb3c676e936fa7e2d0ec045e2404453e575b1d0a4e34ac1c5"
+    },
+    {
+      "file": "results/kimi_250_process.json",
+      "before_sha256": "0d2eb15bae0e13a1167456a5f3226a8ceacb4df34204cfeebf4523ba0804855e",
+      "after_sha256": "e3f7458607b7cdcc5ba3f90437f0e769b2dca344427159f19ef84f91589e2d3d"
+    },
+    {
+      "file": "results/unit_tests.txt",
+      "before_sha256": "65ee918a617e7a97d45c191aec541ea7e50671da04c4c470a9c39c67b4f7be91",
+      "after_sha256": "af9034f3e53113ec79b0d9b2cde24e74fd0dfda6a295b9d23bd167ce1334ae06"
+    },
+    {
+      "file": "results/expansion_all_tests.txt",
+      "before_sha256": "60621f78226ced80d649bd1a3ca005241642db9a3dff095ae7b37a931688b9b3",
+      "after_sha256": "6bbd8f98e97890945ffa8d70fd9ef8a0e3bbf41229d534a297348610ee64d01a"
+    },
+    {
+      "file": "results/archive_120/delivery_check.json",
+      "before_sha256": "995763ffa83c4c06d416763e8395b967ffa5ea89e9af311ab6423432b2e20f52",
+      "after_sha256": "2360ceaff185a226315e0a6581ff051be9a2138ddaa37feaab1d52cdd93c784c"
+    },
+    {
+      "file": "results/archive_120/unit_tests.txt",
+      "before_sha256": "65ee918a617e7a97d45c191aec541ea7e50671da04c4c470a9c39c67b4f7be91",
+      "after_sha256": "af9034f3e53113ec79b0d9b2cde24e74fd0dfda6a295b9d23bd167ce1334ae06"
+    }
+  ]
+}

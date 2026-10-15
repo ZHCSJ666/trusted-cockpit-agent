@@ -1,0 +1,685 @@
+{
+  "passed": true,
+  "at": "2026-10-11T17:29:01.308650+00:00",
+  "checks": [
+    "Original typed question executes plan_route with verified government POI and real route",
+    "Pending manual choice does not trap the next navigation request in the same conversation",
+    "Place-first travel question preserves the requested destination",
+    "Vehicle how-to remains a manual question with no vehicle operation",
+    "Compound query leaves pending manual, uses real Kimi and executes both route and weather"
+  ],
+  "count": 5,
+  "model_replies_mocked": false,
+  "provider_results_mocked": false,
+  "browser_input": "typed into assistant",
+  "records": [
+    {
+      "input": "帮我查询一下怎么去杭州市政府",
+      "status": "executed",
+      "message": "已规划到杭州市人民政府的路线，约7.9公里，预计9分钟。不含实时路况。起点使用设置的演示位置：杭州（演示起点，非设备定位），非实时定位。",
+      "calls": [
+        {
+          "tool": "plan_route",
+          "args": {
+            "destination": "杭州市政府"
+          },
+          "status": "executed",
+          "source": "workspace_service"
+        }
+      ],
+      "model": null,
+      "orchestration": {
+        "tier": "T0",
+        "rounds": 0,
+        "tool_count": 1,
+        "max_tools": 8,
+        "max_rounds": 4,
+        "request_id": "workspace-1791739738055735296"
+      },
+      "trace": [
+        {
+          "stage": "input",
+          "status": "ok",
+          "detail": {
+            "text": "帮我查询一下怎么去杭州市政府",
+            "source": "user",
+            "vehicle_source": "simulated"
+          }
+        },
+        {
+          "stage": "schema",
+          "status": "ok",
+          "detail": {
+            "tool": "plan_route",
+            "step": "s1"
+          }
+        },
+        {
+          "stage": "tool_result",
+          "status": "executed",
+          "detail": {
+            "step": "s1",
+            "tool": "plan_route",
+            "message": "已规划到杭州市人民政府的路线，约7.9公里，预计9分钟。不含实时路况。起点使用设置的演示位置：杭州（演示起点，非设备定位），非实时定位。"
+          }
+        }
+      ],
+      "steps": [
+        {
+          "tool": "plan_route",
+          "args": {
+            "destination": "杭州市政府"
+          },
+          "status": "executed"
+        }
+      ],
+      "route": {
+        "origin": {
+          "name": "杭州（演示起点，非设备定位）",
+          "lat": 30.2741,
+          "lon": 120.1551,
+          "simulated": true
+        },
+        "destination": {
+          "id": "node/4426054039",
+          "name": "杭州市人民政府",
+          "lat": 30.2485833,
+          "lon": 120.2059254,
+          "address": "中国 · 浙江省 · 杭州市 · 四季青街道 · 解放东路 · 18",
+          "source_url": "https://www.openstreetmap.org/node/4426054039",
+          "provider": "Photon / OpenStreetMap",
+          "kind": "townhall",
+          "osm_key": "amenity",
+          "fetched_at": "2026-10-11T17:26:11.941660+00:00",
+          "data_mode": "provider_cache",
+          "cache_age_seconds": 166,
+          "distance_m": 5646,
+          "requested_name": "杭州市政府",
+          "query_alias": "杭州市人民政府"
+        },
+        "waypoints": [],
+        "distance_m": 7861.9,
+        "duration_s": 557.5,
+        "provider": "OSRM / OpenStreetMap",
+        "source_url": "https://www.openstreetmap.org/copyright",
+        "fetched_at": "2026-10-11T17:28:58.228717+00:00",
+        "data_mode": "live",
+        "cache_age_seconds": 0,
+        "traffic": "unavailable",
+        "simulated_origin": true,
+        "notice": "公开地图驾驶路线与估算时长，无实时交通、施工或充电空闲数据；只在演示地图展示。",
+        "geometry_points": 137
+      }
+    },
+    {
+      "input": "如何安装儿童座椅",
+      "status": "clarify",
+      "message": "请先选择一份适用的车型、年份和地区手册。",
+      "calls": [
+        {
+          "tool": "search_manual",
+          "args": {
+            "query": "如何安装儿童座椅"
+          },
+          "status": "clarify",
+          "source": "workspace_service"
+        }
+      ],
+      "model": null,
+      "orchestration": {
+        "tier": "T0",
+        "rounds": 0,
+        "tool_count": 1,
+        "max_tools": 8,
+        "max_rounds": 4,
+        "request_id": "workspace-1791739738666687043"
+      },
+      "trace": [
+        {
+          "stage": "input",
+          "status": "ok",
+          "detail": {
+            "text": "如何安装儿童座椅",
+            "source": "user",
+            "vehicle_source": "simulated"
+          }
+        },
+        {
+          "stage": "schema",
+          "status": "ok",
+          "detail": {
+            "tool": "search_manual",
+            "step": "s1"
+          }
+        },
+        {
+          "stage": "tool_result",
+          "status": "clarify",
+          "detail": {
+            "step": "s1",
+            "tool": "search_manual",
+            "message": "请先选择一份适用的车型、年份和地区手册。"
+          }
+        }
+      ],
+      "steps": [
+        {
+          "tool": "search_manual",
+          "args": {
+            "query": "如何安装儿童座椅"
+          },
+          "status": "clarify"
+        }
+      ],
+      "route": {
+        "origin": {
+          "name": "杭州（演示起点，非设备定位）",
+          "lat": 30.2741,
+          "lon": 120.1551,
+          "simulated": true
+        },
+        "destination": {
+          "id": "node/4426054039",
+          "name": "杭州市人民政府",
+          "lat": 30.2485833,
+          "lon": 120.2059254,
+          "address": "中国 · 浙江省 · 杭州市 · 四季青街道 · 解放东路 · 18",
+          "source_url": "https://www.openstreetmap.org/node/4426054039",
+          "provider": "Photon / OpenStreetMap",
+          "kind": "townhall",
+          "osm_key": "amenity",
+          "fetched_at": "2026-10-11T17:26:11.941660+00:00",
+          "data_mode": "provider_cache",
+          "cache_age_seconds": 166,
+          "distance_m": 5646,
+          "requested_name": "杭州市政府",
+          "query_alias": "杭州市人民政府"
+        },
+        "waypoints": [],
+        "distance_m": 7861.9,
+        "duration_s": 557.5,
+        "provider": "OSRM / OpenStreetMap",
+        "source_url": "https://www.openstreetmap.org/copyright",
+        "fetched_at": "2026-10-11T17:28:58.228717+00:00",
+        "data_mode": "live",
+        "cache_age_seconds": 0,
+        "traffic": "unavailable",
+        "simulated_origin": true,
+        "notice": "公开地图驾驶路线与估算时长，无实时交通、施工或充电空闲数据；只在演示地图展示。",
+        "geometry_points": 137
+      }
+    },
+    {
+      "input": "帮我查询一下怎么去杭州市政府",
+      "status": "executed",
+      "message": "已规划到杭州市人民政府的路线，约7.9公里，预计9分钟。不含实时路况。起点使用设置的演示位置：杭州（演示起点，非设备定位），非实时定位。",
+      "calls": [
+        {
+          "tool": "plan_route",
+          "args": {
+            "destination": "杭州市政府"
+          },
+          "status": "executed",
+          "source": "workspace_service"
+        }
+      ],
+      "model": null,
+      "orchestration": {
+        "tier": "T0",
+        "rounds": 0,
+        "tool_count": 1,
+        "max_tools": 8,
+        "max_rounds": 4,
+        "request_id": "workspace-1791739738765344560"
+      },
+      "trace": [
+        {
+          "stage": "input",
+          "status": "ok",
+          "detail": {
+            "text": "帮我查询一下怎么去杭州市政府",
+            "source": "user",
+            "vehicle_source": "simulated"
+          }
+        },
+        {
+          "stage": "schema",
+          "status": "ok",
+          "detail": {
+            "tool": "plan_route",
+            "step": "s1"
+          }
+        },
+        {
+          "stage": "tool_result",
+          "status": "executed",
+          "detail": {
+            "step": "s1",
+            "tool": "plan_route",
+            "message": "已规划到杭州市人民政府的路线，约7.9公里，预计9分钟。不含实时路况。起点使用设置的演示位置：杭州（演示起点，非设备定位），非实时定位。"
+          }
+        }
+      ],
+      "steps": [
+        {
+          "tool": "plan_route",
+          "args": {
+            "destination": "杭州市政府"
+          },
+          "status": "executed"
+        }
+      ],
+      "route": {
+        "origin": {
+          "name": "杭州（演示起点，非设备定位）",
+          "lat": 30.2741,
+          "lon": 120.1551,
+          "simulated": true
+        },
+        "destination": {
+          "id": "node/4426054039",
+          "name": "杭州市人民政府",
+          "lat": 30.2485833,
+          "lon": 120.2059254,
+          "address": "中国 · 浙江省 · 杭州市 · 四季青街道 · 解放东路 · 18",
+          "source_url": "https://www.openstreetmap.org/node/4426054039",
+          "provider": "Photon / OpenStreetMap",
+          "kind": "townhall",
+          "osm_key": "amenity",
+          "fetched_at": "2026-10-11T17:26:11.941660+00:00",
+          "data_mode": "provider_cache",
+          "cache_age_seconds": 167,
+          "distance_m": 5646,
+          "requested_name": "杭州市政府",
+          "query_alias": "杭州市人民政府"
+        },
+        "waypoints": [],
+        "distance_m": 7861.9,
+        "duration_s": 557.5,
+        "provider": "OSRM / OpenStreetMap",
+        "source_url": "https://www.openstreetmap.org/copyright",
+        "fetched_at": "2026-10-11T17:28:58.226479+00:00",
+        "data_mode": "provider_cache",
+        "cache_age_seconds": 1,
+        "traffic": "unavailable",
+        "simulated_origin": true,
+        "notice": "公开地图驾驶路线与估算时长，无实时交通、施工或充电空闲数据；只在演示地图展示。",
+        "geometry_points": 137
+      }
+    },
+    {
+      "input": "杭州市政府怎么走？",
+      "status": "executed",
+      "message": "已规划到杭州市人民政府的路线，约7.9公里，预计9分钟。不含实时路况。起点使用设置的演示位置：杭州（演示起点，非设备定位），非实时定位。",
+      "calls": [
+        {
+          "tool": "plan_route",
+          "args": {
+            "destination": "杭州市政府"
+          },
+          "status": "executed",
+          "source": "workspace_service"
+        }
+      ],
+      "model": null,
+      "orchestration": {
+        "tier": "T0",
+        "rounds": 0,
+        "tool_count": 1,
+        "max_tools": 8,
+        "max_rounds": 4,
+        "request_id": "workspace-1791739738862556972"
+      },
+      "trace": [
+        {
+          "stage": "input",
+          "status": "ok",
+          "detail": {
+            "text": "杭州市政府怎么走？",
+            "source": "user",
+            "vehicle_source": "simulated"
+          }
+        },
+        {
+          "stage": "schema",
+          "status": "ok",
+          "detail": {
+            "tool": "plan_route",
+            "step": "s1"
+          }
+        },
+        {
+          "stage": "tool_result",
+          "status": "executed",
+          "detail": {
+            "step": "s1",
+            "tool": "plan_route",
+            "message": "已规划到杭州市人民政府的路线，约7.9公里，预计9分钟。不含实时路况。起点使用设置的演示位置：杭州（演示起点，非设备定位），非实时定位。"
+          }
+        }
+      ],
+      "steps": [
+        {
+          "tool": "plan_route",
+          "args": {
+            "destination": "杭州市政府"
+          },
+          "status": "executed"
+        }
+      ],
+      "route": {
+        "origin": {
+          "name": "杭州（演示起点，非设备定位）",
+          "lat": 30.2741,
+          "lon": 120.1551,
+          "simulated": true
+        },
+        "destination": {
+          "id": "node/4426054039",
+          "name": "杭州市人民政府",
+          "lat": 30.2485833,
+          "lon": 120.2059254,
+          "address": "中国 · 浙江省 · 杭州市 · 四季青街道 · 解放东路 · 18",
+          "source_url": "https://www.openstreetmap.org/node/4426054039",
+          "provider": "Photon / OpenStreetMap",
+          "kind": "townhall",
+          "osm_key": "amenity",
+          "fetched_at": "2026-10-11T17:26:11.941660+00:00",
+          "data_mode": "provider_cache",
+          "cache_age_seconds": 167,
+          "distance_m": 5646,
+          "requested_name": "杭州市政府",
+          "query_alias": "杭州市人民政府"
+        },
+        "waypoints": [],
+        "distance_m": 7861.9,
+        "duration_s": 557.5,
+        "provider": "OSRM / OpenStreetMap",
+        "source_url": "https://www.openstreetmap.org/copyright",
+        "fetched_at": "2026-10-11T17:28:58.226479+00:00",
+        "data_mode": "provider_cache",
+        "cache_age_seconds": 1,
+        "traffic": "unavailable",
+        "simulated_origin": true,
+        "notice": "公开地图驾驶路线与估算时长，无实时交通、施工或充电空闲数据；只在演示地图展示。",
+        "geometry_points": 137
+      }
+    },
+    {
+      "input": "怎么去除车窗雾气",
+      "status": "clarify",
+      "message": "请先选择一份适用的车型、年份和地区手册。",
+      "calls": [
+        {
+          "tool": "search_manual",
+          "args": {
+            "query": "怎么去除车窗雾气"
+          },
+          "status": "clarify",
+          "source": "workspace_service"
+        }
+      ],
+      "model": null,
+      "orchestration": {
+        "tier": "T0",
+        "rounds": 0,
+        "tool_count": 1,
+        "max_tools": 8,
+        "max_rounds": 4,
+        "request_id": "workspace-1791739738962926660"
+      },
+      "trace": [
+        {
+          "stage": "input",
+          "status": "ok",
+          "detail": {
+            "text": "怎么去除车窗雾气",
+            "source": "user",
+            "vehicle_source": "simulated"
+          }
+        },
+        {
+          "stage": "schema",
+          "status": "ok",
+          "detail": {
+            "tool": "search_manual",
+            "step": "s1"
+          }
+        },
+        {
+          "stage": "tool_result",
+          "status": "clarify",
+          "detail": {
+            "step": "s1",
+            "tool": "search_manual",
+            "message": "请先选择一份适用的车型、年份和地区手册。"
+          }
+        }
+      ],
+      "steps": [
+        {
+          "tool": "search_manual",
+          "args": {
+            "query": "怎么去除车窗雾气"
+          },
+          "status": "clarify"
+        }
+      ],
+      "route": {
+        "origin": {
+          "name": "杭州（演示起点，非设备定位）",
+          "lat": 30.2741,
+          "lon": 120.1551,
+          "simulated": true
+        },
+        "destination": {
+          "id": "node/4426054039",
+          "name": "杭州市人民政府",
+          "lat": 30.2485833,
+          "lon": 120.2059254,
+          "address": "中国 · 浙江省 · 杭州市 · 四季青街道 · 解放东路 · 18",
+          "source_url": "https://www.openstreetmap.org/node/4426054039",
+          "provider": "Photon / OpenStreetMap",
+          "kind": "townhall",
+          "osm_key": "amenity",
+          "fetched_at": "2026-10-11T17:26:11.941660+00:00",
+          "data_mode": "provider_cache",
+          "cache_age_seconds": 167,
+          "distance_m": 5646,
+          "requested_name": "杭州市政府",
+          "query_alias": "杭州市人民政府"
+        },
+        "waypoints": [],
+        "distance_m": 7861.9,
+        "duration_s": 557.5,
+        "provider": "OSRM / OpenStreetMap",
+        "source_url": "https://www.openstreetmap.org/copyright",
+        "fetched_at": "2026-10-11T17:28:58.226479+00:00",
+        "data_mode": "provider_cache",
+        "cache_age_seconds": 1,
+        "traffic": "unavailable",
+        "simulated_origin": true,
+        "notice": "公开地图驾驶路线与估算时长，无实时交通、施工或充电空闲数据；只在演示地图展示。",
+        "geometry_points": 137
+      }
+    },
+    {
+      "input": "帮我查询一下怎么去杭州市政府，然后查杭州天气",
+      "status": "executed",
+      "message": "已规划到杭州市人民政府的路线，约7.9公里，预计9分钟。不含实时路况。起点使用设置的演示位置：杭州（演示起点，非设备定位），非实时定位。\n\n杭州：晴，18.6℃，体感20.6℃。数据时间 2026-10-12T01:15（Asia/Shanghai）。",
+      "calls": [
+        {
+          "tool": "plan_route",
+          "args": {
+            "destination": "杭州市政府"
+          },
+          "status": "executed",
+          "source": "workspace_service"
+        },
+        {
+          "tool": "get_weather",
+          "args": {
+            "location": "杭州",
+            "days": 1
+          },
+          "status": "answered",
+          "source": "workspace_service"
+        }
+      ],
+      "model": {
+        "model": "moonshotai/Kimi-K3",
+        "usage": {
+          "prompt_tokens": 10534,
+          "completion_tokens": 84,
+          "total_tokens": 10618
+        },
+        "latency_ms": 660.2,
+        "finish_reason": "stop"
+      },
+      "orchestration": {
+        "tier": "T2",
+        "rounds": 2,
+        "tool_count": 2,
+        "max_tools": 8,
+        "max_rounds": 4,
+        "request_id": "workspace-1791739739062507137"
+      },
+      "trace": [
+        {
+          "stage": "input",
+          "status": "ok",
+          "detail": {
+            "text": "帮我查询一下怎么去杭州市政府，然后查杭州天气",
+            "source": "user",
+            "vehicle_source": "simulated"
+          }
+        },
+        {
+          "stage": "planner",
+          "status": "ok",
+          "detail": {
+            "round": 1,
+            "tier": "T1",
+            "model": "moonshotai/Kimi-K3",
+            "usage": {
+              "prompt_tokens": 7785,
+              "completion_tokens": 189,
+              "total_tokens": 7974
+            },
+            "latency_ms": 1338.7,
+            "finish_reason": "tool_calls"
+          }
+        },
+        {
+          "stage": "schema",
+          "status": "ok",
+          "detail": {
+            "tool": "plan_route",
+            "step": "s1"
+          }
+        },
+        {
+          "stage": "tool_result",
+          "status": "executed",
+          "detail": {
+            "step": "s1",
+            "tool": "plan_route",
+            "message": "已规划到杭州市人民政府的路线，约7.9公里，预计9分钟。不含实时路况。起点使用设置的演示位置：杭州（演示起点，非设备定位），非实时定位。"
+          }
+        },
+        {
+          "stage": "schema",
+          "status": "ok",
+          "detail": {
+            "tool": "get_weather",
+            "step": "s2"
+          }
+        },
+        {
+          "stage": "tool_result",
+          "status": "answered",
+          "detail": {
+            "step": "s2",
+            "tool": "get_weather",
+            "message": "杭州：晴，18.6℃，体感20.6℃。数据时间 2026-10-12T01:15（Asia/Shanghai）。"
+          }
+        },
+        {
+          "stage": "planner",
+          "status": "ok",
+          "detail": {
+            "round": 2,
+            "tier": "T2",
+            "model": "moonshotai/Kimi-K3",
+            "usage": {
+              "prompt_tokens": 10534,
+              "completion_tokens": 84,
+              "total_tokens": 10618
+            },
+            "latency_ms": 660.2,
+            "finish_reason": "stop"
+          }
+        },
+        {
+          "stage": "grounding",
+          "status": "ok",
+          "detail": "最终答复只由工具结果生成，未采用模型的成功断言。"
+        }
+      ],
+      "steps": [
+        {
+          "tool": "plan_route",
+          "args": {
+            "destination": "杭州市政府"
+          },
+          "status": "executed"
+        },
+        {
+          "tool": "get_weather",
+          "args": {
+            "location": "杭州",
+            "days": 1
+          },
+          "status": "answered"
+        }
+      ],
+      "route": {
+        "origin": {
+          "name": "杭州（演示起点，非设备定位）",
+          "lat": 30.2741,
+          "lon": 120.1551,
+          "simulated": true
+        },
+        "destination": {
+          "id": "node/4426054039",
+          "name": "杭州市人民政府",
+          "lat": 30.2485833,
+          "lon": 120.2059254,
+          "address": "中国 · 浙江省 · 杭州市 · 四季青街道 · 解放东路 · 18",
+          "source_url": "https://www.openstreetmap.org/node/4426054039",
+          "provider": "Photon / OpenStreetMap",
+          "kind": "townhall",
+          "osm_key": "amenity",
+          "fetched_at": "2026-10-11T17:26:11.941660+00:00",
+          "data_mode": "provider_cache",
+          "cache_age_seconds": 168,
+          "distance_m": 5646,
+          "requested_name": "杭州市政府",
+          "query_alias": "杭州市人民政府"
+        },
+        "waypoints": [],
+        "distance_m": 7861.9,
+        "duration_s": 557.5,
+        "provider": "OSRM / OpenStreetMap",
+        "source_url": "https://www.openstreetmap.org/copyright",
+        "fetched_at": "2026-10-11T17:28:58.226479+00:00",
+        "data_mode": "provider_cache",
+        "cache_age_seconds": 2,
+        "traffic": "unavailable",
+        "simulated_origin": true,
+        "notice": "公开地图驾驶路线与估算时长，无实时交通、施工或充电空闲数据；只在演示地图展示。",
+        "geometry_points": 137
+      }
+    }
+  ]
+}

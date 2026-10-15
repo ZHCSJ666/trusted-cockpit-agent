@@ -1,0 +1,19 @@
+{
+  "passed": 11,
+  "checks": [
+    "target_window_changed_and_rear_unchanged",
+    "ambiguity_no_action",
+    "confirmation_commits_simulated_action",
+    "driving_door_blocked",
+    "wrong_target_detected_not_false_success",
+    "premium_capability_enabled",
+    "standard_capability_absent",
+    "manual_conditional_warning_with_evidence",
+    "manual_search",
+    "report_loaded",
+    "390px_no_horizontal_overflow"
+  ],
+  "page_errors": [],
+  "network": "real local API, no mocking",
+  "voice": "browser UI only; no real microphone/audio device validation"
+}

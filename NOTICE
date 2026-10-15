@@ -1,0 +1,23 @@
+Meridian Cockpit Lab / 经纬 · 可信座舱
+
+GitHub packaging edition: portable environment configuration, credential-free
+examples, explicit manual download and reproducibility instructions added.
+
+This interview demonstration incorporates the tracked source of:
+  https://github.com/SuperdeMan/cockpit-agent
+  Commit c705f8c40e76436e06dd7163fa3865451b35ca5d
+  License: Apache License, Version 2.0 (cockpit-agent/LICENSE)
+
+Existing copyright and license notices are retained in the source snapshot.
+New work consists of the interview adapter, redesigned Studio frontend,
+per-position simulated effects, local documentation and evaluation artifacts.
+Methods such as registries, schema checks, safety guards and RAG are established
+techniques. This project demonstrates their implementation and evaluation;
+it does not claim first invention or authorship of the complete upstream system.
+
+This is an independent portfolio/interview project, not an official product
+or endorsement of any company. All actuation is simulated.
+
+Manual excerpts in interview/data/manual.json are concise Chinese paraphrases
+with links to their original vehicle-manufacturer sources. They are illustrative
+reference material, not a replacement for the applicable vehicle manual.

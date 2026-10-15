@@ -1,0 +1,174 @@
+version: 1
+split: regression
+note: >-
+  v2 核心旅程冻结清单（docs/design/2026-10-09-v2-core-journey-freeze.md）。只登记引用与分类：旅程内容在 source 指向的文件里
+  （相对 test/），这里不复制。lane：read_only = 只读零执行；synthetic_writes / simulated_vehicle 要显式开关与授权（设计 §4），
+  缺省不跑。family 见设计 §3（F01–F12）。safety: must_pass 进安全必过集。known_red 写原因，照跑照报。
+journeys:
+  # ── F01 手册问答 ──────────────────────────────────────────────
+  - {id: V209, source: eval_corpus/v2_runtime/seed.yaml, family: F01, lane: read_only}
+  - {id: V210, source: eval_corpus/v2_runtime/seed.yaml, family: F01, lane: read_only}
+  - {id: V211, source: eval_corpus/v2_runtime/seed.yaml, family: F01, lane: read_only}
+  - {id: V212, source: eval_corpus/v2_runtime/seed.yaml, family: F01, lane: read_only}
+  - {id: V213, source: eval_corpus/v2_runtime/seed.yaml, family: F01, lane: read_only}
+  - {id: V214, source: eval_corpus/v2_runtime/seed.yaml, family: F01, lane: read_only}
+  - {id: V215, source: eval_corpus/v2_runtime/seed.yaml, family: F01, lane: read_only}
+  - {id: V216, source: eval_corpus/v2_runtime/seed.yaml, family: F01, lane: read_only}
+  - {id: V218, source: eval_corpus/v2_runtime/seed.yaml, family: F01, lane: read_only}
+  - {id: V219, source: eval_corpus/v2_runtime/seed.yaml, family: F01, lane: read_only}
+  - {id: V220, source: eval_corpus/v2_runtime/seed.yaml, family: F01, lane: read_only}
+  - {id: MSE01, source: eval_corpus/v2_runtime/manual_source_evidence.yaml, family: F01, lane: read_only}
+  - {id: MSE02, source: eval_corpus/v2_runtime/manual_source_evidence.yaml, family: F01, lane: read_only}
+  - {id: MSE03, source: eval_corpus/v2_runtime/manual_source_evidence.yaml, family: F01, lane: read_only}
+  - {id: MSE04, source: eval_corpus/v2_runtime/manual_source_evidence.yaml, family: F01, lane: read_only}
+  - {id: MSE05, source: eval_corpus/v2_runtime/manual_source_evidence.yaml, family: F01, lane: read_only}
+  - {id: MSE06, source: eval_corpus/v2_runtime/manual_source_evidence.yaml, family: F01, lane: read_only}
+  - {id: MSV01, source: eval_corpus/v2_runtime/manual_source_visual.yaml, family: F01, lane: read_only}
+  - {id: MSV02, source: eval_corpus/v2_runtime/manual_source_visual.yaml, family: F01, lane: read_only}
+  # ── F02 挂起不丢答案（只读：从不确认，收尾取消）──────────────────
+  - {id: V201, source: eval_corpus/v2_runtime/seed.yaml, family: F02, lane: read_only}
+  - {id: V202, source: eval_corpus/v2_runtime/seed.yaml, family: F02, lane: read_only}
+  - {id: V203, source: eval_corpus/v2_runtime/seed.yaml, family: F02, lane: read_only}
+  - {id: V204, source: eval_corpus/v2_runtime/seed.yaml, family: F02, lane: read_only}
+  - {id: V205, source: eval_corpus/v2_runtime/seed.yaml, family: F02, lane: read_only}
+  # ── F03 问句与否定不执行 ────────────────────────────────────────
+  - {id: V206, source: eval_corpus/v2_runtime/seed.yaml, family: F03, lane: read_only, safety: must_pass}
+  - {id: V207, source: eval_corpus/v2_runtime/seed.yaml, family: F03, lane: read_only}
+  - {id: V208, source: eval_corpus/v2_runtime/seed.yaml, family: F03, lane: read_only}
+  # ── F08 信息 ────────────────────────────────────────────────────
+  - {id: V217, source: eval_corpus/v2_runtime/seed.yaml, family: F08, lane: read_only}
+  - {id: B1-4, source: journeys/regression_b.yaml, family: F08, lane: read_only}
+  - {id: B3-4, source: journeys/regression_b.yaml, family: F08, lane: read_only}
+  - {id: A3-1, source: journeys/regression_a.yaml, family: F08, lane: read_only}
+  - {id: A3-2, source: journeys/regression_a.yaml, family: F08, lane: read_only}
+  - {id: A5-2, source: journeys/regression_a.yaml, family: F08, lane: read_only}
+  - {id: A1-5, source: journeys/regression_a.yaml, family: F08, lane: read_only}
+  - {id: A3-3, source: journeys/target_a.yaml, family: F08, lane: read_only}
+  # ── F09 周边 ────────────────────────────────────────────────────
+  # 周边 / 停车 Agent 按整个 Agent 要求 payment.invoke（只为预留的下单桩）：只读旅程按条补这一项（只读车道从不确认）
+  - {id: B5-2, source: journeys/target_b.yaml, family: F09, lane: read_only, scopes_extra: [payment.invoke]}
+  - {id: NB01, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F09, lane: read_only, scopes_extra: [payment.invoke]}
+  - {id: NB02, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F09, lane: read_only, scopes_extra: [payment.invoke]}
+  - {id: NB03, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F09, lane: read_only, scopes_extra: [payment.invoke]}
+  - {id: NB04, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F09, lane: read_only, scopes_extra: [payment.invoke]}
+  - {id: NB05, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F09, lane: read_only, scopes_extra: [payment.invoke]}
+  # ── F06 导航：估算只读（冻结 P2，2026-10-10；本地目的地探针的案例表搬进语料）─────────
+  - {id: NV01, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F06, lane: read_only}
+  - {id: NV02, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F06, lane: read_only}
+  - {id: NV03, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F06, lane: read_only}
+  - {id: NV04, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F06, lane: read_only}
+  - {id: NV05, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F06, lane: read_only}
+  - {id: NV06, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F06, lane: read_only}
+  - {id: NV07, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F06, lane: read_only}
+  - {id: NV08, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F06, lane: read_only}
+  - {id: NV09, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F06, lane: read_only}
+  - {id: NV10, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F06, lane: read_only}
+  - {id: NV11, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F06, lane: read_only}
+  - {id: NV12, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F06, lane: read_only}
+  - {id: NV13, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F06, lane: read_only}
+  - {id: NV14, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F06, lane: read_only}
+  - {id: NV15, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F06, lane: read_only}
+  - {id: NV16, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F06, lane: read_only}
+  - {id: NV17, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F06, lane: read_only}
+  - {id: NV18, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F06, lane: read_only}
+  - {id: NV19, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F06, lane: read_only}
+  - {id: NV20, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F06, lane: read_only}
+  - {id: NV21, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F06, lane: read_only}
+  - {id: NV22, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F06, lane: read_only}
+  - {id: NV27, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F06, lane: read_only, scopes_extra: [payment.invoke]}
+  - {id: NV23, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F06, lane: read_only}
+  - {id: NV24, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F06, lane: read_only}
+  - {id: NV25, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F06, lane: read_only}
+  - {id: NV26, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F06, lane: read_only}
+  # ── F07 能源：找站、无路线换站、续航提醒（只读）──────────────────────
+  - {id: EN01, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F07, lane: read_only}
+  - {id: EN02, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F07, lane: read_only}
+  - {id: EN03, source: eval_corpus/v2_runtime/core/f06_f07_f09_maps.yaml, family: F07, lane: read_only}
+  # ── P1（2026-10-09）：只读、不依赖地图的家族补齐 ─────────────────────
+  # F01 手册问答
+  - {id: M01, source: eval_corpus/v2_runtime/core/f01_f08.yaml, family: F01, lane: read_only}
+  - {id: M02, source: eval_corpus/v2_runtime/core/f01_f08.yaml, family: F01, lane: read_only}
+  - {id: M03, source: eval_corpus/v2_runtime/core/f01_f08.yaml, family: F01, lane: read_only}
+  - {id: M04, source: eval_corpus/v2_runtime/core/f01_f08.yaml, family: F01, lane: read_only}
+  - {id: M05, source: eval_corpus/v2_runtime/core/f01_f08.yaml, family: F01, lane: read_only}
+  - {id: M06, source: eval_corpus/v2_runtime/core/f01_f08.yaml, family: F01, lane: read_only}
+  - {id: M07, source: eval_corpus/v2_runtime/core/f01_f08.yaml, family: F01, lane: read_only}
+  - {id: M08, source: eval_corpus/v2_runtime/core/f01_f08.yaml, family: F01, lane: read_only}
+  - {id: M09, source: eval_corpus/v2_runtime/core/f01_f08.yaml, family: F01, lane: read_only}
+  - {id: M10, source: eval_corpus/v2_runtime/core/f01_f08.yaml, family: F01, lane: read_only}
+  - {id: M11, source: eval_corpus/v2_runtime/core/f01_f08.yaml, family: F01, lane: read_only}
+  # F02 挂起不丢答案
+  - {id: P01, source: eval_corpus/v2_runtime/core/f02_f03.yaml, family: F02, lane: read_only}
+  - {id: P02, source: eval_corpus/v2_runtime/core/f02_f03.yaml, family: F02, lane: read_only}
+  - {id: P03, source: eval_corpus/v2_runtime/core/f02_f03.yaml, family: F02, lane: read_only}
+  - {id: P04, source: eval_corpus/v2_runtime/core/f02_f03.yaml, family: F02, lane: read_only}
+  - {id: P05, source: eval_corpus/v2_runtime/core/f02_f03.yaml, family: F02, lane: read_only}
+  - {id: P06, source: eval_corpus/v2_runtime/core/f02_f03.yaml, family: F02, lane: read_only,
+     known_red: "工具一侧已修（7035ef68：ff9bce82 上派到 datetime.parse 的 3/3 都答对日期）；剩下的是规划器把「顺便告诉我今天几号」误派给 info.weather（2/5）。不改工具描述：会把「明天几号 / 下周三是几号」也引到只会答当下的工具"}
+  - {id: P07, source: eval_corpus/v2_runtime/core/f02_f03.yaml, family: F02, lane: read_only, safety: must_pass}
+  - {id: P08, source: eval_corpus/v2_runtime/core/f02_f03.yaml, family: F02, lane: read_only, safety: must_pass}
+  - {id: P09, source: eval_corpus/v2_runtime/core/f02_f03.yaml, family: F02, lane: read_only}
+  - {id: P10, source: eval_corpus/v2_runtime/core/f02_f03.yaml, family: F02, lane: read_only, safety: must_pass}
+  - {id: P14, source: eval_corpus/v2_runtime/core/f02_f03.yaml, family: F02, lane: read_only}
+  - {id: P13, source: eval_corpus/v2_runtime/core/f02_f03.yaml, family: F02, lane: read_only,
+     known_red: "执行审计只列已执行的动作，不提在等确认的「打开油箱盖」（答「这次对话里我还没有执行过任何操作」：真话但没答到问的事）；产品缺口"}
+  - {id: P11, source: eval_corpus/v2_runtime/core/f02_f03.yaml, family: F02, lane: read_only, safety: must_pass}
+  - {id: P12, source: eval_corpus/v2_runtime/core/f02_f03.yaml, family: F02, lane: read_only, safety: must_pass}
+  # F03 问句与否定不执行（全部安全必过）
+  - {id: Q01, source: eval_corpus/v2_runtime/core/f02_f03.yaml, family: F03, lane: read_only, safety: must_pass}
+  - {id: Q02, source: eval_corpus/v2_runtime/core/f02_f03.yaml, family: F03, lane: read_only, safety: must_pass}
+  - {id: Q03, source: eval_corpus/v2_runtime/core/f02_f03.yaml, family: F03, lane: read_only, safety: must_pass}
+  - {id: Q04, source: eval_corpus/v2_runtime/core/f02_f03.yaml, family: F03, lane: read_only, safety: must_pass}
+  - {id: Q05, source: eval_corpus/v2_runtime/core/f02_f03.yaml, family: F03, lane: read_only, safety: must_pass}
+  - {id: Q06, source: eval_corpus/v2_runtime/core/f02_f03.yaml, family: F03, lane: read_only, safety: must_pass}
+  - {id: Q07, source: eval_corpus/v2_runtime/core/f02_f03.yaml, family: F03, lane: read_only, safety: must_pass}
+  - {id: Q08, source: eval_corpus/v2_runtime/core/f02_f03.yaml, family: F03, lane: read_only, safety: must_pass}
+  - {id: Q09, source: eval_corpus/v2_runtime/core/f02_f03.yaml, family: F03, lane: read_only, safety: must_pass}
+  # F08 信息
+  - {id: I01, source: eval_corpus/v2_runtime/core/f01_f08.yaml, family: F08, lane: read_only}
+  - {id: I02, source: eval_corpus/v2_runtime/core/f01_f08.yaml, family: F08, lane: read_only}
+  - {id: I03, source: eval_corpus/v2_runtime/core/f01_f08.yaml, family: F08, lane: read_only}
+  - {id: I04, source: eval_corpus/v2_runtime/core/f01_f08.yaml, family: F08, lane: read_only}
+  - {id: I05, source: eval_corpus/v2_runtime/core/f01_f08.yaml, family: F08, lane: read_only}
+  - {id: I06, source: eval_corpus/v2_runtime/core/f01_f08.yaml, family: F08, lane: read_only}
+  - {id: I07, source: eval_corpus/v2_runtime/core/f01_f08.yaml, family: F08, lane: read_only}
+  # F12 受话与拒识（语音来源）
+  - {id: R01, source: eval_corpus/v2_runtime/core/f12_addressing.yaml, family: F12, lane: read_only}
+  - {id: R02, source: eval_corpus/v2_runtime/core/f12_addressing.yaml, family: F12, lane: read_only,
+     known_red: "乘客转述与用户向助手转述在文本上分不出，归声学（QA 交接 §5、2026-09-11 逐条核实）"}
+  - {id: R03, source: eval_corpus/v2_runtime/core/f12_addressing.yaml, family: F12, lane: read_only,
+     known_red: "电话开场「喂，听得到吗」与对助手试麦在文本上分不清，归声学（同 R02）"}
+  - {id: R04, source: eval_corpus/v2_runtime/core/f12_addressing.yaml, family: F12, lane: read_only}
+  - {id: R05, source: eval_corpus/v2_runtime/core/f12_addressing.yaml, family: F12, lane: read_only,
+     known_red: "公交报站没有确定性语域证据（不加报站词：用户也说「下一站去哪」），规划器判受话派了 trip.navigate；拒识语料写明负例拦截率只入基线、拿不准算受话"}
+  - {id: R06, source: eval_corpus/v2_runtime/core/f12_addressing.yaml, family: F12, lane: read_only,
+     known_red: "回声风格命中播报语域，但规划器首轮给了闲聊；云侧确定性拒识只在两轮空手时生效（防误拒「主持人 / 为大家 / 据了解」开头的闲聊问句；90 天真实流量语域命中为零，量不出扩规则的收益与误伤）"}
+  - {id: R07, source: eval_corpus/v2_runtime/core/f12_addressing.yaml, family: F12, lane: read_only}
+  - {id: R08, source: eval_corpus/v2_runtime/core/f12_addressing.yaml, family: F12, lane: read_only}
+  # P3 写车道首批（§12，用户 2026-10-09 长期授权）：先跑通机制，再补 F04 / F05 / F10 / F11 配额
+  - {id: K01, source: eval_corpus/v2_runtime/core/writes_p3.yaml, family: F05, lane: simulated_vehicle}
+  - {id: C01, source: eval_corpus/v2_runtime/core/writes_p3.yaml, family: F04, lane: simulated_vehicle}
+  - {id: C02, source: eval_corpus/v2_runtime/core/writes_p3.yaml, family: F04, lane: simulated_vehicle}
+  - {id: N01, source: eval_corpus/v2_runtime/core/writes_p3.yaml, family: F10, lane: synthetic_writes}
+  - {id: E01, source: eval_corpus/v2_runtime/core/writes_p3.yaml, family: F11, lane: synthetic_writes}
+  # P3 第二批（2026-10-10）
+  - {id: C03, source: eval_corpus/v2_runtime/core/writes_p3.yaml, family: F04, lane: simulated_vehicle}
+  - {id: C04, source: eval_corpus/v2_runtime/core/writes_p3.yaml, family: F04, lane: simulated_vehicle}
+  - {id: C05, source: eval_corpus/v2_runtime/core/writes_p3.yaml, family: F04, lane: simulated_vehicle}
+  - {id: C06, source: eval_corpus/v2_runtime/core/writes_p3.yaml, family: F04, lane: simulated_vehicle}
+  - {id: C07, source: eval_corpus/v2_runtime/core/writes_p3.yaml, family: F04, lane: simulated_vehicle}
+  - {id: C08, source: eval_corpus/v2_runtime/core/writes_p3.yaml, family: F04, lane: simulated_vehicle}
+  - {id: C09, source: eval_corpus/v2_runtime/core/writes_p3.yaml, family: F04, lane: simulated_vehicle}
+  - {id: C10, source: eval_corpus/v2_runtime/core/writes_p3.yaml, family: F04, lane: simulated_vehicle}
+  - {id: C11, source: eval_corpus/v2_runtime/core/writes_p3.yaml, family: F04, lane: simulated_vehicle}
+  - {id: C12, source: eval_corpus/v2_runtime/core/writes_p3.yaml, family: F04, lane: simulated_vehicle}
+  - {id: C13, source: eval_corpus/v2_runtime/core/writes_p3.yaml, family: F04, lane: simulated_vehicle}
+  - {id: C14, source: eval_corpus/v2_runtime/core/writes_p3.yaml, family: F04, lane: simulated_vehicle}
+  - {id: C15, source: eval_corpus/v2_runtime/core/writes_p3.yaml, family: F04, lane: simulated_vehicle}
+  - {id: C16, source: eval_corpus/v2_runtime/core/writes_p3.yaml, family: F04, lane: simulated_vehicle}
+  - {id: C17, source: eval_corpus/v2_runtime/core/writes_p3.yaml, family: F04, lane: simulated_vehicle}
+  - {id: C18, source: eval_corpus/v2_runtime/core/writes_p3.yaml, family: F04, lane: simulated_vehicle, safety: must_pass}
+  - {id: C19, source: eval_corpus/v2_runtime/core/writes_p3.yaml, family: F04, lane: simulated_vehicle, safety: must_pass}
+  - {id: K02, source: eval_corpus/v2_runtime/core/writes_p3.yaml, family: F05, lane: simulated_vehicle}
+  - {id: N02, source: eval_corpus/v2_runtime/core/writes_p3.yaml, family: F10, lane: synthetic_writes}
+  - {id: E02, source: eval_corpus/v2_runtime/core/writes_p3.yaml, family: F11, lane: synthetic_writes}

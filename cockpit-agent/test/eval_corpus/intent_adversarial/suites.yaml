@@ -1,0 +1,161 @@
+schema_version: 1
+# 上限 520 而不是设计文档写的 500：设计 §9.4 明确「数字用于估算工作量，不替代覆盖
+# 矩阵」。云侧 129 个 active intent 里逐个补齐 2 正例 + 2 硬负例 + 1 对照后落在 516 条，
+# 为了压回 500 去删掉能证明边界的用例是本末倒置。落地记录里记了这笔偏差。
+# 2026-08-02 再放到 540：同一条理由的第二次适用——泓舟新裁定了两条跨域边界
+# （nearby-navigation.find-vs-go / manual-vision.described-light-vs-unknown-light），
+# 台账契约要求每条**双向各 2 例**，机械地就是 +8。**边界裁定的对照用例是台账的兑现物，
+# 不是可裁的冗余**；上限该跟着裁定数走，不是反过来。
+# 2026-08-11 放到 560：同一条理由的第三次适用——真实商户 MCP 双域接入（麦当劳/瑞幸
+# v1 只读激活，真机 tools/list 核实）带来 3 个新 active intent（正2/硬负2/对照1 +
+# 各 1 条 relation invariant）与 2 条新边界裁定（luckin-shop 品牌 vs demo、
+# mcd-nearby 品牌菜单 vs 周边发现；双向各 2 例=+8）。合计 +18 唯一输入（553），
+# 全部是能力面实质扩张的兑现物。
+# 2026-08-12 复合下单激活后再 +7：保留并翻转两条「未接入」原 case id，另补
+# mcd.order / luckin.order 各一条独立正例和一条 relation 对照，luckin.order_cancel
+# 补两条正例和一条 relation 对照。翻转不增输入，新增恰好 7，distinct_inputs=560；
+# 没有删旧尺子压数字，现上界恰好用满。
+# 2026-08-13 放到 564：同一条理由的第四次适用——新增 active intent `luckin.menu`
+# （真实门店只读菜单；在它之前「这家店的菜单」在能力目录里只对应演示商户的
+# shop.menu，真实门店问句因此答出演示数据，trace 9899486a8773d577）。
+# 两对 route_flip 共 4 条唯一输入，一次性兑现 luckin.menu 的正2/硬负2/对照1
+# （其中一条既是第二正例又是 relation invariant，故 4 条而非 5 条）。
+# **上限跟着能力面走，不是反过来**——旧尺子一条没删。
+# 2026-08-13 再放到 568：跨轮门店锚定落地（cross-turn-store-anchor 方案 P3）补两对
+# `context_override`——**同一句话、焦点在场 vs 不在场，计划必须不同**。
+# 这是新机制的兑现物，且两个方向都要锁：只锁「有焦点不重查」会纵容「干脆不看上下文」，
+# 只锁「没焦点必须先查」会纵容「凭记忆硬编门店」。翻转不复用输入，机械地就是 +4。
+# 2026-08-13 再放到 570：新增 active intent `mcd.nutrition`（营养成分从 `mcd.menu`
+# 改名让位——它返回的一直是营养不是菜单，而用户说「菜单」时问的是价格）。
+# 补的两条兑现「问热量」与「问价钱」是**两个能力**这条边界：营养正例第二条 +
+# 「多少钱必须落当店菜单」的反向锁；营养的硬负例复用既有 forbidden 清单，不新增输入。
+# 2026-08-13 再放到 571：跨域边界 `luckin-mcd.menu-store-resolution` 登记后，
+# 台账契约要求**双向各 2 例**——瑞幸侧两条复用既有用例打标签（不增输入），
+# 麦当劳侧补第二条「这家麦当劳都能点些什么」，机械地 +1。
+# 这条边界不是地盘冲突：瑞幸官方菜单绑 deptId、只能由 nearby.search 的可信 POI 映射，
+# 麦当劳按 store_hint 文本查店——**两家商户接口形态本来就不同**。
+# 2026-08-13 再放到 579：同一条理由的第五次适用——demo-mkemhn 十九轮复盘落两条新
+# 边界裁定（nearby-luckin.pure-discovery-vs-discover-then-menu：纯门店发现 vs
+# 发现+看单组合，「查询附近的瑞幸」曾被 chitchat 编造门店列表；
+# luckin-mcd.swap-store-keep-item：换店保商品的两家接线形态——瑞幸重建坐标可信链、
+# 麦当劳 store_hint 桥内重选，HMI 换店按钮两个品牌各发各的句式）。
+# 台账契约双向各 2 例，机械地 +8。旧尺子一条没删。
+# 2026-08-15 放到 584：同一条理由的第六次适用——EVA 二轮余项 G8 新增 active intent
+# `navigation.reroute`（增量改道：焦点 active_route 在场时「途经点不去了/换条路」
+# 改的是**这次导航**，此前无对象可指、被兑现成全新导航）+ 新边界裁定
+# navigation-trip.reroute-vs-modify（「不去X了」否定框架两侧：路线途经点 vs 行程
+# 停靠点，判据=宾语类型+会话状态）。左 3（正 2+「换条路」对照）右 2，
+# 全部 reviewed 不进 gate 池，机械地 +5。旧尺子一条没删。
+# 2026-08-15 同日放到 586：第七次适用——G4 主题行程（trip.plan 新增 theme 槽 +
+# 主题检索步：「跟着《X》游Y」此前连出行判定都进不去）。既有 intent 的全新话术族，
+# 一正（主题→trip.plan）一硬负（聊作品内容≠行程）锁两侧，机械地 +2。
+# 2026-08-15 同日放到 587：第八次适用——G9 trip 跨城市（「先去A再去B玩N天」
+# 此前会丢第二城；现保序逐城安排+跨城驾驶段）。既有 intent 的新话术族正例 +1。
+# 2026-08-15 同日放到 591：第九次适用——EVA 二轮留档待议项收口：新边界裁定
+# chitchat-reminder.statement-vs-request（顺嘴陈述未来事件 vs 显式提醒请求——
+# 陈述句由 G7 offer 询问式通道接，planner 抢答成 reminder NEED_SLOT 是双通道
+# 抢话+挂起黑洞；批 D 已拍板创建入口=用户对 offer 的肯定答复）。台账契约
+# 双向各 2 例、全部 reviewed 新增（不动 stable/gate——复用打标签要改既有
+# forbidden 会碰 baseline 比对面），机械地 +4。
+# 2026-08-15 放到 596：第十次适用——QA 探索轮卡 Q9 新增 active intent
+# `safety.driver_state`（疲劳/饮酒/身体不适时能否继续驾驶）。
+# **占这 5 条额度的理由是「能力面本来就没有这一侧」，不是「模型分不清」**：
+# 在它之前，「困到睁不开眼了，还要开两个小时」三次取样分别落到闲聊、拒识和
+# 音量调节（迷你集 SF4，--repeat 3 下 0/3），而 road-safety 里的确定性疲劳判据
+# 一次都没跑到——**改实现不等于加能力，planner 只看得见 manifest**。
+# 判据是**约束在人还是在环境**：疲劳/饮酒/不适看人，雨雪雾拥堵看环境；两侧共用
+# 「能不能开」这个框架，正是最容易一锅端的地方。正 2（疲劳/饮酒）+ 硬负 2
+# （路况/雨天，环境侧）+ 对照 1（invariant），机械地 +5。
+# 全部 reviewed 不进 gate 池（不动 stable、不碰 baseline 比对面）。旧尺子一条没删。
+# 2026-08-19 放到 605：第十一次适用——QA 探索轮卡 Q8「能力缺席 → 就近误执行」补三块
+# 能力面，**占额度的理由同 Q9：不是模型分不清，是能力面上本来就没有那一侧**，
+# 而这一批三条的真栈读数比 Q9 那次更硬（迷你集 CA1-CA4，--repeat 3）：
+#   ① `navigation.estimate`（只算不导）+5：在它之前「从深圳市民中心到深圳北站开车
+#      大概多远、要多久」1/3 直接发出 navigate 真的开始导航（全程 21 公里）、
+#      1/3 答成「找到 0 个…路况」。**纯查询产生了不可逆副作用**，这是 Q8 卡里
+#      最该被尺子钉住的一类。判据是「用户要的是数还是行程」：正 2（问里程 / 问时长）+
+#      硬负 2（「导航去」「带我去」必须仍归 navigate_to，两个方向都要锁——只锁一侧
+#      会纵容把导航也答成估算）+ 对照 1（invariant 换措辞）。
+#   ② `volume.mute` / `volume.unmute` 与 ③ `warning_light.open/close` 各 **+2**，
+#      **不是 2+2+1**：它们是端侧原子车控，与 `volume.set/inc/dec`、`headlight.on/off`
+#      同族走 `coverage_exemptions.yaml`（判据：不经云侧 LLM 落域，没有可测对象）。
+#      但**豁免的是覆盖矩阵，不是 ingress 路由**——这两族修之前的真实症状恰恰是
+#      「路由到了云」：「静音」两次落 `volume.dec`、「打开双闪」三次分别落
+#      `power_mode.set`/`lane_assistance.close`/`hvac.off`（**要开双闪把空调关了**）。
+#      能钉住这件事的只有 `ei.local.*` ingress 语料，**单测只测名字**
+#      （dashcam 那条老账：抓到它的是语料不是单测）。故各补一对，机械地 +4。
+#   ④ `navigation.cancel`（终止本次导航）**+5**：它与本批把裸取消判据收窄
+#      （`pending_cancel._no_substance_left`）是同一笔改动的两面——旧判据
+#      「词长+3」让「取消导航」「取消订单」「取消提醒」整族被前置闸当成「取消挂起」
+#      吞掉（真栈答「当前没有待确认的操作」）；放开之后它必须有落点，
+#      **放开一条路却不给它落点是把一个错换成另一个错**。判据是「终止还是调整」，
+#      正 2 + 硬负 2（reroute 两侧）+ 对照 1。
+# 合计 +14 → 610。全部 reviewed 不进 gate 池；旧尺子一条没删。
+# 2026-08-20 放到 614：第十二次适用，**理由回到最早那一条**——泓舟新裁定了一条跨域
+# 边界 `navigation-nearby.pickup-plus-meal`，而台账契约要求**双向各 2 例**，
+# 机械地就是 +4。**边界裁定的对照用例是台账的兑现物，不是可裁的冗余。**
+# 这条边界为什么值得占额度：接送复合句与纯周边搜索的 IDF-Dice 高达 **0.492**
+# （门禁自己算出来的），而它们**根本不是同一件事**——真栈实测「先去接我儿子，
+# 再找家川菜馆」三次取样**逐字相同地只答川菜那半**，接谁整个被丢掉；
+# 而川菜那半答得相当好（还用上了「不吃辣」的记忆），**所以话术层看不出缺了一半**。
+# 判据**不是相似度**，是「有没有接送人称」——正是台账存在的理由。
+# 左侧 2（接爸妈/接儿子，必须落 navigation 且禁 nearby.search）+ 右侧 2
+# （同句去掉接送人称，route_flip 回 nearby.search 且禁 navigation）。
+# 全部 reviewed 不进 gate 池；旧尺子一条没删。
+# 2026-08-24 放到 619：MiniMax QA 复验把同一事项双时刻从不稳定的两个 planner step
+# 收敛成 active intent `reminder.create_batch`。覆盖矩阵随能力面机械新增正例 2、硬负例 2
+# 与 relation 对照 1；这 5 条全部标记 `seen_regression`，因为本次修复用了 manifest
+# route_hint，不能伪装成未见迁移。旧尺子一条没删。
+# 2026-08-25 放到 624：MiniMax QA 终态清理新增 active intent
+# `shop.preview_discard`。它只丢弃认证用户当前会话的临时商户预览，真实订单取消与历史
+# 查单必须严格让路；覆盖矩阵机械新增正例 2、硬负例 2、relation 对照 1。五条均为
+# `seen_regression`（能力声明与 route_hint 已参与修复），旧尺子一条没删。
+# 2026-08-27 放到 628：MiniMax QA 修复批第一批（C2-B / N2）新增 active intent
+# `media.stop`——`commands.yaml` 早就声明了 `stop/close`，缺的是端侧规则出口，
+# 于是 `media=stopped` 语音不可达、每一轮车态恢复都留一条不可能达成的差异。
+# 覆盖矩阵机械新增正例 2、硬负例 2（其中一条兼作 relation 对照，故本批 +4 不是 +5）。
+# 四条均为 `seen_regression`：**修复动的是分类规则本身，不能伪装成未见迁移**
+# （同上面两批的口径）。旧尺子一条没删。
+# 2026-08-28 放到 629：MiniMax QA 修复批第 4 批（C8）给 `navigation.reroute` 补了
+# `origin` 维。**这次 +1 不是新能力，是补一条跑得到真实条件的用例**——既有那条
+# `tu.nav.go-with-origin-not-estimate` 的 context 是空的，而 T22 的真实条件是
+# 焦点里已经有活动路线（planner 因此落 reroute 而不是 navigate_to），旧用例
+# 从来跑不到出事的那条路。`seen_regression`（照着修法写的），旧尺子一条没删。
+# 2026-08-28 放到 634：MiniMax QA 修复批第 5 批（C14）**两笔，一笔带出另一笔**。
+#   ① C14 本体 **+4**：`charging.plan` 的新句形「肯定的规划诉求 + 否定的执行方式」
+#      （真栈 T48「规划去广州路上的补能，但先不要启动导航」落到 chitchat 并编造路线）。
+#      既有 negation 家族只覆盖「整句被否定」与「并列里的一个被否定」，这是第三种。
+#      正 2（真栈原句作回归锁 seen_regression + 换说法测迁移）+ 硬负 2
+#      （否定盖住规划本身 / 同句式但没有补能诉求——防止「规划去X，但先别…」整族被拉进充电域）。
+#   ② 边界台账 `info-safety.weather-vs-road-condition` **+2 distinct**（4 条用例，
+#      seen 两条复用既有输入）：它是被 ① 顶过阈值的——**IDF 是语料级的量**，
+#      加任何一条范例都会让相邻对的分数浮动（0.349→0.351）。裁定为两回事
+#      （天气 vs 前方路况，「怎么样」框架的第三条腿），台账契约机械地要求双向各 2 例。
+#      **这一条记在这里是为了让下一个人知道：范例库的门禁读数是相对的，
+#      别把它读成「谁把冲突引进来了」。** 旧尺子一条没删。
+# 2026-10-05 放到 638：新增 active intent `scene.describe`（固定语料 V207「露营模式是什么意思」此前没有能力可落，
+# 规划器判无需动作、闲聊凭常识编）。覆盖矩阵机械新增正例 2、硬负例 2、relation 对照 2（两对 route_flip：开启 vs 定义问、
+# 场景定义 vs 部件模式），去重后 +4。四条均为 `seen_regression`：能力声明与范例本身就是这次修复。旧尺子一条没删。
+suites:
+  discovery:
+    statuses: [candidate, reviewed, stable]
+    live_statuses: [reviewed, stable]
+    min_cases: 450
+    max_cases: 638
+    attack_minimums: {A1: 80, A2: 50, A3: 45, A4: 60, A5: 50, A6: 45, A7: 40, A8: 35, A9: 45}
+    normal_repeats: 1
+    failure_repeats: 3
+    high_risk_repeats: 3
+    independent_processes: 1
+    independent_layers: []
+  gate:
+    statuses: [stable]
+    live_statuses: [stable]
+    min_cases: 120
+    max_cases: 160
+    attack_minimums: {}
+    normal_repeats: 3
+    failure_repeats: 3
+    high_risk_repeats: 3
+    independent_processes: 2
+    independent_layers: [l1, l2]

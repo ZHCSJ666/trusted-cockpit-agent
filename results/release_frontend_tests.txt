@@ -1,0 +1,2566 @@
+TAP version 13
+# Subtest: maps AQI values to the Chinese air-quality level used by the weather badge
+ok 1 - maps AQI values to the Chinese air-quality level used by the weather badge
+  ---
+  duration_ms: 1.866862
+  type: 'test'
+  ...
+# Subtest: keeps a provider category visible when AQI is unavailable
+ok 2 - keeps a provider category visible when AQI is unavailable
+  ---
+  duration_ms: 0.172748
+  type: 'test'
+  ...
+# Subtest: uses Chinese market direction semantics: gains red and losses green
+ok 3 - uses Chinese market direction semantics: gains red and losses green
+  ---
+  duration_ms: 0.217078
+  type: 'test'
+  ...
+# Subtest: projects OHLC candles into bounded geometry with theme-addressable red-up green-down bodies
+ok 4 - projects OHLC candles into bounded geometry with theme-addressable red-up green-down bodies
+  ---
+  duration_ms: 1.103309
+  type: 'test'
+  ...
+# Subtest: 缺字段=旧服务端，值为空对象=服务端说没有
+ok 5 - 缺字段=旧服务端，值为空对象=服务端说没有
+  ---
+  duration_ms: 2.153059
+  type: 'test'
+  ...
+# Subtest: 未知风险档不许落到「按最低风险处理」
+ok 6 - 未知风险档不许落到「按最低风险处理」
+  ---
+  duration_ms: 0.261267
+  type: 'test'
+  ...
+# Subtest: 已知风险档可用
+ok 7 - 已知风险档可用
+  ---
+  duration_ms: 0.128479
+  type: 'test'
+  ...
+# Subtest: 未知渠道被剔除，剩下的仍然生效
+ok 8 - 未知渠道被剔除，剩下的仍然生效
+  ---
+  duration_ms: 0.236138
+  type: 'test'
+  ...
+# Subtest: 策略缺席时不收窄渠道——回落既有三个入口
+ok 9 - 策略缺席时不收窄渠道——回落既有三个入口
+  ---
+  duration_ms: 0.201688
+  type: 'test'
+  ...
+# Subtest: 空建议值给自由输入，不造可点的假选项
+ok 10 - 空建议值给自由输入，不造可点的假选项
+  ---
+  duration_ms: 0.147729
+  type: 'test'
+  ...
+# Subtest: 建议值原样保留；未知 state 回落 active
+ok 11 - 建议值原样保留；未知 state 回落 active
+  ---
+  duration_ms: 0.201359
+  type: 'test'
+  ...
+# Subtest: held 状态原样保留——换题后原任务仍在，只是不抢占当前问题
+ok 12 - held 状态原样保留——换题后原任务仍在，只是不抢占当前问题
+  ---
+  duration_ms: 0.126429
+  type: 'test'
+  ...
+# Subtest: 不认识的恢复 kind 被丢掉，但问题本身仍要显示
+ok 13 - 不认识的恢复 kind 被丢掉，但问题本身仍要显示
+  ---
+  duration_ms: 0.384736
+  type: 'test'
+  ...
+# Subtest: 没有 code 的条目直接丢弃（它无法被分流）
+ok 14 - 没有 code 的条目直接丢弃（它无法被分流）
+  ---
+  duration_ms: 0.347976
+  type: 'test'
+  ...
+# Subtest: 未知 code 保留并显示文案——服务端可能比我新
+ok 15 - 未知 code 保留并显示文案——服务端可能比我新
+  ---
+  duration_ms: 0.190318
+  type: 'test'
+  ...
+# Subtest: issues 不是数组时返回空数组，不抛
+ok 16 - issues 不是数组时返回空数组，不抛
+  ---
+  duration_ms: 0.127869
+  type: 'test'
+  ...
+# Subtest: 有服务端截止时刻就用它，不用本地 TTL
+ok 17 - 有服务端截止时刻就用它，不用本地 TTL
+  ---
+  duration_ms: 0.134149
+  type: 'test'
+  ...
+# Subtest: 没有服务端截止时刻才回落本地 TTL
+ok 18 - 没有服务端截止时刻才回落本地 TTL
+  ---
+  duration_ms: 0.100849
+  type: 'test'
+  ...
+# Subtest: 钟差只纠正判定时刻，不改服务端给的那个时刻
+ok 19 - 钟差只纠正判定时刻，不改服务端给的那个时刻
+  ---
+  duration_ms: 0.091059
+  type: 'test'
+  ...
+# Subtest: 钟差采样取服务端此刻减本机此刻；没有就 0
+ok 20 - 钟差采样取服务端此刻减本机此刻；没有就 0
+  ---
+  duration_ms: 0.116018
+  type: 'test'
+  ...
+# Subtest: 一帧里可以既有补槽又有问题，两者互不覆盖
+ok 21 - 一帧里可以既有补槽又有问题，两者互不覆盖
+  ---
+  duration_ms: 0.121259
+  type: 'test'
+  ...
+# Subtest: control presentation uses shared evidence and never upgrades unchanged state to verified
+ok 22 - control presentation uses shared evidence and never upgrades unchanged state to verified
+  ---
+  duration_ms: 1.343278
+  type: 'test'
+  ...
+# Subtest: a simple final enters driving and consecutive false frames do not postpone the 30 s exit
+ok 23 - a simple final enters driving and consecutive false frames do not postpone the 30 s exit
+  ---
+  duration_ms: 0.868751
+  type: 'test'
+  ...
+# Subtest: dismissal suppresses only the current segment; manual mode and a new segment can enter
+ok 24 - dismissal suppresses only the current segment; manual mode and a new segment can enter
+  ---
+  duration_ms: 0.165658
+  type: 'test'
+  ...
+# Subtest: missing, malformed or unrelated frames cannot invent a parked fact or mutate the frame
+ok 25 - missing, malformed or unrelated frames cannot invent a parked fact or mutate the frame
+  ---
+  duration_ms: 0.212658
+  type: 'test'
+  ...
+# Subtest: the driving view uses the attributed short speech while the complete answer stays intact
+ok 26 - the driving view uses the attributed short speech while the complete answer stays intact
+  ---
+  duration_ms: 1.362256
+  type: 'test'
+  ...
+# Subtest: missing speech, errors, streaming and evicted entries use the existing answer, never another turn
+ok 27 - missing speech, errors, streaming and evicted entries use the existing answer, never another turn
+  ---
+  duration_ms: 0.254917
+  type: 'test'
+  ...
+# Subtest: raw gateway errors are opt-in while local recovery guidance and partial answers remain readable
+ok 28 - raw gateway errors are opt-in while local recovery guidance and partial answers remain readable
+  ---
+  duration_ms: 0.760342
+  type: 'test'
+  ...
+# Subtest: isLocationDependent flags navigation / nearest / where-am-i / unscoped weather
+ok 29 - isLocationDependent flags navigation / nearest / where-am-i / unscoped weather
+  ---
+  duration_ms: 1.389497
+  type: 'test'
+  ...
+# Subtest: serializes one browser-approved position into request-only location meta
+ok 30 - serializes one browser-approved position into request-only location meta
+  ---
+  duration_ms: 0.851562
+  type: 'test'
+  ...
+# Subtest: does not send invalid coordinates
+ok 31 - does not send invalid coordinates
+  ---
+  duration_ms: 0.129418
+  type: 'test'
+  ...
+# Subtest: does not attach a previously captured location after the setting is disabled
+ok 32 - does not attach a previously captured location after the setting is disabled
+  ---
+  duration_ms: 0.163118
+  type: 'test'
+  ...
+# Subtest: asks for consent for weather without a named place and for navigation origin
+ok 33 - asks for consent for weather without a named place and for navigation origin
+  ---
+  duration_ms: 0.214188
+  type: 'test'
+  ...
+# Subtest: isLocationDependent flags charging / trip-planning queries
+ok 34 - isLocationDependent flags charging / trip-planning queries
+  ---
+  duration_ms: 0.122709
+  type: 'test'
+  ...
+# Subtest: Q4①: 车控对象不是位置查询（词表收窄，不加第二份白名单）
+ok 35 - Q4①: 车控对象不是位置查询（词表收窄，不加第二份白名单）
+  ---
+  duration_ms: 0.180968
+  type: 'test'
+  ...
+# Subtest: Q4②: 显式地点线索对「就近类」同样生效，不只对天气
+ok 36 - Q4②: 显式地点线索对「就近类」同样生效，不只对天气
+  ---
+  duration_ms: 0.114969
+  type: 'test'
+  ...
+# Subtest: Q4②b: 导航/行程要的是**出发地**，显式目的地不能豁免
+ok 37 - Q4②b: 导航/行程要的是**出发地**，显式目的地不能豁免
+  ---
+  duration_ms: 0.347817
+  type: 'test'
+  ...
+# Subtest: Q4③: 否定/取消句不是位置请求
+ok 38 - Q4③: 否定/取消句不是位置请求
+  ---
+  duration_ms: 0.345587
+  type: 'test'
+  ...
+# Subtest: Q4④: 多意图句不因为一个位置词整句被拦
+ok 39 - Q4④: 多意图句不因为一个位置词整句被拦
+  ---
+  duration_ms: 0.166528
+  type: 'test'
+  ...
+# Subtest: manual image accepts only bounded PNG/JPEG base64 data URIs
+ok 40 - manual image accepts only bounded PNG/JPEG base64 data URIs
+  ---
+  duration_ms: 0.840262
+  type: 'test'
+  ...
+# Subtest: manual card keeps at most two valid unique images
+ok 41 - manual card keeps at most two valid unique images
+  ---
+  duration_ms: 0.687884
+  type: 'test'
+  ...
+# Subtest: reject absent, coerced, out-of-range and sentinel coordinates
+ok 42 - reject absent, coerced, out-of-range and sentinel coordinates
+  ---
+  duration_ms: 1.384136
+  type: 'test'
+  ...
+# Subtest: list markers keep original card numbering when coordinates are missing
+ok 43 - list markers keep original card numbering when coordinates are missing
+  ---
+  duration_ms: 0.515305
+  type: 'test'
+  ...
+# Subtest: route uses server geometry and never interpolates missing waypoint positions
+ok 44 - route uses server geometry and never interpolates missing waypoint positions
+  ---
+  duration_ms: 1.107689
+  type: 'test'
+  ...
+# Subtest: invalid path is not bridged; coordinates alone do not invent a route
+ok 45 - invalid path is not bridged; coordinates alone do not invent a route
+  ---
+  duration_ms: 0.187348
+  type: 'test'
+  ...
+# Subtest: oversized geometry is bounded and preserves the server endpoints
+ok 46 - oversized geometry is bounded and preserves the server endpoints
+  ---
+  duration_ms: 1.854123
+  type: 'test'
+  ...
+# Subtest: cancelled navigation clears both geometry and numbered markers
+ok 47 - cancelled navigation clears both geometry and numbered markers
+  ---
+  duration_ms: 0.179098
+  type: 'test'
+  ...
+# Subtest: trip displays only grounded coordinates without making up inter-stop paths
+ok 48 - trip displays only grounded coordinates without making up inter-stop paths
+  ---
+  duration_ms: 0.296437
+  type: 'test'
+  ...
+# Subtest: camera avoids the parked conversation and the driving answer, using SDK order
+ok 49 - camera avoids the parked conversation and the driving answer, using SDK order
+  ---
+  duration_ms: 0.173708
+  type: 'test'
+  ...
+# Subtest: runtime config never returns the security code and is not cached
+ok 50 - runtime config never returns the security code and is not cached
+  ---
+  duration_ms: 1.721033
+  type: 'test'
+  ...
+# Subtest: proxy binds key and destination; no caller URL, search or route planner
+ok 51 - proxy binds key and destination; no caller URL, search or route planner
+  ---
+  duration_ms: 0.833822
+  type: 'test'
+  ...
+# Subtest: reject cross-site, mutation and unavailable requests before network calls
+ok 52 - reject cross-site, mutation and unavailable requests before network calls
+  ---
+  duration_ms: 0.318607
+  type: 'test'
+  ...
+# Subtest: proxy preserves successful map responses, but suppresses secret-bearing upstream errors
+ok 53 - proxy preserves successful map responses, but suppresses secret-bearing upstream errors
+  ---
+  duration_ms: 3.275888
+  type: 'test'
+  ...
+# Subtest: oversized upstream bodies cannot be forwarded
+ok 54 - oversized upstream bodies cannot be forwarded
+  ---
+  duration_ms: 3.713044
+  type: 'test'
+  ...
+# Subtest: the memory helper sends the same configured bearer used by the HMI session
+ok 55 - the memory helper sends the same configured bearer used by the HMI session
+  ---
+  duration_ms: 0.787562
+  type: 'test'
+  ...
+# Subtest: every memory and voiceprint request carries the bearer (CA2-15 S1)
+ok 56 - every memory and voiceprint request carries the bearer (CA2-15 S1)
+  ---
+  duration_ms: 0.253077
+  type: 'test'
+  ...
+# Subtest: speaker identification sends the bearer it is given
+ok 57 - speaker identification sends the bearer it is given
+  ---
+  duration_ms: 0.354207
+  type: 'test'
+  ...
+# Subtest: CA2-15 S2：只有免唤醒语音的请求带声音身份；S2S 会话带 token
+ok 58 - CA2-15 S2：只有免唤醒语音的请求带声音身份；S2S 会话带 token
+  ---
+  duration_ms: 0.645034
+  type: 'test'
+  ...
+# Subtest: merchant CDP case locks ordinary card actions and global confirmation frames separately
+ok 59 - merchant CDP case locks ordinary card actions and global confirmation frames separately
+  ---
+  duration_ms: 0.847732
+  type: 'test'
+  ...
+# Subtest: merchant CDP case checks merchant confirmation and link-only payment wording
+ok 60 - merchant CDP case checks merchant confirmation and link-only payment wording
+  ---
+  duration_ms: 0.185678
+  type: 'test'
+  ...
+# Subtest: merchant CDP has an explicit same-session Luckin cancellation cleanup
+ok 61 - merchant CDP has an explicit same-session Luckin cancellation cleanup
+  ---
+  duration_ms: 0.145059
+  type: 'test'
+  ...
+# Subtest: merchant CDP geolocation is explicitly overrideable for the audited store
+ok 62 - merchant CDP geolocation is explicitly overrideable for the audited store
+  ---
+  duration_ms: 0.125429
+  type: 'test'
+  ...
+# Subtest: merchant CDP has a read-only query case that cannot create another real order
+ok 63 - merchant CDP has a read-only query case that cannot create another real order
+  ---
+  duration_ms: 0.211948
+  type: 'test'
+  ...
+# Warning: useLayoutEffect does nothing on the server, because its effect cannot be encoded into the server renderer's output format. This will lead to a mismatch between the initial, non-hydrated UI and the intended UI. To avoid this, useLayoutEffect should only be used in components that render exclusively on the client. See https://reactjs.org/link/uselayouteffect-ssr for common fixes.
+#     at ChatView (<project-root>/cockpit-agent/hmi/src/components/ChatView.tsx:25:21)
+#     at DrivingProvider (<project-root>/cockpit-agent/hmi/src/DrivingContext.tsx:48:28)
+#     at SettingsProvider (<project-root>/cockpit-agent/hmi/src/settings.tsx:40:29)
+# Warning: useLayoutEffect does nothing on the server, because its effect cannot be encoded into the server renderer's output format. This will lead to a mismatch between the initial, non-hydrated UI and the intended UI. To avoid this, useLayoutEffect should only be used in components that render exclusively on the client. See https://reactjs.org/link/uselayouteffect-ssr for common fixes.
+#     at ChatView (<project-root>/cockpit-agent/hmi/src/components/ChatView.tsx:25:21)
+#     at DrivingProvider (<project-root>/cockpit-agent/hmi/src/DrivingContext.tsx:48:28)
+#     at SettingsProvider (<project-root>/cockpit-agent/hmi/src/settings.tsx:40:29)
+# Warning: useLayoutEffect does nothing on the server, because its effect cannot be encoded into the server renderer's output format. This will lead to a mismatch between the initial, non-hydrated UI and the intended UI. To avoid this, useLayoutEffect should only be used in components that render exclusively on the client. See https://reactjs.org/link/uselayouteffect-ssr for common fixes.
+#     at ChatView (<project-root>/cockpit-agent/hmi/src/components/ChatView.tsx:25:21)
+#     at DrivingProvider (<project-root>/cockpit-agent/hmi/src/DrivingContext.tsx:48:28)
+#     at SettingsProvider (<project-root>/cockpit-agent/hmi/src/settings.tsx:40:29)
+# Warning: useLayoutEffect does nothing on the server, because its effect cannot be encoded into the server renderer's output format. This will lead to a mismatch between the initial, non-hydrated UI and the intended UI. To avoid this, useLayoutEffect should only be used in components that render exclusively on the client. See https://reactjs.org/link/uselayouteffect-ssr for common fixes.
+#     at ChatView (<project-root>/cockpit-agent/hmi/src/components/ChatView.tsx:25:21)
+#     at DrivingProvider (<project-root>/cockpit-agent/hmi/src/DrivingContext.tsx:48:28)
+#     at SettingsProvider (<project-root>/cockpit-agent/hmi/src/settings.tsx:40:29)
+# Warning: useLayoutEffect does nothing on the server, because its effect cannot be encoded into the server renderer's output format. This will lead to a mismatch between the initial, non-hydrated UI and the intended UI. To avoid this, useLayoutEffect should only be used in components that render exclusively on the client. See https://reactjs.org/link/uselayouteffect-ssr for common fixes.
+#     at ChatView (<project-root>/cockpit-agent/hmi/src/components/ChatView.tsx:25:21)
+#     at DrivingProvider (<project-root>/cockpit-agent/hmi/src/DrivingContext.tsx:48:28)
+#     at SettingsProvider (<project-root>/cockpit-agent/hmi/src/settings.tsx:40:29)
+# Subtest: renders a link-only payment as open/copy actions without scan language
+ok 64 - renders a link-only payment as open/copy actions without scan language
+  ---
+  duration_ms: 541.11722
+  type: 'test'
+  ...
+# Subtest: renders a receipt-like merchant preview and leaves confirmation to the global bubble
+ok 65 - renders a receipt-like merchant preview and leaves confirmation to the global bubble
+  ---
+  duration_ms: 2.141139
+  type: 'test'
+  ...
+# Subtest: renders the real merchant_choices items plus buttons contract
+ok 66 - renders the real merchant_choices items plus buttons contract
+  ---
+  duration_ms: 0.635794
+  type: 'test'
+  ...
+# Subtest: renders normalized order aliases and merchant-specific local actions
+ok 67 - renders normalized order aliases and merchant-specific local actions
+  ---
+  duration_ms: 1.462746
+  type: 'test'
+  ...
+# Subtest: renders a long merchant order id on its own wrapping-safe line
+ok 68 - renders a long merchant order id on its own wrapping-safe line
+  ---
+  duration_ms: 0.653774
+  type: 'test'
+  ...
+# Subtest: renders merchant create/cancel confirmation context without vehicle-control copy
+ok 69 - renders merchant create/cancel confirmation context without vehicle-control copy
+  ---
+  duration_ms: 5.933542
+  type: 'test'
+  ...
+# Subtest: renders the real Luckin mcp_order cancellation fixture with only global confirmation actions
+ok 70 - renders the real Luckin mcp_order cancellation fixture with only global confirmation actions
+  ---
+  duration_ms: 1.04415
+  type: 'test'
+  ...
+# Subtest: vehicle confirmation describes the operation without inventing a parked state
+ok 71 - vehicle confirmation describes the operation without inventing a parked state
+  ---
+  duration_ms: 0.991211
+  type: 'test'
+  ...
+# Subtest: an action waiting for confirmation is never presented as executed
+ok 72 - an action waiting for confirmation is never presented as executed
+  ---
+  duration_ms: 1.01972
+  type: 'test'
+  ...
+# Subtest: weather omits absent field rows while preserving real zero values
+ok 73 - weather omits absent field rows while preserving real zero values
+  ---
+  duration_ms: 1.596675
+  type: 'test'
+  ...
+# Subtest: driving payment omits QR and links, and keeps provenance; future card types have an honest fallback
+ok 74 - driving payment omits QR and links, and keeps provenance; future card types have an honest fallback
+  ---
+  duration_ms: 1.169999
+  type: 'test'
+  ...
+# Subtest: renders a grounded manual image with caption, page and source excerpt
+ok 75 - renders a grounded manual image with caption, page and source excerpt
+  ---
+  duration_ms: 1.372106
+  type: 'test'
+  ...
+# Subtest: manual card rejects SVG and remote image sources at render time
+ok 76 - manual card rejects SVG and remote image sources at render time
+  ---
+  duration_ms: 0.431396
+  type: 'test'
+  ...
+# Subtest: merchant payment and cancellation fixtures satisfy the declared UI card types
+ok 77 - merchant payment and cancellation fixtures satisfy the declared UI card types
+  ---
+  duration_ms: 1129.662611
+  type: 'test'
+  ...
+# Subtest: new merchant rendering paths do not erase their card types with any
+ok 78 - new merchant rendering paths do not erase their card types with any
+  ---
+  duration_ms: 1.109769
+  type: 'test'
+  ...
+# Subtest: builds explicit natural-language actions for merchant choices and Luckin cancellation
+ok 79 - builds explicit natural-language actions for merchant choices and Luckin cancellation
+  ---
+  duration_ms: 2.800463
+  type: 'test'
+  ...
+# Subtest: keeps card actions ordinary while removing direct confirmation controls from previews
+ok 80 - keeps card actions ordinary while removing direct confirmation controls from previews
+  ---
+  duration_ms: 0.765632
+  type: 'test'
+  ...
+# Subtest: accepts a normalized store name supplied as a plain string
+ok 81 - accepts a normalized store name supplied as a plain string
+  ---
+  duration_ms: 0.238778
+  type: 'test'
+  ...
+# Subtest: adds only merchant-appropriate local order actions from normalized order facts
+ok 82 - adds only merchant-appropriate local order actions from normalized order facts
+  ---
+  duration_ms: 0.710973
+  type: 'test'
+  ...
+# Subtest: offers cancellation or abandon only for explicit unpaid states
+ok 83 - offers cancellation or abandon only for explicit unpaid states
+  ---
+  duration_ms: 0.351547
+  type: 'test'
+  ...
+# Subtest: does not synthesize order actions while a merchant confirmation is pending
+ok 84 - does not synthesize order actions while a merchant confirmation is pending
+  ---
+  duration_ms: 0.575285
+  type: 'test'
+  ...
+# Subtest: offers a deterministic swap-store chip while a create confirmation is pending
+ok 85 - offers a deterministic swap-store chip while a create confirmation is pending
+  ---
+  duration_ms: 0.466096
+  type: 'test'
+  ...
+# Subtest: never offers swap-store on cancel confirmations or unknown merchants
+ok 86 - never offers swap-store on cancel confirmations or unknown merchants
+  ---
+  duration_ms: 0.188109
+  type: 'test'
+  ...
+# Subtest: spec chips send the deterministic reorder sentence and skip the current choice
+ok 87 - spec chips send the deterministic reorder sentence and skip the current choice
+  ---
+  duration_ms: 0.517465
+  type: 'test'
+  ...
+# Subtest: place rows expose brand menu shortcuts aligned with the exemplar sentence shapes
+ok 88 - place rows expose brand menu shortcuts aligned with the exemplar sentence shapes
+  ---
+  duration_ms: 0.464336
+  type: 'test'
+  ...
+# Subtest: normalizes snake/camel merchant order fields without exposing checkout tokens
+ok 89 - normalizes snake/camel merchant order fields without exposing checkout tokens
+  ---
+  duration_ms: 0.226488
+  type: 'test'
+  ...
+# Subtest: normalizes the plural specifications field used by real merchant previews
+ok 90 - normalizes the plural specifications field used by real merchant previews
+  ---
+  duration_ms: 0.150598
+  type: 'test'
+  ...
+# Subtest: uses scan copy only when an SVG QR is actually present
+ok 91 - uses scan copy only when an SVG QR is actually present
+  ---
+  duration_ms: 0.287777
+  type: 'test'
+  ...
+# Subtest: fails closed on non-HTTPS local payment actions
+ok 92 - fails closed on non-HTTPS local payment actions
+  ---
+  duration_ms: 0.111949
+  type: 'test'
+  ...
+# Subtest: shows merchant-specific confirmation copy from confirmation_context
+ok 93 - shows merchant-specific confirmation copy from confirmation_context
+  ---
+  duration_ms: 0.122679
+  type: 'test'
+  ...
+# Subtest: preserves the existing vehicle-control confirmation copy by default
+ok 94 - preserves the existing vehicle-control confirmation copy by default
+  ---
+  duration_ms: 0.159409
+  type: 'test'
+  ...
+# Subtest: merchant product images render only from credential-free https urls
+ok 95 - merchant product images render only from credential-free https urls
+  ---
+  duration_ms: 0.194868
+  type: 'test'
+  ...
+# Subtest: isRefreshRequest flags 换一批 / 换一个 / 还有别的, not normal queries
+ok 96 - isRefreshRequest flags 换一批 / 换一个 / 还有别的, not normal queries
+  ---
+  duration_ms: 0.928931
+  type: 'test'
+  ...
+# Subtest: parses Chinese ordinals to 0-based index
+ok 97 - parses Chinese ordinals to 0-based index
+  ---
+  duration_ms: 0.353787
+  type: 'test'
+  ...
+# Subtest: a trailing sentence mark from speech-to-text keeps it a pure selection
+ok 98 - a trailing sentence mark from speech-to-text keeps it a pure selection
+  ---
+  duration_ms: 0.256358
+  type: 'test'
+  ...
+# Subtest: parses digit ordinals
+ok 99 - parses digit ordinals
+  ---
+  duration_ms: 0.214298
+  type: 'test'
+  ...
+# Subtest: ordinalIn extracts 第N个 from within a longer phrase (看第八个详情)
+ok 100 - ordinalIn extracts 第N个 from within a longer phrase (看第八个详情)
+  ---
+  duration_ms: 0.245878
+  type: 'test'
+  ...
+# Subtest: ordinalSelectIn catches bare/verb ordinal selections (点一下第九个), needs 个/家
+ok 101 - ordinalSelectIn catches bare/verb ordinal selections (点一下第九个), needs 个/家
+  ---
+  duration_ms: 0.234577
+  type: 'test'
+  ...
+# Subtest: returns -1 for non-selection text (does not hijack normal queries)
+ok 102 - returns -1 for non-selection text (does not hijack normal queries)
+  ---
+  duration_ms: 0.138149
+  type: 'test'
+  ...
+# Subtest: PcmPlayer：首片攒 jitter 起播 + onFirstAudio 触发一次
+ok 103 - PcmPlayer：首片攒 jitter 起播 + onFirstAudio 触发一次
+  ---
+  duration_ms: 1.913372
+  type: 'test'
+  ...
+# Subtest: PcmPlayer：后续片无缝拼在上一片尾巴
+ok 104 - PcmPlayer：后续片无缝拼在上一片尾巴
+  ---
+  duration_ms: 0.713733
+  type: 'test'
+  ...
+# Subtest: PcmPlayer：underrun 从 now 重建起点并计数
+ok 105 - PcmPlayer：underrun 从 now 重建起点并计数
+  ---
+  duration_ms: 0.463535
+  type: 'test'
+  ...
+# Subtest: PcmPlayer：stop 停所有音源并复位
+ok 106 - PcmPlayer：stop 停所有音源并复位
+  ---
+  duration_ms: 0.430626
+  type: 'test'
+  ...
+# Subtest: PcmPlayer：int16 → float32 归一化写入 buffer
+ok 107 - PcmPlayer：int16 → float32 归一化写入 buffer
+  ---
+  duration_ms: 0.233807
+  type: 'test'
+  ...
+# Subtest: PcmPlayer：remainingSec / drainedAt
+ok 108 - PcmPlayer：remainingSec / drainedAt
+  ---
+  duration_ms: 0.215238
+  type: 'test'
+  ...
+# Subtest: PcmPlayer：空片返回 null 不排定
+ok 109 - PcmPlayer：空片返回 null 不排定
+  ---
+  duration_ms: 0.220018
+  type: 'test'
+  ...
+# Subtest: Float32 → Int16 范围与截断
+ok 110 - Float32 → Int16 范围与截断
+  ---
+  duration_ms: 1.596034
+  type: 'test'
+  ...
+# Subtest: 切掉开头和结尾的静音
+ok 111 - 切掉开头和结尾的静音
+  ---
+  duration_ms: 1.186438
+  type: 'test'
+  ...
+# Subtest: **不在语音中间挖洞**——中间的停顿原样保留
+ok 112 - **不在语音中间挖洞**——中间的停顿原样保留
+  ---
+  duration_ms: 1.287287
+  type: 'test'
+  ...
+# Subtest: 全静音返回空——不发一段空气上去
+ok 113 - 全静音返回空——不发一段空气上去
+  ---
+  duration_ms: 0.870692
+  type: 'test'
+  ...
+# Subtest: 门槛按峰值自适应（麦克风增益低也不至于全丢）
+ok 114 - 门槛按峰值自适应（麦克风增益低也不至于全丢）
+  ---
+  duration_ms: 0.317967
+  type: 'test'
+  ...
+# Subtest: 保留原始帧顺序与连续性（顺序错了就是另一段话）
+ok 115 - 保留原始帧顺序与连续性（顺序错了就是另一段话）
+  ---
+  duration_ms: 0.371196
+  type: 'test'
+  ...
+# Subtest: 多帧按顺序拼接（拼错顺序=另一段话）
+ok 116 - 多帧按顺序拼接（拼错顺序=另一段话）
+  ---
+  duration_ms: 0.196778
+  type: 'test'
+  ...
+# Subtest: 与识别器的转换口径逐字一致
+ok 117 - 与识别器的转换口径逐字一致
+  ---
+  duration_ms: 0.402426
+  type: 'test'
+  ...
+# Subtest: 采集约束与 VAD 主链路逐字一致（同一条信道）
+ok 118 - 采集约束与 VAD 主链路逐字一致（同一条信道）
+  ---
+  duration_ms: 0.602234
+  type: 'test'
+  ...
+# Subtest: 注册与自证都不得走 MediaRecorder/webm
+ok 119 - 注册与自证都不得走 MediaRecorder/webm
+  ---
+  duration_ms: 0.892862
+  type: 'test'
+  ...
+# Subtest: 重录必须能带原 occupant_id（否则记忆分家）
+ok 120 - 重录必须能带原 occupant_id（否则记忆分家）
+  ---
+  duration_ms: 0.814552
+  type: 'test'
+  ...
+# Subtest: PcmRing：push/takeLast 基本取最近若干帧
+ok 121 - PcmRing：push/takeLast 基本取最近若干帧
+  ---
+  duration_ms: 0.999801
+  type: 'test'
+  ...
+# Subtest: PcmRing：超容量丢最旧（环形）
+ok 122 - PcmRing：超容量丢最旧（环形）
+  ---
+  duration_ms: 0.183808
+  type: 'test'
+  ...
+# Subtest: PcmRing：takeLast 超过现有则取全部；空则空数组
+ok 123 - PcmRing：takeLast 超过现有则取全部；空则空数组
+  ---
+  duration_ms: 0.190668
+  type: 'test'
+  ...
+# Subtest: PcmRing：push 复制底层，后续改原数组不影响已存
+ok 124 - PcmRing：push 复制底层，后续改原数组不影响已存
+  ---
+  duration_ms: 0.165118
+  type: 'test'
+  ...
+# Subtest: PcmRing：clear 清空
+ok 125 - PcmRing：clear 清空
+  ---
+  duration_ms: 0.155978
+  type: 'test'
+  ...
+# Subtest: float32ToInt16：范围映射与夹紧
+ok 126 - float32ToInt16：范围映射与夹紧
+  ---
+  duration_ms: 0.190648
+  type: 'test'
+  ...
+# Subtest: int16ToWav：44 字节头 + RIFF/WAVE/data + 正确长度
+ok 127 - int16ToWav：44 字节头 + RIFF/WAVE/data + 正确长度
+  ---
+  duration_ms: 0.225388
+  type: 'test'
+  ...
+# Subtest: 容量与云端挂起表一致（前端留得比后端多 = 显示一条点下去必被拒的确认条）
+ok 128 - 容量与云端挂起表一致（前端留得比后端多 = 显示一条点下去必被拒的确认条）
+  ---
+  duration_ms: 0.829392
+  type: 'test'
+  ...
+# Subtest: 多条待确认并存，按 id 各自可见
+ok 129 - 多条待确认并存，按 id 各自可见
+  ---
+  duration_ms: 0.853601
+  type: 'test'
+  ...
+# Subtest: 超容量丢最旧一条（与后端 LRU 同向）
+ok 130 - 超容量丢最旧一条（与后端 LRU 同向）
+  ---
+  duration_ms: 0.637584
+  type: 'test'
+  ...
+# Subtest: 同 id 重复下发是刷新不是新增
+ok 131 - 同 id 重复下发是刷新不是新增
+  ---
+  duration_ms: 0.147729
+  type: 'test'
+  ...
+# Subtest: 关闭以服务端 closed 列表为准，只关点名的那几条
+ok 132 - 关闭以服务端 closed 列表为准，只关点名的那几条
+  ---
+  duration_ms: 0.269467
+  type: 'test'
+  ...
+# Subtest: 空 closed 列表不动台账（插话轮不得撤掉还活着的确认条）
+ok 133 - 空 closed 列表不动台账（插话轮不得撤掉还活着的确认条）
+  ---
+  duration_ms: 0.139089
+  type: 'test'
+  ...
+# Subtest: 本地限龄：超过 TTL 视为过期
+ok 134 - 本地限龄：超过 TTL 视为过期
+  ---
+  duration_ms: 0.197628
+  type: 'test'
+  ...
+# Subtest: 空 id 不入账（位置授权征询等纯前端确认没有 operation_id）
+ok 135 - 空 id 不入账（位置授权征询等纯前端确认没有 operation_id）
+  ---
+  duration_ms: 0.128578
+  type: 'test'
+  ...
+# Subtest: pinned confirmations keep live operation identities and local location consent takes priority
+ok 136 - pinned confirmations keep live operation identities and local location consent takes priority
+  ---
+  duration_ms: 1.324487
+  type: 'test'
+  ...
+# Subtest: only a server deadline produces a countdown; orphan frames and unknown policies cannot grant confirmation
+ok 137 - only a server deadline produces a countdown; orphan frames and unknown policies cannot grant confirmation
+  ---
+  duration_ms: 0.562125
+  type: 'test'
+  ...
+# Subtest: parsePlacesValue parses a JSON string into a places map
+ok 138 - parsePlacesValue parses a JSON string into a places map
+  ---
+  duration_ms: 0.791942
+  type: 'test'
+  ...
+# Subtest: parsePlacesValue accepts an already-parsed object
+ok 139 - parsePlacesValue accepts an already-parsed object
+  ---
+  duration_ms: 0.176718
+  type: 'test'
+  ...
+# Subtest: parsePlacesValue returns {} for missing / invalid / non-object values
+ok 140 - parsePlacesValue returns {} for missing / invalid / non-object values
+  ---
+  duration_ms: 0.565154
+  type: 'test'
+  ...
+# Subtest: isPlaceSet treats a place with address or name as set
+ok 141 - isPlaceSet treats a place with address or name as set
+  ---
+  duration_ms: 0.896721
+  type: 'test'
+  ...
+# Subtest: formatPlace formats name and address together
+ok 142 - formatPlace formats name and address together
+  ---
+  duration_ms: 0.255207
+  type: 'test'
+  ...
+# Subtest: PLACE_DEFS covers home / company / school in display order
+ok 143 - PLACE_DEFS covers home / company / school in display order
+  ---
+  duration_ms: 0.298387
+  type: 'test'
+  ...
+# Subtest: S2S 空闲时按既有口径出声（text && card）
+ok 144 - S2S 空闲时按既有口径出声（text && card）
+  ---
+  duration_ms: 0.932941
+  type: 'test'
+  ...
+# Subtest: 无卡或无文本一律只出气泡——朗读判据是 text && card
+ok 145 - 无卡或无文本一律只出气泡——朗读判据是 text && card
+  ---
+  duration_ms: 0.215468
+  type: 'test'
+  ...
+# Subtest: 关了 TTS 或自动播放就不出声
+ok 146 - 关了 TTS 或自动播放就不出声
+  ---
+  duration_ms: 0.157049
+  type: 'test'
+  ...
+# Subtest: S2S 忙时按优先级分流：安全抢话、用户合同排队、其余只出气泡
+ok 147 - S2S 忙时按优先级分流：安全抢话、用户合同排队、其余只出气泡
+  ---
+  duration_ms: 0.143258
+  type: 'test'
+  ...
+# Subtest: 缺 priority 时保守处理——不认识的档位不抢话
+ok 148 - 缺 priority 时保守处理——不认识的档位不抢话
+  ---
+  duration_ms: 0.218868
+  type: 'test'
+  ...
+# Subtest: 待补播队列按 delivery_id 去重
+ok 149 - 待补播队列按 delivery_id 去重
+  ---
+  duration_ms: 0.210078
+  type: 'test'
+  ...
+# Subtest: 空文本不入队
+ok 150 - 空文本不入队
+  ---
+  duration_ms: 0.189628
+  type: 'test'
+  ...
+# Subtest: 溢出丢最旧的——补播不该把攒了半天的旧话一次倒出来
+ok 151 - 溢出丢最旧的——补播不该把攒了半天的旧话一次倒出来
+  ---
+  duration_ms: 0.688783
+  type: 'test'
+  ...
+# Subtest: drain 一次清空
+ok 152 - drain 一次清空
+  ---
+  duration_ms: 0.307608
+  type: 'test'
+  ...
+# Subtest: 回执凭据永远返回数组，合并组取整组
+ok 153 - 回执凭据永远返回数组，合并组取整组
+  ---
+  duration_ms: 0.424256
+  type: 'test'
+  ...
+# Subtest: 没有车控授权时，车控推荐不再摆在首页
+ok 154 - 没有车控授权时，车控推荐不再摆在首页
+  ---
+  duration_ms: 0.961231
+  type: 'test'
+  ...
+# Subtest: 有车控授权时车控推荐照常在（按服务端 agent_id 对账）
+ok 155 - 有车控授权时车控推荐照常在（按服务端 agent_id 对账）
+  ---
+  duration_ms: 0.150738
+  type: 'test'
+  ...
+# Subtest: 摘要只取到一半时不筛——「此刻查不到」不许显示成「你没有这个功能」
+ok 156 - 摘要只取到一半时不筛——「此刻查不到」不许显示成「你没有这个功能」
+  ---
+  duration_ms: 1.268547
+  type: 'test'
+  ...
+# Subtest: 压根没有摘要时也不筛（旧服务端 / 还没查）
+ok 157 - 压根没有摘要时也不筛（旧服务端 / 还没查）
+  ---
+  duration_ms: 0.138389
+  type: 'test'
+  ...
+# Subtest: 用户自定义短语永远保留——系统无权替他判定用不了
+ok 158 - 用户自定义短语永远保留——系统无权替他判定用不了
+  ---
+  duration_ms: 0.171959
+  type: 'test'
+  ...
+# Subtest: 用户自己关掉的能力不再推荐，但传入的列表不被改动
+ok 159 - 用户自己关掉的能力不再推荐，但传入的列表不被改动
+  ---
+  duration_ms: 0.151738
+  type: 'test'
+  ...
+# Subtest: 完整摘要里没出现的能力按不可用处理
+ok 160 - 完整摘要里没出现的能力按不可用处理
+  ---
+  duration_ms: 0.124569
+  type: 'test'
+  ...
+# Subtest: 非法输入不抛
+ok 161 - 非法输入不抛
+  ---
+  duration_ms: 0.392836
+  type: 'test'
+  ...
+# Subtest: R4.4 P2：连续拒识 1 次无动作 / 2 次减半 / 3 次仅唤醒词
+ok 162 - R4.4 P2：连续拒识 1 次无动作 / 2 次减半 / 3 次仅唤醒词
+  ---
+  duration_ms: 1.278327
+  type: 'test'
+  ...
+# Subtest: R4.4 P2：一次成功交互复位并清零，再拒从 1 重计
+ok 163 - R4.4 P2：一次成功交互复位并清零，再拒从 1 重计
+  ---
+  duration_ms: 0.164699
+  type: 'test'
+  ...
+# Subtest: R4.4 P2：基准续问窗随设置同步，restore 以最新设置为准
+ok 164 - R4.4 P2：基准续问窗随设置同步，restore 以最新设置为准
+  ---
+  duration_ms: 0.227178
+  type: 'test'
+  ...
+# Subtest: 被拒的一轮整轮删掉：紧挨在占位前面的用户话一起删（HMI 口径）
+ok 165 - 被拒的一轮整轮删掉：紧挨在占位前面的用户话一起删（HMI 口径）
+  ---
+  duration_ms: 1.241478
+  type: 'test'
+  ...
+# Subtest: 给了用户气泡 id 就按 id 删（Android：草稿气泡转正后中间可能夹着别的消息）
+ok 166 - 给了用户气泡 id 就按 id 删（Android：草稿气泡转正后中间可能夹着别的消息）
+  ---
+  duration_ms: 0.173649
+  type: 'test'
+  ...
+# Subtest: 前面不是用户话就只删占位；找不到占位原样返回、不误删
+ok 167 - 前面不是用户话就只删占位；找不到占位原样返回、不误删
+  ---
+  duration_ms: 0.269238
+  type: 'test'
+  ...
+# Subtest: 提示带唤醒词；唤醒词关着就不提
+ok 168 - 提示带唤醒词；唤醒词关着就不提
+  ---
+  duration_ms: 0.140959
+  type: 'test'
+  ...
+# Subtest: resolveView 后端权威，缺省保守走 multi
+ok 169 - resolveView 后端权威，缺省保守走 multi
+  ---
+  duration_ms: 0.750693
+  type: 'test'
+  ...
+# Subtest: dayLabel 今天/明天/后天/具体日期
+ok 170 - dayLabel 今天/明天/后天/具体日期
+  ---
+  duration_ms: 0.243828
+  type: 'test'
+  ...
+# Subtest: groupByDay 按天分组 + 封顶 + 还有N条
+ok 171 - groupByDay 按天分组 + 封顶 + 还有N条
+  ---
+  duration_ms: 0.778943
+  type: 'test'
+  ...
+# Subtest: groupByDay 跳过无时间项（待办另走 TodoStrip）
+ok 172 - groupByDay 跳过无时间项（待办另走 TodoStrip）
+  ---
+  duration_ms: 0.880902
+  type: 'test'
+  ...
+# Subtest: timelineWindow 动态取窗与空缺省
+ok 173 - timelineWindow 动态取窗与空缺省
+  ---
+  duration_ms: 0.328477
+  type: 'test'
+  ...
+# Subtest: yForTime 线性映射并夹紧边界
+ok 174 - yForTime 线性映射并夹紧边界
+  ---
+  duration_ms: 0.158658
+  type: 'test'
+  ...
+# Subtest: 带 request_id 的帧按 id 归属，不按 FIFO 顺序
+ok 175 - 带 request_id 的帧按 id 归属，不按 FIFO 顺序
+  ---
+  duration_ms: 0.917451
+  type: 'test'
+  ...
+# Subtest: I-048：带了 id 却对不上 = 丢帧，绝不回落 FIFO 挂到当前轮
+ok 176 - I-048：带了 id 却对不上 = 丢帧，绝不回落 FIFO 挂到当前轮
+  ---
+  duration_ms: 0.183738
+  type: 'test'
+  ...
+# Subtest: 不带 id 的帧回落 FIFO（旧网关/滚动升级窗口不黑屏）
+ok 177 - 不带 id 的帧回落 FIFO（旧网关/滚动升级窗口不黑屏）
+  ---
+  duration_ms: 0.97587
+  type: 'test'
+  ...
+# Subtest: 每轮各自结算，一轮结算不影响另一轮的在飞状态
+ok 178 - 每轮各自结算，一轮结算不影响另一轮的在飞状态
+  ---
+  duration_ms: 0.166518
+  type: 'test'
+  ...
+# Subtest: 只有最新一轮驱动 TTS/候选记录（A2 既有语义不变）
+ok 179 - 只有最新一轮驱动 TTS/候选记录（A2 既有语义不变）
+  ---
+  duration_ms: 0.158788
+  type: 'test'
+  ...
+# Subtest: 硬终止清空全部在飞轮并交回它们的气泡
+ok 180 - 硬终止清空全部在飞轮并交回它们的气泡
+  ---
+  duration_ms: 0.654304
+  type: 'test'
+  ...
+# Subtest: 无在飞轮时续流可 adopt 一个新气泡（混合意图云段）
+ok 181 - 无在飞轮时续流可 adopt 一个新气泡（混合意图云段）
+  ---
+  duration_ms: 0.144428
+  type: 'test'
+  ...
+# Subtest: dropBubble 报告是否确有此轮（看门狗要据此决定改不改气泡）
+ok 182 - dropBubble 报告是否确有此轮（看门狗要据此决定改不改气泡）
+  ---
+  duration_ms: 0.172768
+  type: 'test'
+  ...
+# Subtest: pending display gets the full answer without changing speech or control fields
+ok 183 - pending display gets the full answer without changing speech or control fields
+  ---
+  duration_ms: 1.599955
+  type: 'test'
+  ...
+# Subtest: old or invalid protocol falls back to the existing answer
+ok 184 - old or invalid protocol falls back to the existing answer
+  ---
+  duration_ms: 0.212118
+  type: 'test'
+  ...
+# Subtest: details cannot smuggle execution fields or create another confirmation entry
+ok 185 - details cannot smuggle execution fields or create another confirmation entry
+  ---
+  duration_ms: 0.434446
+  type: 'test'
+  ...
+# Subtest: image resources are referenced once and resolve from the same message
+ok 186 - image resources are referenced once and resolve from the same message
+  ---
+  duration_ms: 0.311667
+  type: 'test'
+  ...
+# Subtest: a late older snapshot cannot overwrite a newer answer in the same message
+ok 187 - a late older snapshot cannot overwrite a newer answer in the same message
+  ---
+  duration_ms: 0.422166
+  type: 'test'
+  ...
+# Subtest: historical references never replay old bodies or cards in a new reply
+ok 188 - historical references never replay old bodies or cards in a new reply
+  ---
+  duration_ms: 0.217248
+  type: 'test'
+  ...
+# Subtest: details render hidden cards without duplicating the already visible main card
+ok 189 - details render hidden cards without duplicating the already visible main card
+  ---
+  duration_ms: 0.179339
+  type: 'test'
+  ...
+# Subtest: effect evidence survives the projection without trusting a claimed verification
+ok 190 - effect evidence survives the projection without trusting a claimed verification
+  ---
+  duration_ms: 0.338447
+  type: 'test'
+  ...
+# Subtest: s2sUrl 把 http(s) base 换成 ws(s)
+ok 191 - s2sUrl 把 http(s) base 换成 ws(s)
+  ---
+  duration_ms: 1.080079
+  type: 'test'
+  ...
+# Subtest: open 后发 session.start 带参数
+ok 192 - open 后发 session.start 带参数
+  ---
+  duration_ms: 0.524835
+  type: 'test'
+  ...
+# Subtest: open 前的 session.start 被缓存而不丢
+ok 193 - open 前的 session.start 被缓存而不丢
+  ---
+  duration_ms: 0.179619
+  type: 'test'
+  ...
+# Subtest: 非 collecting 期 VAD 帧不上行
+ok 194 - 非 collecting 期 VAD 帧不上行
+  ---
+  duration_ms: 0.186129
+  type: 'test'
+  ...
+# Subtest: collecting 期攒够一包才上行（含声明式前导帧）
+ok 195 - collecting 期攒够一包才上行（含声明式前导帧）
+  ---
+  duration_ms: 0.599404
+  type: 'test'
+  ...
+# Subtest: 关收音门时 flush 尾帧（末尾几十毫秒不丢）
+ok 196 - 关收音门时 flush 尾帧（末尾几十毫秒不丢）
+  ---
+  duration_ms: 1.02564
+  type: 'test'
+  ...
+# Subtest: commitAudio 先 flush 残余帧再发 audio_done（真机死锁的回归护栏）
+ok 197 - commitAudio 先 flush 残余帧再发 audio_done（真机死锁的回归护栏）
+  ---
+  duration_ms: 0.309177
+  type: 'test'
+  ...
+# Subtest: pre-roll 插在攒包最前（保帧序）
+ok 198 - pre-roll 插在攒包最前（保帧序）
+  ---
+  duration_ms: 0.394797
+  type: 'test'
+  ...
+# Subtest: setCollecting 幂等（重复同值不 flush）
+ok 199 - setCollecting 幂等（重复同值不 flush）
+  ---
+  duration_ms: 0.619734
+  type: 'test'
+  ...
+# Subtest: transcript / answer_delta 转成回调
+ok 200 - transcript / answer_delta 转成回调
+  ---
+  duration_ms: 1.106379
+  type: 'test'
+  ...
+# Subtest: audio_meta 按上报采样率建播放器，首片触发 onFirstAudio 一次
+ok 201 - audio_meta 按上报采样率建播放器，首片触发 onFirstAudio 一次
+  ---
+  duration_ms: 0.372556
+  type: 'test'
+  ...
+# Subtest: 无音频上下文时音频静默丢弃不崩（文本气泡仍在）
+ok 202 - 无音频上下文时音频静默丢弃不崩（文本气泡仍在）
+  ---
+  duration_ms: 0.175218
+  type: 'test'
+  ...
+# Subtest: complete 轮等已排定音频播完才回调 turnEnd
+ok 203 - complete 轮等已排定音频播完才回调 turnEnd
+  ---
+  duration_ms: 0.362606
+  type: 'test'
+  ...
+# Subtest: escalated 轮立即回调且无播放（执行与播报全在主链）
+ok 204 - escalated 轮立即回调且无播放（执行与播报全在主链）
+  ---
+  duration_ms: 0.217418
+  type: 'test'
+  ...
+# Subtest: cancelled 轮立即停播并回调
+ok 205 - cancelled 轮立即停播并回调
+  ---
+  duration_ms: 0.157788
+  type: 'test'
+  ...
+# Subtest: bargeIn 先本地停播再上行（听感优先，不等网关回执）
+ok 206 - bargeIn 先本地停播再上行（听感优先，不等网关回执）
+  ---
+  duration_ms: 0.140389
+  type: 'test'
+  ...
+# Subtest: bargeIn 撤销待收尾的 turnEnd（不再补发已作废的收窗）
+ok 207 - bargeIn 撤销待收尾的 turnEnd（不再补发已作废的收窗）
+  ---
+  duration_ms: 0.140308
+  type: 'test'
+  ...
+# Subtest: cancelTurn 上行取消帧
+ok 208 - cancelTurn 上行取消帧
+  ---
+  duration_ms: 0.122319
+  type: 'test'
+  ...
+# Subtest: escalatedResult 回传主链回答；空 turnId 不发
+ok 209 - escalatedResult 回传主链回答；空 turnId 不发
+  ---
+  duration_ms: 0.149378
+  type: 'test'
+  ...
+# Subtest: session.state 上报并在 degraded 时停播 + 停上行
+ok 210 - session.state 上报并在 degraded 时停播 + 停上行
+  ---
+  duration_ms: 0.224938
+  type: 'test'
+  ...
+# Subtest: degraded 恢复 ready 后 degraded 标志复位
+ok 211 - degraded 恢复 ready 后 degraded 标志复位
+  ---
+  duration_ms: 0.105459
+  type: 'test'
+  ...
+# Subtest: unsupported 下行触发回落回调
+ok 212 - unsupported 下行触发回落回调
+  ---
+  duration_ms: 0.122368
+  type: 'test'
+  ...
+# Subtest: 网关断开触发回落回调并停播
+ok 213 - 网关断开触发回落回调并停播
+  ---
+  duration_ms: 0.152509
+  type: 'test'
+  ...
+# Subtest: 用户主动 close 不触发回落回调
+ok 214 - 用户主动 close 不触发回落回调
+  ---
+  duration_ms: 0.158648
+  type: 'test'
+  ...
+# Subtest: close 后 pushFrame 不抛
+ok 215 - close 后 pushFrame 不抛
+  ---
+  duration_ms: 0.101219
+  type: 'test'
+  ...
+# Subtest: 未知下行类型被忽略
+ok 216 - 未知下行类型被忽略
+  ---
+  duration_ms: 0.098299
+  type: 'test'
+  ...
+# Subtest: 坏 JSON 不崩
+ok 217 - 坏 JSON 不崩
+  ---
+  duration_ms: 0.110689
+  type: 'test'
+  ...
+# Subtest: 客户端不持任何会话状态机（用户可感知状态归 voiceLoop）
+ok 218 - 客户端不持任何会话状态机（用户可感知状态归 voiceLoop）
+  ---
+  duration_ms: 14.434801
+  type: 'test'
+  ...
+# Subtest: setOccupant after open sends occupant frame
+ok 219 - setOccupant after open sends occupant frame
+  ---
+  duration_ms: 0.339427
+  type: 'test'
+  ...
+# Subtest: setOccupant before open merges into session.start
+ok 220 - setOccupant before open merges into session.start
+  ---
+  duration_ms: 0.244017
+  type: 'test'
+  ...
+# Subtest: setOccupant empty falls back to primary
+ok 221 - setOccupant empty falls back to primary
+  ---
+  duration_ms: 0.122749
+  type: 'test'
+  ...
+# Subtest: CA2-15 S2：occupant 帧带上声音身份，开门前并进 start 帧并替换旧身份
+ok 222 - CA2-15 S2：occupant 帧带上声音身份，开门前并进 start 帧并替换旧身份
+  ---
+  duration_ms: 0.163628
+  type: 'test'
+  ...
+# Subtest: 纯静音：不产生任何端点事件
+ok 223 - 纯静音：不产生任何端点事件
+  ---
+  duration_ms: 1.353837
+  type: 'test'
+  ...
+# Subtest: speech-start：连续语音帧累计过起播去抖阈值才触发（默认 64ms=2 帧）
+ok 224 - speech-start：连续语音帧累计过起播去抖阈值才触发（默认 64ms=2 帧）
+  ---
+  duration_ms: 1.03826
+  type: 'test'
+  ...
+# Subtest: 瞬时噪声（单帧高概率）不误触发 start
+ok 225 - 瞬时噪声（单帧高概率）不误触发 start
+  ---
+  duration_ms: 0.144168
+  type: 'test'
+  ...
+# Subtest: speech-end：语音后静音累计过静音尾（默认 800ms=25 帧）才判端点
+ok 226 - speech-end：语音后静音累计过静音尾（默认 800ms=25 帧）才判端点
+  ---
+  duration_ms: 0.147798
+  type: 'test'
+  ...
+# Subtest: 滞回：语音中概率落入 [negThreshold, threshold) 维持不结束
+ok 227 - 滞回：语音中概率落入 [negThreshold, threshold) 维持不结束
+  ---
+  duration_ms: 0.237388
+  type: 'test'
+  ...
+# Subtest: 静音未满即恢复语音 → 不结束（静音计数被清）
+ok 228 - 静音未满即恢复语音 → 不结束（静音计数被清）
+  ---
+  duration_ms: 0.163339
+  type: 'test'
+  ...
+# Subtest: 完整一段：start → 持续语音 → 静音尾 → end 时序正确
+ok 229 - 完整一段：start → 持续语音 → 静音尾 → end 时序正确
+  ---
+  duration_ms: 0.274608
+  type: 'test'
+  ...
+# Subtest: reset 清空内部态
+ok 230 - reset 清空内部态
+  ---
+  duration_ms: 0.129159
+  type: 'test'
+  ...
+# Subtest: 配置注入：threshold / minSilenceMs / speechPadStartMs 生效
+ok 231 - 配置注入：threshold / minSilenceMs / speechPadStartMs 生效
+  ---
+  duration_ms: 0.332386
+  type: 'test'
+  ...
+# Subtest: 默认值符合设计卡（静音尾 800ms / 阈值 0.5 / 帧 32ms）
+ok 232 - 默认值符合设计卡（静音尾 800ms / 阈值 0.5 / 帧 32ms）
+  ---
+  duration_ms: 0.338517
+  type: 'test'
+  ...
+# Subtest: driving blocks reading/payment and a cancelled latest route never restores an older route
+ok 233 - driving blocks reading/payment and a cancelled latest route never restores an older route
+  ---
+  duration_ms: 0.906151
+  type: 'test'
+  ...
+# Subtest: reminder summary reads the existing item/actions contract
+ok 234 - reminder summary reads the existing item/actions contract
+  ---
+  duration_ms: 0.306117
+  type: 'test'
+  ...
+# Subtest: built entry and WASM preserve content types and voice isolation headers
+ok 235 - built entry and WASM preserve content types and voice isolation headers
+  ---
+  duration_ms: 29.102138
+  type: 'test'
+  ...
+# Subtest: hash assets are compressed and privately cached; HEAD and ETag avoid payload
+ok 236 - hash assets are compressed and privately cached; HEAD and ETag avoid payload
+  ---
+  duration_ms: 15.568319
+  type: 'test'
+  ...
+# Subtest: host, method and build allowlist reject source, dotfiles and traversal
+ok 237 - host, method and build allowlist reject source, dotfiles and traversal
+  ---
+  duration_ms: 18.375263
+  type: 'test'
+  ...
+# Subtest: the built-assets server retains the map config/proxy boundary
+ok 238 - the built-assets server retains the map config/proxy boundary
+  ---
+  duration_ms: 6.460727
+  type: 'test'
+  ...
+# Subtest: gzip negotiation respects explicit rejection and wildcard preferences
+ok 239 - gzip negotiation respects explicit rejection and wildcard preferences
+  ---
+  duration_ms: 0.480096
+  type: 'test'
+  ...
+# Subtest: production launcher validates options and never listens after a failed build
+ok 240 - production launcher validates options and never listens after a failed build
+  ---
+  duration_ms: 0.99964
+  type: 'test'
+  ...
+# Subtest: startup builds with runtime client configuration while keeping the map secret out of assets
+ok 241 - startup builds with runtime client configuration while keeping the map secret out of assets
+  ---
+  duration_ms: 415.932533
+  type: 'test'
+  ...
+# Subtest: defines daylight surfaces for card interiors and semantic AQI badges
+ok 242 - defines daylight surfaces for card interiors and semantic AQI badges
+  ---
+  duration_ms: 1.883432
+  type: 'test'
+  ...
+# Subtest: gives conclusion-style news and search cards component-level styling
+ok 243 - gives conclusion-style news and search cards component-level styling
+  ---
+  duration_ms: 0.249097
+  type: 'test'
+  ...
+# Subtest: C14 covers one real HMI business reply for every long-session persona
+ok 244 - C14 covers one real HMI business reply for every long-session persona
+  ---
+  duration_ms: 0.96683
+  type: 'test'
+  ...
+# Subtest: C14 proves MiniMax PCM reached a non-silent browser AudioBuffer
+ok 245 - C14 proves MiniMax PCM reached a non-silent browser AudioBuffer
+  ---
+  duration_ms: 0.206288
+  type: 'test'
+  ...
+# Subtest: C14 barge-in proves both provider cancel and local source stop
+ok 246 - C14 barge-in proves both provider cancel and local source stop
+  ---
+  duration_ms: 0.168158
+  type: 'test'
+  ...
+# Subtest: C14 binds its collector to one exact healthy cloud release
+ok 247 - C14 binds its collector to one exact healthy cloud release
+  ---
+  duration_ms: 1.06515
+  type: 'test'
+  ...
+# Subtest: C14 source takes start and end snapshots and writes release evidence
+ok 248 - C14 source takes start and end snapshots and writes release evidence
+  ---
+  duration_ms: 0.208108
+  type: 'test'
+  ...
+# Subtest: HMI LLM selection is request-pinned without startup global hot-switch
+ok 249 - HMI LLM selection is request-pinned without startup global hot-switch
+  ---
+  duration_ms: 0.162199
+  type: 'test'
+  ...
+# Subtest: normSpeech 剥标点/空白/markdown 符号，只留文字
+ok 250 - normSpeech 剥标点/空白/markdown 符号，只留文字
+  ---
+  duration_ms: 2.629915
+  type: 'test'
+  ...
+# Subtest: speechCovered：化妆品级差异（md 剥法/标点）视为已覆盖，不重播
+ok 251 - speechCovered：化妆品级差异（md 剥法/标点）视为已覆盖，不重播
+  ---
+  duration_ms: 1.07948
+  type: 'test'
+  ...
+# Subtest: speechCovered：截然不同的两段话 → false（混合轮云端总结须链下一段）
+ok 252 - speechCovered：截然不同的两段话 → false（混合轮云端总结须链下一段）
+  ---
+  duration_ms: 0.212368
+  type: 'test'
+  ...
+# Subtest: emits a completed sentence before final
+ok 253 - emits a completed sentence before final
+  ---
+  duration_ms: 0.893021
+  type: 'test'
+  ...
+# Subtest: final does not repeat text already emitted by deltas
+ok 254 - final does not repeat text already emitted by deltas
+  ---
+  duration_ms: 0.157519
+  type: 'test'
+  ...
+# Subtest: final extends an unfinished delta without splitting it twice
+ok 255 - final extends an unfinished delta without splitting it twice
+  ---
+  duration_ms: 0.221608
+  type: 'test'
+  ...
+# Subtest: plays prefetched audio in enqueue order
+ok 256 - plays prefetched audio in enqueue order
+  ---
+  duration_ms: 0.432376
+  type: 'test'
+  ...
+# Subtest: cancel aborts pending synthesis and prevents stale playback
+ok 257 - cancel aborts pending synthesis and prevents stale playback
+  ---
+  duration_ms: 0.363916
+  type: 'test'
+  ...
+# Subtest: looksComplete：车控/数字单位短句 → 直发（不进宽限，不拖慢快指令）
+ok 258 - looksComplete：车控/数字单位短句 → 直发（不进宽限，不拖慢快指令）
+  ---
+  duration_ms: 1.183809
+  type: 'test'
+  ...
+# Subtest: looksComplete：疑问/完结结尾 → 直发
+ok 259 - looksComplete：疑问/完结结尾 → 直发
+  ---
+  duration_ms: 1.091669
+  type: 'test'
+  ...
+# Subtest: looksComplete：悬挂结尾（介词/助动词/未完动词）→ 进宽限
+ok 260 - looksComplete：悬挂结尾（介词/助动词/未完动词）→ 进宽限
+  ---
+  duration_ms: 0.207438
+  type: 'test'
+  ...
+# Subtest: looksComplete：空串保守判完整（不进宽限）
+ok 261 - looksComplete：空串保守判完整（不进宽限）
+  ---
+  duration_ms: 0.126828
+  type: 'test'
+  ...
+# Subtest: isFiller：纯语气词/口头噪声命中（含尾标点、叠字）
+ok 262 - isFiller：纯语气词/口头噪声命中（含尾标点、叠字）
+  ---
+  duration_ms: 0.325917
+  type: 'test'
+  ...
+# Subtest: isFiller：含实义字不命中（避免误杀请求/问候）
+ok 263 - isFiller：含实义字不命中（避免误杀请求/问候）
+  ---
+  duration_ms: 0.150998
+  type: 'test'
+  ...
+# Subtest: matchExitWord：占据整句 + 容忍尾语气/同音错字（修「没事了」「退下吧」「退下把」）
+ok 264 - matchExitWord：占据整句 + 容忍尾语气/同音错字（修「没事了」「退下吧」「退下把」）
+  ---
+  duration_ms: 0.347476
+  type: 'test'
+  ...
+# Subtest: matchExitWord：带宾语的真实命令不误命中（占据整句 slack 的关键收益）
+ok 265 - matchExitWord：带宾语的真实命令不误命中（占据整句 slack 的关键收益）
+  ---
+  duration_ms: 0.146279
+  type: 'test'
+  ...
+# Subtest: stripLeadingWakeWord：剥唤醒词整词与残片 + 清开头标点
+ok 266 - stripLeadingWakeWord：剥唤醒词整词与残片 + 清开头标点
+  ---
+  duration_ms: 0.537135
+  type: 'test'
+  ...
+# Subtest: graphemeLen：按码点计数
+ok 267 - graphemeLen：按码点计数
+  ---
+  duration_ms: 0.363056
+  type: 'test'
+  ...
+# Subtest: a valid signed-source projection is still labelled simulated
+ok 268 - a valid signed-source projection is still labelled simulated
+  ---
+  duration_ms: 1.217668
+  type: 'test'
+  ...
+# Subtest: another vehicle cannot overwrite the selected vehicle
+ok 269 - another vehicle cannot overwrite the selected vehicle
+  ---
+  duration_ms: 0.194558
+  type: 'test'
+  ...
+# Subtest: expired values are removed even if a defective frame still includes them
+ok 270 - expired values are removed even if a defective frame still includes them
+  ---
+  duration_ms: 1.570024
+  type: 'test'
+  ...
+# Subtest: an older projection and a previous gateway epoch cannot overwrite newer state
+ok 271 - an older projection and a previous gateway epoch cannot overwrite newer state
+  ---
+  duration_ms: 0.193998
+  type: 'test'
+  ...
+# Subtest: a new connection identity clears previous vehicle values
+ok 272 - a new connection identity clears previous vehicle values
+  ---
+  duration_ms: 0.314727
+  type: 'test'
+  ...
+# Subtest: legacy compatibility is v1-only and never downgrades an upgraded connection
+ok 273 - legacy compatibility is v1-only and never downgrades an upgraded connection
+  ---
+  duration_ms: 0.160769
+  type: 'test'
+  ...
+# Subtest: a v2 frame needs the authenticated connection identity first
+ok 274 - a v2 frame needs the authenticated connection identity first
+  ---
+  duration_ms: 0.181919
+  type: 'test'
+  ...
+# Subtest: missing signal provenance cannot become a displayed reading
+ok 275 - missing signal provenance cannot become a displayed reading
+  ---
+  duration_ms: 0.150979
+  type: 'test'
+  ...
+# Subtest: 电量已知也不能推算没有读到的续航
+ok 276 - 电量已知也不能推算没有读到的续航
+  ---
+  duration_ms: 1.266487
+  type: 'test'
+  ...
+# Subtest: range_km 信号存在时优先直用（不折算）
+ok 277 - range_km 信号存在时优先直用（不折算）
+  ---
+  duration_ms: 0.148699
+  type: 'test'
+  ...
+# Subtest: 镜像未就绪/缺键：明确读不到，不给数值或单位
+ok 278 - 镜像未就绪/缺键：明确读不到，不给数值或单位
+  ---
+  duration_ms: 0.252178
+  type: 'test'
+  ...
+# Subtest: 字符串数值与小数电量容错
+ok 279 - 字符串数值与小数电量容错
+  ---
+  duration_ms: 0.158539
+  type: 'test'
+  ...
+# Subtest: 典型视觉句命中
+ok 280 - 典型视觉句命中
+  ---
+  duration_ms: 1.128019
+  type: 'test'
+  ...
+# Subtest: POI 详情句让路（归 nearby，不该抓帧）
+ok 281 - POI 详情句让路（归 nearby，不该抓帧）
+  ---
+  duration_ms: 0.210768
+  type: 'test'
+  ...
+# Subtest: LBS 句不抓帧（数据飞轮 P0 收窄：「帮我看看」单独出现≠视觉意图）
+ok 282 - LBS 句不抓帧（数据飞轮 P0 收窄：「帮我看看」单独出现≠视觉意图）
+  ---
+  duration_ms: 0.148408
+  type: 'test'
+  ...
+# Subtest: 普通句不抓帧（默认一帧都不采）
+ok 283 - 普通句不抓帧（默认一帧都不采）
+  ---
+  duration_ms: 0.179118
+  type: 'test'
+  ...
+# Subtest: 空/空白输入不抓帧
+ok 284 - 空/空白输入不抓帧
+  ---
+  duration_ms: 0.188168
+  type: 'test'
+  ...
+# Subtest: 抓帧成功 → 返回 frame_id
+ok 285 - 抓帧成功 → 返回 frame_id
+  ---
+  duration_ms: 0.426916
+  type: 'test'
+  ...
+# Subtest: 上传失败 → 空串（由 Agent 侧诚实说没拿到画面，不在这里弹错打断对话）
+ok 286 - 上传失败 → 空串（由 Agent 侧诚实说没拿到画面，不在这里弹错打断对话）
+  ---
+  duration_ms: 0.293917
+  type: 'test'
+  ...
+# Subtest: 抓不到画面 → 空串，不抛出
+ok 287 - 抓不到画面 → 空串，不抛出
+  ---
+  duration_ms: 0.226957
+  type: 'test'
+  ...
+# Subtest: 注入的流不由我们关闭（复用既有 mic/camera 流时不能误停）
+ok 288 - 注入的流不由我们关闭（复用既有 mic/camera 流时不能误停）
+  ---
+  duration_ms: 0.452486
+  type: 'test'
+  ...
+# Subtest: 任何异常都被吞掉（视觉是增强不是主干）
+ok 289 - 任何异常都被吞掉（视觉是增强不是主干）
+  ---
+  duration_ms: 0.438895
+  type: 'test'
+  ...
+# Subtest: all five collections and four Size modes match the frozen Figma MCP export
+ok 290 - all five collections and four Size modes match the frozen Figma MCP export
+  ---
+  duration_ms: 2.251838
+  type: 'test'
+  ...
+# Subtest: the token comparison rejects a missing or altered declaration
+ok 291 - the token comparison rejects a missing or altered declaration
+  ---
+  duration_ms: 1.349977
+  type: 'test'
+  ...
+# Subtest: Dark: text/icon contrast survives the brightest content under the scrim and each surface
+ok 292 - Dark: text/icon contrast survives the brightest content under the scrim and each surface
+  ---
+  duration_ms: 1.97294
+  type: 'test'
+  ...
+# Subtest: Light: text/icon contrast survives the brightest content under the scrim and each surface
+ok 293 - Light: text/icon contrast survives the brightest content under the scrim and each surface
+  ---
+  duration_ms: 0.612484
+  type: 'test'
+  ...
+# Subtest: self hosted variable fonts match their recorded bytes; the entry page has no remote font requests
+ok 294 - self hosted variable fonts match their recorded bytes; the entry page has no remote font requests
+  ---
+  duration_ms: 1.00645
+  type: 'test'
+  ...
+# Subtest: IDLE⇄ARMED：hands-free 开进待机、关拆机
+ok 295 - IDLE⇄ARMED：hands-free 开进待机、关拆机
+  ---
+  duration_ms: 2.576145
+  type: 'test'
+  ...
+# Subtest: wake：ARMED→LISTENING，唤醒音效 + 开 ASR 流
+ok 296 - wake：ARMED→LISTENING，唤醒音效 + 开 ASR 流
+  ---
+  duration_ms: 0.398846
+  type: 'test'
+  ...
+# Subtest: 全链路：wake→说话→端点定稿→THINKING→SPEAKING→FOLLOWUP→免唤醒续问回 LISTENING
+ok 297 - 全链路：wake→说话→端点定稿→THINKING→SPEAKING→FOLLOWUP→免唤醒续问回 LISTENING
+  ---
+  duration_ms: 0.902292
+  type: 'test'
+  ...
+# Subtest: FOLLOWUP 超时（默认 8s）无接话 → 回 ARMED
+ok 298 - FOLLOWUP 超时（默认 8s）无接话 → 回 ARMED
+  ---
+  duration_ms: 0.512795
+  type: 'test'
+  ...
+# Subtest: D5-1 误唤醒静默回收：唤醒后 5s 无 speech → 回 ARMED，不发请求
+ok 299 - D5-1 误唤醒静默回收：唤醒后 5s 无 speech → 回 ARMED，不发请求
+  ---
+  duration_ms: 0.183558
+  type: 'test'
+  ...
+# Subtest: 误唤醒回收窗被真实开口撤销：5s 后仍在 LISTENING
+ok 300 - 误唤醒回收窗被真实开口撤销：5s 后仍在 LISTENING
+  ---
+  duration_ms: 0.147829
+  type: 'test'
+  ...
+# Subtest: D5-2 dismiss：定稿不足 2 字 → 不上云，但继续聆听（FOLLOWUP，不踢回待机）
+ok 301 - D5-2 dismiss：定稿不足 2 字 → 不上云，但继续聆听（FOLLOWUP，不踢回待机）
+  ---
+  duration_ms: 0.255727
+  type: 'test'
+  ...
+# Subtest: D5-2 dismiss：命中词表「没事」→ 本地丢弃
+ok 302 - D5-2 dismiss：命中词表「没事」→ 本地丢弃
+  ---
+  duration_ms: 0.162968
+  type: 'test'
+  ...
+# Subtest: D5-2 例外：确认条可见时，本会被 dismiss 的定稿也必须上云（裸「取消」走 F1）
+ok 303 - D5-2 例外：确认条可见时，本会被 dismiss 的定稿也必须上云（裸「取消」走 F1）
+  ---
+  duration_ms: 0.421286
+  type: 'test'
+  ...
+# Subtest: D5-2 例外对照：无确认条时同样的短句「不」被本地 dismiss
+ok 304 - D5-2 例外对照：无确认条时同样的短句「不」被本地 dismiss
+  ---
+  duration_ms: 0.474525
+  type: 'test'
+  ...
+# Subtest: D6 barge-in：SPEAKING 态持续开口 ≥300ms → 停播报转 LISTENING
+ok 305 - D6 barge-in：SPEAKING 态持续开口 ≥300ms → 停播报转 LISTENING
+  ---
+  duration_ms: 0.278037
+  type: 'test'
+  ...
+# Subtest: D6 回声指纹：SPEAKING 期 partial 命中播报文本 → 不打断（判为自触发）
+ok 306 - D6 回声指纹：SPEAKING 期 partial 命中播报文本 → 不打断（判为自触发）
+  ---
+  duration_ms: 1.818402
+  type: 'test'
+  ...
+# Subtest: D6 护栏：开口不足 300ms 即结束 → 不打断
+ok 307 - D6 护栏：开口不足 300ms 即结束 → 不打断
+  ---
+  duration_ms: 0.203358
+  type: 'test'
+  ...
+# Subtest: D6 连续 2 次疑似自触发 → 本会话关闭 L3，后续 SPEAKING 开口不再打断
+ok 308 - D6 连续 2 次疑似自触发 → 本会话关闭 L3，后续 SPEAKING 开口不再打断
+  ---
+  duration_ms: 0.181998
+  type: 'test'
+  ...
+# Subtest: barge-in 动态 pre-roll：openAsr 带 sinceSpeechStartMs=打断确认窗耗时（漏首字修复）
+ok 309 - barge-in 动态 pre-roll：openAsr 带 sinceSpeechStartMs=打断确认窗耗时（漏首字修复）
+  ---
+  duration_ms: 0.157648
+  type: 'test'
+  ...
+# Subtest: 非 barge-in 的续问进入：sinceSpeechStartMs=0（维持原短 pre-roll，不回取上轮尾音）
+ok 310 - 非 barge-in 的续问进入：sinceSpeechStartMs=0（维持原短 pre-roll，不回取上轮尾音）
+  ---
+  duration_ms: 0.199338
+  type: 'test'
+  ...
+# Subtest: SPEAKING 短开口未成打断：speech 起点被清，下次打断的 pre-roll 不带陈旧起点
+ok 311 - SPEAKING 短开口未成打断：speech 起点被清，下次打断的 pre-roll 不带陈旧起点
+  ---
+  duration_ms: 0.142518
+  type: 'test'
+  ...
+# Subtest: barge-in 后真实定稿：复位自触发计数并正常转 THINKING
+ok 312 - barge-in 后真实定稿：复位自触发计数并正常转 THINKING
+  ---
+  duration_ms: 0.235748
+  type: 'test'
+  ...
+# Subtest: 无音频回复（TTS 关/纯文本）：App 在 final 到达时调 ttsEnd，THINKING→FOLLOWUP
+ok 313 - 无音频回复（TTS 关/纯文本）：App 在 final 到达时调 ttsEnd，THINKING→FOLLOWUP
+  ---
+  duration_ms: 0.879031
+  type: 'test'
+  ...
+# Subtest: R4.3b P0：THINKING 安全超时兜底——App 未回调 ttsEnd 也不永久卡死，超时回 FOLLOWUP
+ok 314 - R4.3b P0：THINKING 安全超时兜底——App 未回调 ttsEnd 也不永久卡死，超时回 FOLLOWUP
+  ---
+  duration_ms: 0.143078
+  type: 'test'
+  ...
+# Subtest: R4.3b P0：ttsStart 进 SPEAKING 清 THINKING 超时（正路播报不被兜底打回）
+ok 315 - R4.3b P0：ttsStart 进 SPEAKING 清 THINKING 超时（正路播报不被兜底打回）
+  ---
+  duration_ms: 0.115219
+  type: 'test'
+  ...
+# Subtest: hands-free 中途关闭（任意态）→ IDLE 拆机 + 关 ASR + 清定时器
+ok 316 - hands-free 中途关闭（任意态）→ IDLE 拆机 + 关 ASR + 清定时器
+  ---
+  duration_ms: 0.121719
+  type: 'test'
+  ...
+# Subtest: 配置注入：followupWindowMs / falseWakeMs 生效
+ok 317 - 配置注入：followupWindowMs / falseWakeMs 生效
+  ---
+  duration_ms: 0.171968
+  type: 'test'
+  ...
+# Subtest: 唤醒词打断：SPEAKING 态喊唤醒词 → 停播报直接进 LISTENING
+ok 318 - 唤醒词打断：SPEAKING 态喊唤醒词 → 停播报直接进 LISTENING
+  ---
+  duration_ms: 0.142208
+  type: 'test'
+  ...
+# Subtest: U3 退出词：「退下吧」→ 退场应答 + 回 ARMED，不上云
+ok 319 - U3 退出词：「退下吧」→ 退场应答 + 回 ARMED，不上云
+  ---
+  duration_ms: 0.117099
+  type: 'test'
+  ...
+# Subtest: U3 退出词并入 dismiss：「没事了」去尾「了」命中「没事」→ 退场，不上云
+ok 320 - U3 退出词并入 dismiss：「没事了」去尾「了」命中「没事」→ 退场，不上云
+  ---
+  duration_ms: 0.103529
+  type: 'test'
+  ...
+# Subtest: U3 退出词例外：确认条可见时「退下」照发上云（走 F1，不本地退场）
+ok 321 - U3 退出词例外：确认条可见时「退下」照发上云（走 F1，不本地退场）
+  ---
+  duration_ms: 0.100729
+  type: 'test'
+  ...
+# Subtest: U5a 语气词：「嗯嗯」「哈哈」「啊」不上云，但继续聆听（P4 不退出聆听态）
+ok 322 - U5a 语气词：「嗯嗯」「哈哈」「啊」不上云，但继续聆听（P4 不退出聆听态）
+  ---
+  duration_ms: 0.153109
+  type: 'test'
+  ...
+# Subtest: P4：说语气词后可直接接着说正事，不需重新唤醒（filler→FOLLOWUP→接话→LISTENING→send）
+ok 323 - P4：说语气词后可直接接着说正事，不需重新唤醒（filler→FOLLOWUP→接话→LISTENING→send）
+  ---
+  duration_ms: 0.430656
+  type: 'test'
+  ...
+# Subtest: P4：退出词仍回待机（ARMED），与语气词的继续聆听区分
+ok 324 - P4：退出词仍回待机（ARMED），与语气词的继续聆听区分
+  ---
+  duration_ms: 0.119139
+  type: 'test'
+  ...
+# Subtest: U5b 完整句直发不进宽限（「打开空调26度」即刻发送）
+ok 325 - U5b 完整句直发不进宽限（「打开空调26度」即刻发送）
+  ---
+  duration_ms: 0.129449
+  type: 'test'
+  ...
+# Subtest: U5b 端点宽限合并：悬挂「导航去」停顿后续说「西溪湿地」→ 合并为一次请求
+ok 326 - U5b 端点宽限合并：悬挂「导航去」停顿后续说「西溪湿地」→ 合并为一次请求
+  ---
+  duration_ms: 0.189448
+  type: 'test'
+  ...
+# Subtest: U5b 宽限满无续说 → 送出原文进 THINKING
+ok 327 - U5b 宽限满无续说 → 送出原文进 THINKING
+  ---
+  duration_ms: 0.175678
+  type: 'test'
+  ...
+# Subtest: U5b qwen3 提前定稿：悬挂结尾 + VAD 仍在 speech → 零等待续说拼接
+ok 328 - U5b qwen3 提前定稿：悬挂结尾 + VAD 仍在 speech → 零等待续说拼接
+  ---
+  duration_ms: 0.150388
+  type: 'test'
+  ...
+# Subtest: U5b endpointGraceMs=0 关闭合并：悬挂结尾也即刻发送（不拖延）
+ok 329 - U5b endpointGraceMs=0 关闭合并：悬挂结尾也即刻发送（不拖延）
+  ---
+  duration_ms: 0.164848
+  type: 'test'
+  ...
+# Subtest: U5b 宽限中拆机（handsFreeOff）→ 清待发前缀，grace 定时器不再触发
+ok 330 - U5b 宽限中拆机（handsFreeOff）→ 清待发前缀，grace 定时器不再触发
+  ---
+  duration_ms: 0.135409
+  type: 'test'
+  ...
+# Subtest: U2 THINKING 真打断：处理中喊唤醒词 → 取消在飞轮 + 提示音 + 重新聆听
+ok 331 - U2 THINKING 真打断：处理中喊唤醒词 → 取消在飞轮 + 提示音 + 重新聆听
+  ---
+  duration_ms: 0.134968
+  type: 'test'
+  ...
+# Subtest: U2 THINKING 期 VAD speech 不打断（仅唤醒词可打断，防环境音误触）
+ok 332 - U2 THINKING 期 VAD speech 不打断（仅唤醒词可打断，防环境音误触）
+  ---
+  duration_ms: 0.122789
+  type: 'test'
+  ...
+# Subtest: P3 obs 指标：wake/filler/exit/merge/barge_in/cancel 各在语义点发出
+ok 333 - P3 obs 指标：wake/filler/exit/merge/barge_in/cancel 各在语义点发出
+  ---
+  duration_ms: 0.334516
+  type: 'test'
+  ...
+# Subtest: orbState 映射：各态对应 AuroraOrb 视觉态
+ok 334 - orbState 映射：各态对应 AuroraOrb 视觉态
+  ---
+  duration_ms: 0.140099
+  type: 'test'
+  ...
+# Subtest: R4.4：wake 进入定稿 onSend 带 source=wake
+ok 335 - R4.4：wake 进入定稿 onSend 带 source=wake
+  ---
+  duration_ms: 0.116438
+  type: 'test'
+  ...
+# Subtest: R4.4：FOLLOWUP 续问定稿 onSend 带 source=followup
+ok 336 - R4.4：FOLLOWUP 续问定稿 onSend 带 source=followup
+  ---
+  duration_ms: 0.161489
+  type: 'test'
+  ...
+# Subtest: R4.4：barge-in 打断后定稿 onSend 带 source=bargein 且 utteranceMs>0
+ok 337 - R4.4：barge-in 打断后定稿 onSend 带 source=bargein 且 utteranceMs>0
+  ---
+  duration_ms: 0.160128
+  type: 'test'
+  ...
+# Subtest: R4.4 P2：setVadBargeInDisabled(true) 后 SPEAKING 期 VAD speech 不打断
+ok 338 - R4.4 P2：setVadBargeInDisabled(true) 后 SPEAKING 期 VAD speech 不打断
+  ---
+  duration_ms: 0.154458
+  type: 'test'
+  ...
+# Subtest: R4.4 P2：仅唤醒词模式下 wake() 仍能打断 SPEAKING（显式意图不受 VAD 门控）
+ok 339 - R4.4 P2：仅唤醒词模式下 wake() 仍能打断 SPEAKING（显式意图不受 VAD 门控）
+  ---
+  duration_ms: 0.127819
+  type: 'test'
+  ...
+# Subtest: 缺口B 续问窗回声：ASR 定稿是播报文本的一段 → 不上云、留在续问窗
+ok 340 - 缺口B 续问窗回声：ASR 定稿是播报文本的一段 → 不上云、留在续问窗
+  ---
+  duration_ms: 0.179228
+  type: 'test'
+  ...
+# Subtest: 缺口A 判据：ASR 听错一个字（「当」→「的」）仍判回声
+ok 341 - 缺口A 判据：ASR 听错一个字（「当」→「的」）仍判回声
+  ---
+  duration_ms: 0.170759
+  type: 'test'
+  ...
+# Subtest: 缺口A 同音字：ASR 把「阿伽门农」听成「阿加门农」仍判回声（真机原字）
+ok 342 - 缺口A 同音字：ASR 把「阿伽门农」听成「阿加门农」仍判回声（真机原字）
+  ---
+  duration_ms: 0.156728
+  type: 'test'
+  ...
+# Subtest: 缺口A 反向：真续问不许被当回声吞掉
+ok 343 - 缺口A 反向：真续问不许被当回声吞掉
+  ---
+  duration_ms: 0.173568
+  type: 'test'
+  ...
+# Subtest: 续问窗回声不计入 barge-in 自触发计数（两件事，不许混）
+ok 344 - 续问窗回声不计入 barge-in 自触发计数（两件事，不许混）
+  ---
+  duration_ms: 0.213118
+  type: 'test'
+  ...
+# Subtest: 缺口A 归一：SPEAKING 期 partial 带标点也判得出回声（旧判据在此失效）
+ok 345 - 缺口A 归一：SPEAKING 期 partial 带标点也判得出回声（旧判据在此失效）
+  ---
+  duration_ms: 0.149258
+  type: 'test'
+  ...
+# Subtest: AR03 stopSpeaking：SPEAKING → ARMED（不开续问窗，续说要重新唤醒）
+ok 346 - AR03 stopSpeaking：SPEAKING → ARMED（不开续问窗，续说要重新唤醒）
+  ---
+  duration_ms: 0.143749
+  type: 'test'
+  ...
+# Subtest: AR03 stopSpeaking：THINKING 期同样收到 ARMED（还没出声就按停）
+ok 347 - AR03 stopSpeaking：THINKING 期同样收到 ARMED（还没出声就按停）
+  ---
+  duration_ms: 0.123019
+  type: 'test'
+  ...
+# Subtest: AR03 stopSpeaking：不复位会话级插话护栏（那是 recycle 的事，走 IDLE 才复位）
+ok 348 - AR03 stopSpeaking：不复位会话级插话护栏（那是 recycle 的事，走 IDLE 才复位）
+  ---
+  duration_ms: 0.152729
+  type: 'test'
+  ...
+# Subtest: AR03 stopSpeaking：ARMED / IDLE 下是空操作，不把待机踢成别的态
+ok 349 - AR03 stopSpeaking：ARMED / IDLE 下是空操作，不把待机踢成别的态
+  ---
+  duration_ms: 0.110519
+  type: 'test'
+  ...
+# Subtest: G-07 systemInterrupt：LISTENING 中断 → 关 ASR、不发、回 ARMED；记 metric
+ok 350 - G-07 systemInterrupt：LISTENING 中断 → 关 ASR、不发、回 ARMED；记 metric
+  ---
+  duration_ms: 0.610014
+  type: 'test'
+  ...
+# Subtest: G-07 systemInterrupt：FOLLOWUP 窗被中断 → 立即 ARMED，8s 定时器清掉（之后不再有二次迁移）
+ok 351 - G-07 systemInterrupt：FOLLOWUP 窗被中断 → 立即 ARMED，8s 定时器清掉（之后不再有二次迁移）
+  ---
+  duration_ms: 0.142398
+  type: 'test'
+  ...
+# Subtest: G-07 systemInterrupt：SPEAKING / THINKING 同 stopSpeaking（停播回 ARMED，不进 FOLLOWUP）；ARMED / IDLE 空操作
+ok 352 - G-07 systemInterrupt：SPEAKING / THINKING 同 stopSpeaking（停播回 ARMED，不进 FOLLOWUP）；ARMED / IDLE 空操作
+  ---
+  duration_ms: 0.204938
+  type: 'test'
+  ...
+# Subtest: G-07 systemInterrupt：不复位会话级插话护栏（与 stopSpeaking 同一分界）
+ok 353 - G-07 systemInterrupt：不复位会话级插话护栏（与 stopSpeaking 同一分界）
+  ---
+  duration_ms: 0.151019
+  type: 'test'
+  ...
+# Subtest: 拒识结束这次连续对话：THINKING → ARMED，App 随后补的 ttsEnd 是空操作、不再开续问窗
+ok 354 - 拒识结束这次连续对话：THINKING → ARMED，App 随后补的 ttsEnd 是空操作、不再开续问窗
+  ---
+  duration_ms: 0.209708
+  type: 'test'
+  ...
+# Subtest: 拒识先于 turnEnded 之后到达（FOLLOWUP 里）同样收掉续问窗
+ok 355 - 拒识先于 turnEnded 之后到达（FOLLOWUP 里）同样收掉续问窗
+  ---
+  duration_ms: 0.159689
+  type: 'test'
+  ...
+# Subtest: 拒识不打断已经开始的新一轮聆听、也不在待机 / 拆机态做任何事
+ok 356 - 拒识不打断已经开始的新一轮聆听、也不在待机 / 拆机态做任何事
+  ---
+  duration_ms: 0.171399
+  type: 'test'
+  ...
+# Subtest: 续问窗里的噪声只回到窗的剩余时间：从答完起算 8 秒到点回 ARMED，不续窗
+ok 357 - 续问窗里的噪声只回到窗的剩余时间：从答完起算 8 秒到点回 ARMED，不续窗
+  ---
+  duration_ms: 0.179018
+  type: 'test'
+  ...
+# Subtest: 噪声把窗用完：定稿到达时已过截止时刻 ⇒ 直接回 ARMED（可观测）
+ok 358 - 噪声把窗用完：定稿到达时已过截止时刻 ⇒ 直接回 ARMED（可观测）
+  ---
+  duration_ms: 0.156998
+  type: 'test'
+  ...
+# Subtest: 续问窗里一连串回声 / 空定稿都不续窗
+ok 359 - 续问窗里一连串回声 / 空定稿都不续窗
+  ---
+  duration_ms: 0.213028
+  type: 'test'
+  ...
+# Subtest: 唤醒进来的那一句被本地丢掉仍开一个完整的窗（不因一声「嗯」把刚叫醒的用户踢走）
+ok 360 - 唤醒进来的那一句被本地丢掉仍开一个完整的窗（不因一声「嗯」把刚叫醒的用户踢走）
+  ---
+  duration_ms: 0.126969
+  type: 'test'
+  ...
+# Subtest: 窗里真正说出口的一句照常上云；答完重新起算一个完整的窗
+ok 361 - 窗里真正说出口的一句照常上云；答完重新起算一个完整的窗
+  ---
+  duration_ms: 0.153608
+  type: 'test'
+  ...
+# [voice-metric] voice_wake_count 1
+# [voice-metric] voice_wake_count 2
+# [voice-metric] voice_turn_cancelled_count 1
+# [voice-metric] voice_wake_count 1
+# [voice-metric] voice_false_wake_dismissed 1
+# [voice-metric] voice_filler_dismissed 1
+# [voice-metric] voice_exit_word_count 1
+# [voice-metric] voice_endpoint_merge_count 1
+# [voice-metric] voice_barge_in_count 1
+# [voice-metric] voice_turn_cancelled_count 1
+# [voice-metric] voice_wake_count 1
+# Subtest: bumpVoiceMetric：已知事件累计到对应指标
+ok 362 - bumpVoiceMetric：已知事件累计到对应指标
+  ---
+  duration_ms: 1.579795
+  type: 'test'
+  ...
+# Subtest: bumpVoiceMetric：未知事件忽略，不建垃圾键
+ok 363 - bumpVoiceMetric：未知事件忽略，不建垃圾键
+  ---
+  duration_ms: 0.565334
+  type: 'test'
+  ...
+# Subtest: bumpVoiceMetric：六项承诺指标名齐全
+ok 364 - bumpVoiceMetric：六项承诺指标名齐全
+  ---
+  duration_ms: 0.730483
+  type: 'test'
+  ...
+# Subtest: resetVoiceMetrics：清零
+ok 365 - resetVoiceMetrics：清零
+  ---
+  duration_ms: 0.785153
+  type: 'test'
+  ...
+# Subtest: 未识别时默认 primary（= P4 之前的行为）
+ok 366 - 未识别时默认 primary（= P4 之前的行为）
+  ---
+  duration_ms: 1.06312
+  type: 'test'
+  ...
+# Subtest: 攒够 1.5s 才发请求——此刻用户还在说
+ok 367 - 攒够 1.5s 才发请求——此刻用户还在说
+  ---
+  duration_ms: 4.589976
+  type: 'test'
+  ...
+# Subtest: 续说/续问不重识（一次唤醒锁一次）
+ok 368 - 续说/续问不重识（一次唤醒锁一次）
+  ---
+  duration_ms: 4.784574
+  type: 'test'
+  ...
+# Subtest: 同一唤醒窗内再次 arm(true) 也不重识
+ok 369 - 同一唤醒窗内再次 arm(true) 也不重识
+  ---
+  duration_ms: 4.939792
+  type: 'test'
+  ...
+# Subtest: reset 后（回 ARMED/IDLE）下次唤醒重新识别
+ok 370 - reset 后（回 ARMED/IDLE）下次唤醒重新识别
+  ---
+  duration_ms: 2.994701
+  type: 'test'
+  ...
+# Subtest: 识别成功后锁定 occupant 与显示名
+ok 371 - 识别成功后锁定 occupant 与显示名
+  ---
+  duration_ms: 1.951371
+  type: 'test'
+  ...
+# Subtest: 后端诚实降级（below_threshold）→ 保持 primary
+ok 372 - 后端诚实降级（below_threshold）→ 保持 primary
+  ---
+  duration_ms: 1.00871
+  type: 'test'
+  ...
+# Subtest: 认不出就不叫名字——降级回 primary 但不继承 primary 的称呼
+ok 373 - 认不出就不叫名字——降级回 primary 但不继承 primary 的称呼
+  ---
+  duration_ms: 1.797022
+  type: 'test'
+  ...
+# Subtest: 识别请求失败 → 恒回 primary，绝不抛出把一轮对话弄失败
+ok 374 - 识别请求失败 → 恒回 primary，绝不抛出把一轮对话弄失败
+  ---
+  duration_ms: 1.387526
+  type: 'test'
+  ...
+# Subtest: 未 arm 时喂帧不累积（未唤醒不采集）
+ok 375 - 未 arm 时喂帧不累积（未唤醒不采集）
+  ---
+  duration_ms: 0.690244
+  type: 'test'
+  ...
+# Subtest: 唤醒后还没开口的帧一律不计入——那一秒是提示音和静音
+ok 376 - 唤醒后还没开口的帧一律不计入——那一秒是提示音和静音
+  ---
+  duration_ms: 0.322637
+  type: 'test'
+  ...
+# Subtest: 累计的是语音段时长，不是墙钟时长
+ok 377 - 累计的是语音段时长，不是墙钟时长
+  ---
+  duration_ms: 0.645263
+  type: 'test'
+  ...
+# Subtest: arm 时已在语音段（唤醒词连着说完就接下一句）立刻开始收
+ok 378 - arm 时已在语音段（唤醒词连着说完就接下一句）立刻开始收
+  ---
+  duration_ms: 0.292607
+  type: 'test'
+  ...
+# Subtest: reset 清掉语音段状态（下次唤醒不继承上次的「还在说」）
+ok 379 - reset 清掉语音段状态（下次唤醒不继承上次的「还在说」）
+  ---
+  duration_ms: 0.215238
+  type: 'test'
+  ...
+# Subtest: 端点补发：短问句没攒够也要发一次
+ok 380 - 端点补发：短问句没攒够也要发一次
+  ---
+  duration_ms: 0.311057
+  type: 'test'
+  ...
+# Subtest: 端点补发不重复发（已发过就不再发）
+ok 381 - 端点补发不重复发（已发过就不再发）
+  ---
+  duration_ms: 3.626515
+  type: 'test'
+  ...
+# Subtest: 一帧没收到时端点不发空探针
+ok 382 - 一帧没收到时端点不发空探针
+  ---
+  duration_ms: 0.225218
+  type: 'test'
+  ...
+# Subtest: 取值是同步的——没有「等一下结果」的接口
+ok 383 - 取值是同步的——没有「等一下结果」的接口
+  ---
+  duration_ms: 0.095399
+  type: 'test'
+  ...
+# Subtest: 默认门槛与网关同口径
+ok 384 - 默认门槛与网关同口径
+  ---
+  duration_ms: 0.076129
+  type: 'test'
+  ...
+# Subtest: Float32 → Int16 转换范围正确
+ok 385 - Float32 → Int16 转换范围正确
+  ---
+  duration_ms: 1.500145
+  type: 'test'
+  ...
+# Subtest: CA2-15 S2：accept 才保存网关签发的证明，没认出与重置都清空
+ok 386 - CA2-15 S2：accept 才保存网关签发的证明，没认出与重置都清空
+  ---
+  duration_ms: 2.988691
+  type: 'test'
+  ...
+# Subtest: voiceprint uploads preserve only the PCM view bytes for ordinary and shared buffers
+ok 387 - voiceprint uploads preserve only the PCM view bytes for ordinary and shared buffers
+  ---
+  duration_ms: 17.866677
+  type: 'test'
+  ...
+# Subtest: existing Blob clips remain supported by enrollment and identification
+ok 388 - existing Blob clips remain supported by enrollment and identification
+  ---
+  duration_ms: 0.765422
+  type: 'test'
+  ...
+# Subtest: turns the active weather warning into a compact card callout
+ok 389 - turns the active weather warning into a compact card callout
+  ---
+  duration_ms: 1.272688
+  type: 'test'
+  ...
+# Subtest: returns no callout when there is no active warning
+ok 390 - returns no callout when there is no active warning
+  ---
+  duration_ms: 0.151528
+  type: 'test'
+  ...
+# Subtest: keeps weather-alert status visible even when there is no active warning
+ok 391 - keeps weather-alert status visible even when there is no active warning
+  ---
+  duration_ms: 0.340527
+  type: 'test'
+  ...
+# Subtest: does not label denied weather warnings as no warning
+ok 392 - does not label denied weather warnings as no warning
+  ---
+  duration_ms: 1.06679
+  type: 'test'
+  ...
+# Subtest: nextBackoff grows exponentially and caps (no jitter when rand=0)
+ok 393 - nextBackoff grows exponentially and caps (no jitter when rand=0)
+  ---
+  duration_ms: 1.06189
+  type: 'test'
+  ...
+# Subtest: nextBackoff adds bounded jitter
+ok 394 - nextBackoff adds bounded jitter
+  ---
+  duration_ms: 0.198738
+  type: 'test'
+  ...
+# Subtest: appendToken: empty token returns url unchanged
+ok 395 - appendToken: empty token returns url unchanged
+  ---
+  duration_ms: 0.138739
+  type: 'test'
+  ...
+# Subtest: appendToken: adds ?token= to plain url
+ok 396 - appendToken: adds ?token= to plain url
+  ---
+  duration_ms: 0.119839
+  type: 'test'
+  ...
+# Subtest: appendToken: uses & when url already has query
+ok 397 - appendToken: uses & when url already has query
+  ---
+  duration_ms: 0.186438
+  type: 'test'
+  ...
+# Subtest: appendToken: url-encodes token
+ok 398 - appendToken: url-encodes token
+  ---
+  duration_ms: 0.117009
+  type: 'test'
+  ...
+# Subtest: queues sends while disconnected, flushes in order on open
+ok 399 - queues sends while disconnected, flushes in order on open
+  ---
+  duration_ms: 1.091699
+  type: 'test'
+  ...
+# Subtest: bounded queue keeps newest, drops oldest
+ok 400 - bounded queue keeps newest, drops oldest
+  ---
+  duration_ms: 0.215458
+  type: 'test'
+  ...
+# Subtest: reconnects after unexpected close
+ok 401 - reconnects after unexpected close
+  ---
+  duration_ms: 0.412076
+  type: 'test'
+  ...
+# Subtest: close() stops reconnection
+ok 402 - close() stops reconnection
+  ---
+  duration_ms: 0.397646
+  type: 'test'
+  ...
+# Subtest: reports status transitions and parses JSON messages
+ok 403 - reports status transitions and parses JSON messages
+  ---
+  duration_ms: 0.349426
+  type: 'test'
+  ...
+# Subtest: reconnectNow: 关掉旧 socket、保留队列、立即重连并 flush
+ok 404 - reconnectNow: 关掉旧 socket、保留队列、立即重连并 flush
+  ---
+  duration_ms: 0.250498
+  type: 'test'
+  ...
+# Subtest: reconnectNow: 旧 socket 的 onclose 迟到不会排出第二条重连链
+ok 405 - reconnectNow: 旧 socket 的 onclose 迟到不会排出第二条重连链
+  ---
+  duration_ms: 0.193448
+  type: 'test'
+  ...
+# Subtest: wake: 正在退避等待 ⇒ 立刻连、退避档位清零，队列照常 flush
+ok 406 - wake: 正在退避等待 ⇒ 立刻连、退避档位清零，队列照常 flush
+  ---
+  duration_ms: 1.05235
+  type: 'test'
+  ...
+# Subtest: wake: 已连上或正在握手 ⇒ no-op（不打断一次可能马上成功的握手）
+ok 407 - wake: 已连上或正在握手 ⇒ no-op（不打断一次可能马上成功的握手）
+  ---
+  duration_ms: 0.188168
+  type: 'test'
+  ...
+# Subtest: wake: close() 之后是 no-op
+ok 408 - wake: close() 之后是 no-op
+  ---
+  duration_ms: 0.147868
+  type: 'test'
+  ...
+# Subtest: reconnectNow: close() 之后是 no-op（用户主动关了就别自己爬起来）
+ok 409 - reconnectNow: close() 之后是 no-op（用户主动关了就别自己爬起来）
+  ---
+  duration_ms: 0.110569
+  type: 'test'
+  ...
+# Subtest: AR01: 撤回指定队列项，保留其余顺序，不发送 cancel
+ok 410 - AR01: 撤回指定队列项，保留其余顺序，不发送 cancel
+  ---
+  duration_ms: 0.244208
+  type: 'test'
+  ...
+# Subtest: AR01: 重连时重新检查失效/到期；onSent 只在实际发送后调用
+ok 411 - AR01: 重连时重新检查失效/到期；onSent 只在实际发送后调用
+  ---
+  duration_ms: 0.204518
+  type: 'test'
+  ...
+# Subtest: AR01: flush 回调撤回下一项，不能因已取出快照仍发送它
+ok 412 - AR01: flush 回调撤回下一项，不能因已取出快照仍发送它
+  ---
+  duration_ms: 0.130559
+  type: 'test'
+  ...
+# Subtest: AR01: 观察回调抛错不能重发已发帧；守卫抛错则拒绝发送
+ok 413 - AR01: 观察回调抛错不能重发已发帧；守卫抛错则拒绝发送
+  ---
+  duration_ms: 0.173848
+  type: 'test'
+  ...
+# Subtest: AR01: 控制帧只在线发送，离线调用不留在队列
+ok 414 - AR01: 控制帧只在线发送，离线调用不留在队列
+  ---
+  duration_ms: 0.133269
+  type: 'test'
+  ...
+# Subtest: AR01: 队列溢出通知被丢项，不把未发送项伪装成已发
+ok 415 - AR01: 队列溢出通知被丢项，不把未发送项伪装成已发
+  ---
+  duration_ms: 0.156489
+  type: 'test'
+  ...
+# Subtest: F06: 补发失败后连接不再自称 open——失败项留队首、判死重连、重连后从它按序继续
+ok 416 - F06: 补发失败后连接不再自称 open——失败项留队首、判死重连、重连后从它按序继续
+  ---
+  duration_ms: 0.242097
+  type: 'test'
+  ...
+# Subtest: F06: 失败后再次发送：新请求排在滞留项之后，不越过
+ok 417 - F06: 失败后再次发送：新请求排在滞留项之后，不越过
+  ---
+  duration_ms: 0.296117
+  type: 'test'
+  ...
+# Subtest: F06: 失败与取消同时发生：撤回的项不复活，其余按序补发
+ok 418 - F06: 失败与取消同时发生：撤回的项不复活，其余按序补发
+  ---
+  duration_ms: 0.187428
+  type: 'test'
+  ...
+# Subtest: F06: 直发抛错同样入队 + 判死，不把异常抛给调用方；重连后只发一次
+ok 419 - F06: 直发抛错同样入队 + 判死，不把异常抛给调用方；重连后只发一次
+  ---
+  duration_ms: 0.262138
+  type: 'test'
+  ...
+# Subtest: F06: 连接开着但有积压（onSent 回调里的再入发送）：新项排到队尾并按序发出，返回值如实
+ok 420 - F06: 连接开着但有积压（onSent 回调里的再入发送）：新项排到队尾并按序发出，返回值如实
+  ---
+  duration_ms: 0.181959
+  type: 'test'
+  ...
+1..420
+# tests 420
+# suites 0
+# pass 420
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1611.741893
+npm notice 
+npm notice New major version of npm available! 8.19.2 -> 12.2.0
+npm notice Changelog: <https://github.com/npm/cli/releases/tag/v12.2.0>
+npm notice Run `npm install -g npm@12.2.0` to update!
+npm notice 

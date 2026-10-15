@@ -1,0 +1,479 @@
+"""闲聊 Agent —— 生态(ecosystem) Agent 范本。
+
+演示：调用 LLM Gateway、带会话历史、流式话术(handle_stream)。
+作为系统的兜底 fallback（其他 Agent 拒绝/失败时降级到这里）。
+
+开放域延迟优化（task 4）：
+- 模型分层：闲聊/情绪等开放域默认走"快"模型（低延迟），meta.model_pref=deep 时才用重模型。
+- 话术长度：meta.answer_length 控制**提示语**的口气；max_tokens 只是防失控的兜底上限（见 _LENGTH），不是长度控制。
+- 助手昵称：meta.assistant_name 注入 system，呼应 HMI 设置。
+这些 meta 由编排器从 HandleRequest.meta 透传（见 orchestrator/cloud/engine.py _build_context）。
+"""
+from __future__ import annotations
+import json
+import asyncio
+import logging
+import os
+import re
+
+from agents._sdk import BaseAgent, AgentResult
+from agents._sdk.grounding import shanghai_now
+# Q6 审计出口 2026-08-28 从 `.audit` 迁入 `runtime/session_facts`（C4）：
+# 编排层也要用同一条判据，而云侧镜像不 COPY agents/——在两边各写一份
+# 正是 B1 那个 bug 的成因。这里只剩兜底位的消费，判据与话术都在那一份里。
+from runtime import memory_read
+from runtime.clock_question import WEEKDAY, bare_question, clock_answer, clock_question
+from runtime.question_shape import is_non_directive_question
+from runtime.session_facts import (
+    asks_when, audit_answer, is_execution_audit_question,
+)
+from .mem_source import with_provenance
+from runtime.safety_signal import (DRIVER_STATE_ADVICE, alert_advice,
+                                       alert_level, alert_resolved, alert_signal,
+                                       driver_state, driver_state_mentioned,
+                                       refusal_stance, refuses_safety_advice)
+
+logger = logging.getLogger("agent.chitchat")
+
+_MANIFEST = os.path.join(os.path.dirname(os.path.dirname(__file__)), "manifest.yaml")
+
+# ── 钟点/日期/星期确定性直答（badcase 2026-07-15：「现在几点了」被 LLM 编造时刻）──
+# 系统自己持有墙钟，这类问题不该让 LLM 回答——prompt 锚只有日期时，模型会编一个像真的
+# 时刻（实测 14:25 答 14:43 / 10:06，两采样全错）。判据与答句 2026-10-09 收进
+# `runtime/clock_question.py`（内置时间工具同用一份，正则仍占据整句、防劫持含时间词的其他意图）。
+
+
+# ── 身份问句确定性直答（真机 2026-07-27：换人说话后仍答上一个人的名字）──────────
+# 同墙钟一族：**系统自己持有的事实不交给 LLM 答**。声纹已经告诉我们这轮是谁，
+# 而车里只有一个会话、说话人会换——上一轮刚管别人叫过「阿灵」，这一轮 system 明写着泓舟，
+# 模型照样答「你是阿灵呀，刚才不是说了嘛」。**加强提示词无效**（实测两个方向各两次全错）：
+# 对话历史里的称呼比 system 提示更近、更像既成事实，靠改 prompt 是在跟采样赌。
+# 正则同样须**占据整句**（去礼貌前缀与语气尾词后锚 ^$），防劫持「我是谁的乘客」这类。
+_WHOAMI_RE = re.compile(
+    r"^(你知道|你还记得|还记得|你猜)?(我是谁|我叫什么(名字)?|我的名字(是什么|叫什么)?|"
+    r"知道我是谁)(吗|嘛)?$")
+
+
+def _identity_answer(text: str, meta: dict) -> str:
+    """「我是谁」→ 按声纹认定的乘员称呼直答；非此类或未识别出人返回空串（走 LLM）。"""
+    who = (meta or {}).get("occupant_name", "").strip()
+    if not who:
+        return ""      # 认不出就别硬答——诚实降级由 LLM 按 system 里没有名字来处理
+    t = bare_question(text)
+    return f"你是{who}呀。" if t and _WHOAMI_RE.match(t) else ""
+
+
+def _clock_answer(text: str) -> str:
+    """纯钟点/日期/星期问句 → 按系统墙钟直答；非此类返回空串（走 LLM）。"""
+    kind = clock_question(text)
+    return clock_answer(kind, shanghai_now()) if kind else ""
+
+# 时效兜底（2026-07-12 mode-routing 设计 P1-2）：LLM 判定「必须联网才能正确回答」时只输出
+# 该标记；agent 解析后零播报、经通用 escalate 协议改派 info.search（engine 有界一跳消费）。
+_SEARCH_MARK = "<search>"
+_SEARCH_MARK_RE = re.compile(r"^\s*<search>\s*(.{1,50}?)\s*</search>", re.S)
+
+
+def _parse_search_mark(text: str) -> str:
+    """整段回复是否以 <search>查询词</search> 开头；是则返回查询词，否则空串。"""
+    m = _SEARCH_MARK_RE.match(text or "")
+    return m.group(1).strip() if m else ""
+
+
+#: 车辆功能问句交给有把握的手册（2026-10-04，docs/design/2026-10-04-chitchat-defers-to-confident-manual.md）：
+#: 手册 Agent 的内部意图只跑词法检索、不调模型；查不到 / 不可达就照常闲聊，所以超时给得紧。
+_MANUAL_AGENT, _MANUAL_CLAIM, _MANUAL_QUERY = "manual-rag", "manual.claim", "manual.query"
+_MANUAL_CLAIM_TIMEOUT_S = 1.5
+
+
+#: 场景定义问交给场景编排（2026-10-05，docs/design/2026-10-05-scene-describe.md §6）：规划器偶尔把「露营模式是什么意思」
+#: 判成无需动作、退到闲聊，闲聊就凭常识编一个露营模式。场景编排的内部意图只查场景表、不调模型。
+_SCENE_AGENT, _SCENE_CLAIM, _SCENE_DESCRIBE = "scene-orchestrator", "scene.claim", "scene.describe"
+_SCENE_CLAIM_TIMEOUT_S = 1.0
+
+
+def _scene_escalate_result(scene: str) -> AgentResult:
+    """零播报改派场景定义问：只交认领到的场景名。"""
+    return AgentResult(speech="", data={"_escalate": {
+        "intent": _SCENE_DESCRIBE, "slots": {"scene": scene}, "reason": "scene_definition"}})
+
+
+def _manual_escalate_result(text: str) -> AgentResult:
+    """零播报改派手册问答：只交用户原话，不交闲聊的任何生成内容。"""
+    return AgentResult(speech="", data={"_escalate": {
+        "intent": _MANUAL_QUERY, "slots": {"question": text},
+        "reason": "manual_confident"}})
+
+
+def _escalate_result(query: str) -> AgentResult:
+    """零播报 + 通用改派声明（协议登记见 docs/conventions.md「Agent→编排结果保留键」）。"""
+    return AgentResult(speech="", data={"_escalate": {
+        "intent": "info.search", "slots": {"query": query},
+        "reason": "needs_realtime"}})
+
+# 话术长度 → (max_tokens 硬上限, 提示语)。
+#
+# **长度由提示语约束，max_tokens 只是防失控的兜底**（2026-09-18）。此前 short/standard/detailed =
+# 140/220/440 把上限当长度控制用：用户明确要长内容（「给我讲一个很长的故事」「介绍深圳的历史 in detail」）时
+# 模型会按用户说的写、越过提示语，然后被硬上限在句中掐断——collector 09-17/18 两例 357 / 426 字的回答
+# 分别停在「离开港口」「如今，深圳是中国」，App 上看到的就是「长文本展示不全」；近 200 会话里 66 轮
+# chitchat 的 p90 只有 71 字，被掐的恰好就是这两轮长请求。上限撞上永远只能产出半句，它不该是常态路径。
+# 数值按「在 D0 流式截止（orchestrator.cloud.clients.AGENT_STREAM_TIMEOUT_S）内一定能生成完」定：
+# MiniMax-M3 实测 ~40 token/s、尾部 ~20 token/s，900 token 在尾部也只要 45s。
+_LENGTH = {
+    "short": (300, "用一两句话简短回答。"),
+    "standard": (600, "回答控制在两三句话内。"),
+    "detailed": (900, "可以多说几句，给出更具体的信息，但仍保持口语。"),
+}
+# 流式调用的总截止（秒）：要装得下上面最长档在尾部速度下的生成时间，又必须小于 D0 的 gRPC 截止
+# （clients.AGENT_STREAM_TIMEOUT_S = 60），否则先被编排层掐断、用户看到的是「抱歉，刚才没说完」把已流文本整段替掉。
+_STREAM_TIMEOUT_S = 55
+
+
+def _resolve_model(meta: dict, slots: dict | None = None) -> str:
+    """开放域模型分层：deep→重模型档位（primary），其余(fast/auto/未设)→快模型档位，低延迟。
+
+    返回的是**档位哨兵**而非具体模型名（``""``=primary、``"@fast"``=fast）——由 llm-gateway 按当前
+    active provider 解析成该厂商的具体模型（见 llm-gateway/llm_runtime.py::resolve_models）。这样多
+    LLM 源切换厂商时，不会把某家的模型名（如 mimo-v2.5）误发给另一家（如 DeepSeek）而报错。
+
+    slots.depth：Planner 按问题类型下发（manifest desc 引导知识/解释类传 deep），优先于
+    会话级 meta.model_pref——寒暄走快模型省延迟，科普/解释用更强模型保质量。"""
+    pref = (slots or {}).get("depth") or (meta or {}).get("model_pref", "auto")
+    return "" if pref == "deep" else "@fast"
+
+
+def _length(meta: dict) -> tuple[int, str]:
+    return _LENGTH.get((meta or {}).get("answer_length", "standard"), _LENGTH["standard"])
+
+
+def _safety_answer(text: str) -> tuple[str, dict]:
+    """安全信号的**确定性**直答。返回 (话术, 告警声明)；不是安全问题返回 ("", {})；只提到风险（话题 / 假设句）时告警声明为空。
+
+    与 `_clock_answer` / `_identity_answer` 同一形态、同一理由：
+    **系统持有的判据绝不交给 LLM 答**。这里持有的是「这句话里有没有安全信号」。
+
+    为什么 chitchat 需要这个：安全问题的落域本身有方差——「红色机油灯亮了怎么办」
+    在真栈三次取样里分别落到 manual-rag、闲聊和澄清。**加固了 manual-rag 与
+    road-safety 之后，兜底这条路就成了唯一没有护栏的入口**，而它恰恰是
+    QA 轮答出「收到，那不提醒也不停车」的那一条（迷你集 SF4）。
+
+    判据取自 `runtime/safety_signal`（唯一实现，三个 Agent 共用）。
+    """
+    state = driver_state(text)
+    if state:
+        spec = DRIVER_STATE_ADVICE[state]
+        return spec["speech"], {"level": spec["level"], "signal": spec["signal"]}
+    level = alert_level(text)
+    if level:
+        return (alert_advice(level),
+                {"level": level, "signal": alert_signal(text) or "车辆告警"})
+    # 追加批 K：提到这类风险、但不是此刻自述（「喝酒后多久能开车」「万一开车时犯困怎么办」）——同一类安全常识，
+    # 不断言「您现在」、不声明会话告警。排在车辆告警之后：此刻亮着的灯比一个话题更要紧。
+    mentioned = driver_state_mentioned(text)
+    if mentioned:
+        return DRIVER_STATE_ADVICE[mentioned]["topic_speech"], {}
+    return "", {}
+
+
+def _active_alert(meta: dict) -> dict:
+    """编排下发的会话告警（`meta.focus_safety_alert`）。解析失败一律当没有。"""
+    raw = (meta or {}).get("focus_safety_alert")
+    if not raw:
+        return {}
+    try:
+        alert = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(alert, dict) or alert.get("level") not in ("critical", "amber"):
+        return {}
+    return alert
+
+
+def _system(meta: dict, text: str = "") -> str:
+    name = (meta or {}).get("assistant_name") or "小舟"
+    # QA T47 裁决 A（2026-09-19）：用户这一句已经说了「机油灯灭了 / 处理好了」，会话里那条
+    # 旧告警不再是这轮回答的前提（编排同一轮据同一份判据清焦点；这里只是让**这一轮**的
+    # prompt 不再带着它劝停车）。判据 `runtime.safety_signal.alert_resolved`，与 road-safety 同源。
+    alert = {} if alert_resolved(text or "") else _active_alert(meta)
+    # M4 P4：声纹识别出的说话人称呼。**没有它「你知道我是谁」只能靠语义召回碰运气**——
+    # 而这类身份问句恰恰是用户验证声纹是否生效的第一句话，必须确定性答得上。
+    # 只影响称呼与口吻，不参与任何权限判定（声纹不作鉴权因子，RFC §6.1）。
+    who = (meta or {}).get("occupant_name", "").strip()
+    _, hint = _length(meta)
+    now = shanghai_now()
+    # 锚点带星期与时刻：纯钟点问句已被 _clock_answer 确定性拦下，这里供「该吃午饭了吗」
+    # 这类时间相对话题参考——没有时刻锚模型会编一个像真的（badcase 2026-07-15）。
+    return (
+        f"你是车载语音助手「{name}」。今天是{now:%Y年%m月%d日}"
+        f"（星期{WEEKDAY[now.weekday()]}），现在{now:%H:%M}。"
+        # **必须压过对话历史**（2026-07-27 真机）：车里只有一个会话而说话人会换。
+        # 上一轮刚管别人叫过「阿灵」，这一轮声纹已认出是泓舟、system 也注了泓舟，
+        # 模型照样答「你是阿灵呀，刚才不是说了嘛」——**历史里的称呼比 system 提示更近、更像事实**。
+        # 光说「他是谁」不够，得显式告诉模型「历史里的称呼可能是别人」。
+        + (f"当前跟你说话的是「{who}」。**车内会换人说话**：上文出现过的其他称呼指的是别人，"
+           f"不是现在这位——一律以「{who}」为准，别沿用上文的称呼。"
+           f"他问「我是谁/你知道我是谁吗」时直接叫出「{who}」，别说不知道；"
+           "平时不必每句都称呼。" if who else "")
+        + f"风格简洁、口语化、温暖、安全。{hint}"
+        "适合驾车时收听；不输出列表、代码或长文。"
+        "若用户表达负面情绪，先共情、再轻轻给出建议或陪伴，不要说教。"
+        "涉及实时或近期事实时，如果你不确定就明说无法确认并建议联网查询，绝不编造。"
+        "如果不联网获取实时信息（今天的新闻、比分、价格、天气实况、近期事件等）就无法"
+        "正确回答，就只输出 <search>不超过20字的中文搜索词</search>，不要输出任何其他文字；"
+        "闲聊、情绪陪伴和不随时间变化的常识照常直接回答，不要滥用该标记。"
+        # 防编造执行结果。**判据是类别否定，不是禁语清单**（C11-A，2026-08-28）：
+        # 清单式的写法每轮 QA 都被绕过一次——demo-mkemhn 那批堵了交易话术
+        # （「已为您找到 10 家门店」「请确认：X店，应付 10.90 元」），
+        # 2026-08-26 这批就从**导航**钻出来（family T21「已经为您重新计算路线，
+        # 从华侨城欢乐海岸出发…全程约1.6公里」，零 navigation 调用、零动作），
+        # 而 info T48 的「请确认是否发起导航？」在句尾、不在句首，连位置都躲开了。
+        # 补的第三条是 T43 那个形态：模型**虚构自己上一轮犯过的错**并道歉
+        # （「我把上证指数当成沪深300报给你了」——上一轮的卡就是沪深300，没错过）。
+        "你自己没有任何执行、检索、规划能力（不查询、不下单、不订座、不支付、"
+        "不算路线、不建提醒、不控车）：**凡是描述『系统已经做了什么／正在做什么／"
+        "接下来会做什么』的句子，一律不许说**——路线、订单、提醒、数据来源、"
+        "更新时间都算，不管这句话出现在开头、中间还是结尾。"
+        "用户问这类事实时，如实说你这边看不到那次执行的记录，"
+        "并建议他说出明确指令（如「查询附近的瑞幸咖啡」），由系统的对应能力接手；"
+        "**别否认系统查过**（那一轮不是你答的），也别自己编一个来源或时间。"
+        "同样不许虚构自己此前犯过的错误来道歉——你不知道上一轮系统答了什么。"
+        # 批 8 ③（W19-c g18 真栈实录，2026-09-21）：「那它的纯电续航呢」落到这里，模型答
+        # 「当前纯电续航335km，满电续航335km」——两个数都是编的，本车电量只有端侧 `battery.query`
+        # 读 VAL 才有。上面那条类别否定只盖「系统做了什么」，没盖「车现在是什么状态」：
+        # 车辆读数是**系统持有的事实**，与执行史同一类，不归模型。
+        "你也看不到这辆车的任何实时读数（电量、续航、胎压、里程、车速、车内温度、油量等）："
+        "用户问这些时如实说你这边看不到，建议他直接问「电量还有多少」这类由车辆能力回答的话；"
+        "**不要编数字**。问的是别的车型（「它的续航」「那款车」）而你不确定时也一样，不猜。"
+        # Q9：会话里有未解除的安全告警时，它是**这一轮回答的前提**，不是背景。
+        # QA 轮实测，用户说「别提醒我，继续开就行」时兜底答了「收到，那不提醒也不停车」
+        # ——**用户可以拒绝被提醒，系统不可以跟着改口说不用停车**。
+        + (f"⚠本次会话里还有未解除的安全告警：{alert.get('signal')}。"
+           "无论用户问什么、或明确表示不想被提醒，都不得表示可以继续危险驾驶、"
+           "不得撤回或弱化停车/休息建议；可以不再重复啰嗦，但立场不改。"
+           if alert else "")
+    )
+
+
+class ChitchatAgent(BaseAgent):
+    def __init__(self):
+        super().__init__(_MANIFEST)
+
+    async def _memory_context(self, intent, ctx):
+        """召回与本问相关的个人信息/偏好（如宠物名、口味），注入 system 供自然作答。
+        返回 `(注入块, 召回到的记忆, 读态)`；无 user_id 返回 `("", [], "off")`，不阻塞。
+
+        批 5 W17：读态（`runtime.memory_read`）分「读到了 / 空 / 读不到」——此前失败被吞成空，
+        一次 memory 故障就让「你还记得我不吃辣吗」得到一句自信的「你没说过」。"""
+        query = intent.raw_text or intent.slots.get("text", "")
+        if not query:
+            return "", [], memory_read.OFF
+        # 含 episodic：个人事实（宠物/家人名）抽取时可能被归为 semantic 或 episodic（叙事式输入常落
+        # episodic），只召 semantic 会漏「我的猫叫什么」这类问题。语义排序 + top_k 保证不相关片段不被注入。
+        mems, state = await ctx.recall_read(
+            query, kinds=["semantic", "episodic"], top_k=4, min_confidence=0.5)
+        lines = [f"- {m.get('text', '')}" for m in mems if m.get("text")]
+        if not lines:
+            return "", [], state
+        # ⚠ **原来这里写着「勿暴露这是系统记忆」**（Q5 残余，2026-08-16 删）。
+        # 那句话是 XS3 三次取样一次都不说出处的**直接成因**——不是模型忘了，
+        # 是系统让它别说。而卡的要求正相反：真记忆没有出处，在用户眼里就是幻觉。
+        # 现在出处由 `mem_source.with_provenance` **确定性追加**（要的是机制不是
+        # 提示词），这里只需不再反向指示；也**不改成正向指示**——那仍是求 LLM 说。
+        return ("已知用户信息（仅在与问题相关时自然引用，勿生硬复述）：\n"
+                + "\n".join(lines), list(mems), state)
+
+    async def _build_messages(self, intent, ctx, meta):
+        """返回 `(msgs, 本轮召回到的记忆)`——后者供确定性出处披露判定。
+        **记忆读不到 + 在问记忆 ⇒ 返回 `(None, 读态)`**：调用方走诚实话术，不让模型拿着一份
+        「兜底的空」去答「你没说过」（两条路径都经这里，一个入口）。"""
+        text = intent.raw_text or intent.slots.get("text", "")
+        sys = _system(meta, text)
+        mem_ctx, mems, state = await self._memory_context(intent, ctx)
+        if state in (memory_read.UNAVAILABLE, memory_read.OFF) and memory_read.is_memory_recall_question(text):
+            return None, state
+        if mem_ctx:
+            sys = f"{sys}\n\n{mem_ctx}"
+        msgs = [{"role": "system", "content": sys}]
+        # C12-C：4 轮 ≈ **2 个 exchange**——真栈 info T32「您这轮没说口味、人数、
+        # 距离、预算」时，用户四轮前刚说过「我不吃辣，也不想排长队」，
+        # 而那句话已经滑出窗口：**模型不是撒谎，是看不见**。
+        # 提到 8（4 个 exchange）：成本是每轮多几百字符，收益是「我刚才说过什么」
+        # 这类元问题不再张口就否认。⚠ 它只是把窗口拉宽，**不是事实通道**——
+        # 「系统持有的会话事实」走 C4 那三条确定性读出口，不靠模型回忆。
+        for turn in await ctx.history(8):
+            msgs.append({"role": turn["role"], "content": turn["text"]})
+        msgs.append({"role": "user", "content": intent.raw_text or intent.slots.get("text", "")})
+        return msgs, mems
+
+    async def _deterministic_reply(self, text, ctx, meta):
+        """所有**零 LLM 直答**的唯一实现。返回 `AgentResult` 或 None（=交给 LLM）。
+
+        ⚠ **`handle` 与 `handle_stream` 都必须调它**，源码级守卫
+        `test_both_paths_share_one_deterministic_gate` 钉着这条。
+
+        为什么要收敛：这个文件里原本有一条注释写着「两条路径都要挂……
+        **只在 handle 里加闸等于没加**」，并点名本仓已为此踩过两次
+        （M2 Ledger、商户 badcase）。**2026-08-16 加 Q6 审计出口时，
+        我就在那条注释下面踩了第三次**——因为我改的是 `handle`，
+        根本没读到 `handle_stream`。真栈读数是 1/3 命中：只有非 salvage 轮走了
+        确定性回答，salvage 轮（`via: stream`）照旧让 LLM 编。
+
+        > **判据**：同一条纪律被写成注释还是被写成结构，差别就是会不会有第三次。
+        > 「记得加」不是机制，**只有一个入口**才是。
+        """
+        clock = _clock_answer(text)
+        if clock:               # 钟点/日期/星期：系统墙钟直答，零 LLM 零编造
+            return AgentResult(speech=clock)
+        who = _identity_answer(text, meta)
+        if who:                 # 「我是谁」：声纹已认定，同样不交给 LLM（历史会盖过 system）
+            return AgentResult(speech=who)
+        safety, alert = _safety_answer(text)
+        if safety:              # 安全信号：确定性直答 + 声明会话告警（只提到风险时不声明），零 LLM
+            return AgentResult(speech=safety, data={"_safety_alert": alert} if alert else None)
+        # 会话里挂着未解除的告警、这一句只是在拒绝安全建议（「别提醒我，继续开就行」）⇒ 确定性「立场不改」，零 LLM。
+        # 评审四轮批 A 回归（2026-09-24，SF4）：system 里的「立场不改」挡不住模型——MiniMax 一趟答了「可以。」。
+        active = {} if alert_resolved(text) else _active_alert(meta)
+        if active and refuses_safety_advice(text):
+            stance = refusal_stance(active)
+            if stance:
+                return AgentResult(speech=stance)
+        if is_execution_audit_question(text):
+            # Q6：「刚才实际执行了什么」是**系统持有的事实**，零 LLM。
+            # 加提示词治不了它——模型手里根本没有那些数（真栈三次取样三个样，
+            # 一次方向说反、一次直接否认执行过）。答案由会话历史里的 actions 拼出。
+            try:
+                history = await ctx.history(20)
+            except Exception as e:      # 记忆不可用：诚实说查不到，别猜
+                logger.debug("audit history unavailable: %s", e)
+                return AgentResult(speech="我这会儿查不到执行记录，稍后再试。")
+            return AgentResult(
+                speech=audit_answer(history, with_time=asks_when(text)))
+        # 两问并发、场景优先：问的是一个已知场景时，场景定义说了算（手册对「露营」只有对外放电一页）
+        scene, manual = await asyncio.gather(self._scene_claimed(text, ctx), self._manual_confident(text, ctx))
+        if scene:
+            logger.info("chitchat defers to the scene: %s", scene)
+            return _scene_escalate_result(scene)
+        if manual:
+            # 规划退到了闲聊，可这句问的是本车功能、手册又有把握——交给手册，不让模型泛泛地编
+            # （固定语料：「空调温度怎么调」被答成「直接说『把空调调到24度』就行」）
+            logger.info("chitchat defers to the manual: manual_confident")
+            return _manual_escalate_result(text)
+        return None
+
+    async def _scene_claimed(self, text: str, ctx) -> str:
+        """场景编排认领 ⇒ 场景名；非问句、个人记忆的回忆问句、没认领或调用失败 ⇒ ""。"""
+        if not is_non_directive_question(text or "") or memory_read.is_memory_recall_question(text):
+            return ""
+        try:
+            res = await self.agents.call(_SCENE_AGENT, _SCENE_CLAIM, {"question": text}, ctx,
+                                         timeout=_SCENE_CLAIM_TIMEOUT_S)
+        except Exception as exc:            # 场景编排不可达不影响闲聊
+            logger.debug("scene claim unavailable: %s", exc)
+            return ""
+        data = getattr(res, "data", None) or {}
+        return str(data.get("scene") or "") if getattr(res, "status", "") == "ok" and data.get("confident") else ""
+
+    async def _manual_confident(self, text: str, ctx) -> bool:
+        """非指令问句才问手册（指令句闲聊不接管执行）；个人记忆的回忆问句是闲聊记忆路径的事，不问。
+        手册说有把握才算，调用失败一律当没把握。"""
+        if not is_non_directive_question(text or "") or memory_read.is_memory_recall_question(text):
+            return False
+        try:
+            res = await self.agents.call(_MANUAL_AGENT, _MANUAL_CLAIM, {"question": text}, ctx,
+                                         timeout=_MANUAL_CLAIM_TIMEOUT_S)
+        except Exception as exc:            # 手册不可达不影响闲聊
+            logger.debug("manual claim unavailable: %s", exc)
+            return False
+        return getattr(res, "status", "") == "ok" and bool((getattr(res, "data", None) or {}).get("confident"))
+
+    async def handle(self, intent, ctx, meta) -> AgentResult:
+        text = intent.raw_text or intent.slots.get("text", "")
+        fixed = await self._deterministic_reply(text, ctx, meta)
+        if fixed is not None:
+            return fixed
+        max_tokens, _ = _length(meta)
+        model = _resolve_model(meta, intent.slots)
+        msgs, mems = await self._build_messages(intent, ctx, meta)
+        if msgs is None:            # W17：记忆读不到、又在问记忆 ⇒ 诚实说查不到
+            return AgentResult(speech=memory_read.memory_read_failure_speech(mems))
+        reply = await self.llm.complete(msgs, model=model, temperature=0.8, max_tokens=max_tokens)
+        if not reply.strip():  # MiMo 偶发空响应：兜底重试一次
+            reply = await self.llm.complete(msgs, model=model, temperature=0.9, max_tokens=max_tokens)
+        q = _parse_search_mark(reply)
+        if q:                   # 时效兜底：需要实时信息 → 零播报改派 info.search
+            return _escalate_result(q)
+        # Q5 残余：记忆驱动的回答**确定性**追加出处（没证据一个字都不加）。
+        # 两条路径都要挂——Q6 刚为「只在 handle 里加闸」踩过第三次。
+        return AgentResult(
+            speech=with_provenance(reply.strip(), text, mems)
+            or "我在听，您可以再说一次。")
+
+    async def handle_stream(self, intent, ctx, meta):
+        """流式直答。头部缓冲：在确定回复不是 <search> 改派标记前不放流任何 delta——
+        escalate 的前提是「零播报」（engine 端 streamed=True 会忽略改派，双保险）。
+        判定窗口 ≤ len("<search>")+空白，普通回复只延迟一个包级别，无感。"""
+        text = intent.raw_text or intent.slots.get("text", "")
+        # ⚠ **两条路径都要挂**：D0 流式直通绕过 executor，本仓已经为此踩过三次
+        #（M2 Ledger、商户 badcase、Q6 审计出口各一次）。只在 handle 里加闸等于没加。
+        # 第三次之后把它收敛成唯一实现——**注释挡不住第三次，一个入口才行**。
+        fixed = await self._deterministic_reply(text, ctx, meta)
+        if fixed is not None:
+            if fixed.speech:            # 改派是零播报：流出任何一个字，编排就不再认这次改派
+                yield ("speech", fixed.speech)
+            yield ("final", fixed)
+            return
+        max_tokens, _ = _length(meta)
+        model = _resolve_model(meta, intent.slots)
+        msgs, mems = await self._build_messages(intent, ctx, meta)
+        if msgs is None:            # W17：同 handle，一个入口
+            yield ("speech", memory_read.memory_read_failure_speech(mems))
+            yield ("final", AgentResult(speech=memory_read.memory_read_failure_speech(mems)))
+            return
+        buf = ""
+        held = ""
+        mode = "probe"          # probe=判定中 | stream=正常放流 | silent=标记确认，静默缓冲
+        async for delta in self.llm.stream(msgs, model=model, temperature=0.8, max_tokens=max_tokens,
+                                           timeout=_STREAM_TIMEOUT_S):
+            buf += delta
+            if mode == "stream":
+                yield ("speech", delta)
+                continue
+            held += delta
+            probe = held.lstrip()
+            if mode == "probe":
+                if not probe:
+                    continue
+                if probe.startswith(_SEARCH_MARK):
+                    mode = "silent"                    # 标记确认：静默缓冲到流结束
+                elif _SEARCH_MARK.startswith(probe):
+                    continue                           # 仍是 "<sea" 类前缀，继续观望
+                else:
+                    mode = "stream"                    # 不是标记：一次性放流缓冲
+                    yield ("speech", held)
+                    held = ""
+        if mode == "silent":
+            q = _parse_search_mark(buf)
+            if q:
+                yield ("final", _escalate_result(q))
+                return
+            # 形如标记但残缺（未闭合等）：剥标签当普通话术，不丢内容
+            buf = re.sub(r"</?search>", "", buf).strip()
+            if buf:
+                yield ("speech", buf)
+        elif mode == "probe" and held.strip():
+            yield ("speech", held)                     # 极短回复（如「好」）整段放流
+        if not buf.strip():  # 流式空响应：非流式重试一次，整段补发
+            buf = await self.llm.complete(msgs, model=model, temperature=0.9, max_tokens=max_tokens)
+            q = _parse_search_mark(buf)
+            if q:
+                yield ("final", _escalate_result(q))
+                return
+            if buf.strip():
+                yield ("speech", buf)
+        # Q5 残余：出处是**追加**的，所以流式下作为尾包补发——正文已经流出去了，
+        # 等回答完才判定得出「这句话有没有用到记忆」（判据要看完整回答）。
+        final_text = with_provenance(buf.strip(), text, mems)
+        if final_text != buf.strip():
+            yield ("speech", final_text[len(buf.strip()):])
+        yield ("final", AgentResult(speech=final_text or "我在听，您可以再说一次。"))

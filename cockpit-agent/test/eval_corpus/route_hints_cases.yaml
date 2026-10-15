@@ -1,0 +1,810 @@
+# Cloud 侧 RouteHintEngine 确定性路由评测语料（T3.4②）。直调 RouteHintEngine.apply +
+# 真实 agents/*/manifest.yaml（不经 LLM/PlanBuilder.build），聚焦"路由兜底规则本身"。
+#
+# 用"路由前后 plan 的 intent 列表"统一断言（不用 expect_intent/expect_no_route 两套字段）：
+# RouteHintEngine.apply() 的 hit 返回值有反直觉之处——"LLM 已经路由对了"和"guard 拦下/
+# pattern 不匹配"都会导致 plan.steps 不变，但前者 hit=True、后者 hit=False。直接比较最终
+# intent 列表能用同一断言口径覆盖 replace/append/guard 拦截/已正确路由/优先级冲突。
+#
+# 重要：expect_final_intents 已对着真实 agents/trip_planner/manifest.yaml 与
+# agents/deep_research/manifest.yaml 的当前 route_hints 用 --dump 逐条核实（而非照抄
+# test_route_hints.py 简化版 fixture 的预期）——真实 pattern/guard 用词比单测里的简化版更
+# 丰富，会产生单测里不会出现的跨 hint 交互（见下方"导航去第2天换一个"的注释）。
+#
+# schema:
+#   text: 输入
+#   initial_intents: 施加路由前 plan 里已有的 intent 列表（模拟"LLM 规划出了什么"；
+#                     []=模拟"LLM 完全没规划/降级"）
+#   expect_final_intents: 施加路由后期望的 plan intent 列表（顺序敏感）
+#   agents: 可选，限定参与评测的 agent_id 子集（默认=加载全部 agents/*/manifest.yaml）
+#   source: 溯源
+#   tags:
+
+# ── manual-rag v2：操作方法与图标含义必须落手册，明确车控/非车辆/拍照请求不得被抢 ──
+- text: 雨刮器怎么打开
+  initial_intents: [chitchat.talk]
+  expect_final_intents: [manual.query]
+  source: "2026-09-03 production trace bb91420ff85c40c7889c666928e2096f"
+  tags: [manual, howto, replace, asr_no_punctuation]
+
+- text: 我的仪表上有个小人背着把宝剑的灯亮了是怎么回事
+  initial_intents: [chitchat.talk]
+  expect_final_intents: [manual.query]
+  source: "2026-09-03 production trace b17e943da8e340f0b347ce304f1b2c1d"
+  tags: [manual, warning_icon, replace, colloquial]
+
+- text: 帮我打开雨刮器
+  initial_intents: [wiper.on]
+  expect_final_intents: [wiper.on]
+  source: "manual how-to guardrail: explicit vehicle command"
+  tags: [manual, guardrail, vehicle_control]
+
+- text: 手机 App 怎么打开
+  initial_intents: [chitchat.talk]
+  expect_final_intents: [chitchat.talk]
+  source: "manual how-to guardrail: non-vehicle software"
+  tags: [manual, guardrail, app]
+
+- text: 帮我看看照片里这个故障灯是什么
+  initial_intents: [vision.describe]
+  expect_final_intents: [vision.describe]
+  source: "manual warning guardrail: user supplied image belongs to vision"
+  tags: [manual, guardrail, vision]
+
+# ── manual-rag v2.2：整本 outline 明确来源请求的确定性兜底 ────────────
+- text: 我想知道 SU7 用户手册里车辆解闭锁 P挡自动解锁？
+  initial_intents: [chitchat.talk]
+  expect_final_intents: [manual.query]
+  source: "2026-09-04 full-manual production run: explicit source still varied"
+  tags: [manual, full_coverage, explicit_source, replace]
+
+- text: 我想知道小米SU7说明书里规格与参数 动力性参数？
+  initial_intents: [info.search]
+  expect_final_intents: [manual.query]
+  source: "2026-09-04 full-manual production run: power specification 1/3"
+  tags: [manual, full_coverage, explicit_source, specification, replace]
+
+- text: 根据 SU7 用户手册帮我打开空调？
+  initial_intents: [hvac.on]
+  expect_final_intents: [hvac.on]
+  source: "explicit manual-source guardrail: directive remains vehicle control"
+  tags: [manual, guardrail, directive]
+
+- text: 我想知道 iPhone 用户手册里怎么设置热点？
+  initial_intents: [chitchat.talk]
+  expect_final_intents: [chitchat.talk]
+  source: "explicit manual-source guardrail: non-vehicle device"
+  tags: [manual, guardrail, device]
+
+# ── manual-rag v2.1：f2dcb46 生产 36 题真栈错域闭环 ────────────────────
+- text: 胎压报警怎么办
+  initial_intents: [tire_pressure.query]
+  expect_final_intents: [manual.query]
+  source: "2026-09-03 production full/repeat probes: 0/3 manual"
+  tags: [manual, seen_regression, alert, replace]
+
+- text: 充电上限设多少合适
+  initial_intents: [chitchat.talk]
+  expect_final_intents: [manual.query]
+  source: "2026-09-03 production full/repeat probes: 1/3 manual"
+  tags: [manual, seen_regression, specification, replace]
+
+- text: 冬天轮胎有什么要求
+  initial_intents: [chitchat.talk]
+  expect_final_intents: [manual.query]
+  source: "2026-09-03 production full/repeat probes: 2/3 manual"
+  tags: [manual, seen_regression, winter, replace]
+
+- text: 防滑链应该装在哪个轮子上
+  initial_intents: [info.search]
+  expect_final_intents: [manual.query]
+  source: "2026-09-03 production full/repeat probes: 0/3 manual"
+  tags: [manual, seen_regression, winter, replace]
+
+- text: 紧急情况怎么呼叫救援
+  initial_intents: [chitchat.talk]
+  expect_final_intents: [manual.query]
+  source: "2026-09-03 production full/repeat probes: 0/3 manual"
+  tags: [manual, seen_regression, emergency, replace]
+
+- text: 空调滤网怎么换
+  initial_intents: [hvac.on]
+  expect_final_intents: [manual.query]
+  source: "2026-09-03 production probe executed hvac.on"
+  tags: [manual, seen_regression, safety, maintenance, replace]
+
+- text: 机油灯亮了怎么办
+  initial_intents: [chitchat.talk]
+  expect_final_intents: [manual.query]
+  source: "2026-09-03 production full/repeat probes: 2/3 manual"
+  tags: [manual, seen_regression, negative, replace]
+
+- text: 支持 Android Auto 吗
+  initial_intents: [info.search]
+  expect_final_intents: [manual.query]
+  source: "2026-09-03 production full/repeat probes: 0/3 manual"
+  tags: [manual, seen_regression, compatibility, negative, replace]
+
+- text: 发动机机油多久换一次
+  initial_intents: [chitchat.talk]
+  expect_final_intents: [manual.query]
+  source: "2026-09-03 production full/repeat probes: 2/3 manual"
+  tags: [manual, seen_regression, maintenance, negative, replace]
+
+- text: 三元锂电池平时充到多少
+  initial_intents: [battery.query]
+  expect_final_intents: [manual.query]
+  source: "2026-09-03 production full/repeat probes: 0/3 manual"
+  tags: [manual, seen_regression, specification, replace]
+
+- text: 车辆长期停放时电池怎么保养
+  initial_intents: [chitchat.talk]
+  expect_final_intents: [manual.query]
+  source: "2026-09-03 b3a2aed production full probe: chitchat with fuel-car battery advice"
+  tags: [manual, seen_regression, maintenance, replace]
+
+- text: SU7 发动机排量多大
+  initial_intents: [info.search]
+  expect_final_intents: [manual.query]
+  source: "2026-09-03 production full/repeat probes: 1/3 manual"
+  tags: [manual, seen_regression, specification, negative, replace]
+
+- text: 胎压现在多少
+  initial_intents: [tire_pressure.query]
+  expect_final_intents: [tire_pressure.query]
+  source: "manual boundary: current state remains edge query"
+  tags: [manual, guardrail, current_state]
+
+- text: 车现在还有多少电
+  initial_intents: [battery.query]
+  expect_final_intents: [battery.query]
+  source: "manual boundary: current SOC remains edge query"
+  tags: [manual, guardrail, current_state]
+
+- text: 帮我把充电上限设成80%
+  initial_intents: [battery.query]
+  expect_final_intents: [battery.query]
+  source: "manual boundary: explicit setting command is not a handbook question"
+  tags: [manual, guardrail, directive]
+
+- text: 哪些车型支持 Android Auto
+  initial_intents: [info.search]
+  expect_final_intents: [info.search]
+  source: "manual boundary: cross-model compatibility list is web search"
+  tags: [manual, guardrail, compatibility]
+
+# ── road-safety 2026-09-19：告警在句首的续驾问句是安全出口，不是搜索题（QA 交接页 §5）──
+# information T24 真栈原句：MiniMax-M3 规划成 info.search，答案对、路径错。
+# 地盘：手册接「什么意思 / 怎么办 / 怎么处理」与它自己声明的「胎压报警…还能开」；
+# 安全助手接其余「<告警> 还能不能继续开 / 要不要停车」。
+- text: 红色机油灯亮了还能继续开吗
+  initial_intents: [info.search]
+  expect_final_intents: [safety.driving_advice]
+  source: "2026-08-30 information persona T24 trace 9032bb7ccc064e9399248b5e4db1dd9d"
+  tags: [safety, alert, continuation, seen_regression, replace]
+
+- text: 水温报警了还可以继续行驶吗
+  initial_intents: [chitchat.talk]
+  expect_final_intents: [safety.driving_advice]
+  source: "alert continuation: phenomenon word (ALERT_VERBS) instead of a named light"
+  tags: [safety, alert, continuation, replace]
+
+- text: 胎压灯亮了能不能继续开
+  initial_intents: []
+  expect_final_intents: [safety.driving_advice]
+  source: "alert continuation: amber light, planner abstained"
+  tags: [safety, alert, continuation, replace]
+
+- text: 水温报警了要不要停车
+  initial_intents: [info.search]
+  expect_final_intents: [safety.driving_advice]
+  source: "alert continuation: the stop-or-not tail (manifest example)"
+  tags: [safety, alert, continuation, replace]
+
+- text: 机油灯亮了怎么办
+  initial_intents: [chitchat.talk]
+  expect_final_intents: [manual.query]
+  source: "boundary kept: handbook owns meaning/what-to-do (see manual section above)"
+  tags: [safety, manual, boundary]
+
+- text: 胎压报警了还能继续开吗
+  initial_intents: [chitchat.talk]
+  expect_final_intents: [manual.query]
+  source: "boundary kept: manual-rag declares 胎压报警…还能开 at priority 124 > 122"
+  tags: [safety, manual, boundary]
+
+- text: 大灯亮了还能继续开吗
+  initial_intents: [chitchat.talk]
+  expect_final_intents: [chitchat.talk]
+  source: "alert continuation guard: a normal function light is not an alert"
+  tags: [safety, guardrail, normal_light]
+
+- text: 空调还能继续开吗
+  initial_intents: [chitchat.talk]
+  expect_final_intents: [chitchat.talk]
+  source: "alert continuation guard: 开 here means switch on, not drive"
+  tags: [safety, guardrail, device]
+
+- text: 红色机油灯亮了还能继续开吗，附近有修理厂吗
+  initial_intents: [nearby.search]
+  expect_final_intents: [nearby.search]
+  source: "alert continuation guard: compound sentence with a second goal is left to the planner"
+  tags: [safety, guardrail, compound]
+
+- text: 用手机怎么呼叫道路救援
+  initial_intents: [chitchat.talk]
+  expect_final_intents: [chitchat.talk]
+  source: "manual boundary: phone help is not in-car SOS operation"
+  tags: [manual, guardrail, emergency]
+
+- text: 研究三元锂电池技术
+  initial_intents: [research.run]
+  expect_final_intents: [research.run]
+  source: "manual boundary: battery technology research stays research"
+  tags: [manual, guardrail, research]
+
+- text: 研究车辆长期停放的电池衰减
+  initial_intents: [research.run]
+  expect_final_intents: [research.run]
+  source: "manual boundary: research request stays research"
+  tags: [manual, guardrail, research]
+
+- text: 手机长期不用电池怎么保养
+  initial_intents: [chitchat.talk]
+  expect_final_intents: [chitchat.talk]
+  source: "manual boundary: non-vehicle battery maintenance is not vehicle handbook"
+  tags: [manual, guardrail, device]
+
+- text: 帮我换空调滤芯
+  initial_intents: [chitchat.talk]
+  expect_final_intents: [chitchat.talk]
+  source: "manual boundary: explicit physical replacement request is not how-to"
+  tags: [manual, guardrail, directive]
+
+- text: 帮我深入调研一下固态电池
+  initial_intents: []
+  expect_final_intents: [research.run]
+  source: "orchestrator/cloud/tests/test_route_hints.py::test_replace_on_empty_plan_sets_single_step"
+  tags: [research, replace, recall]
+
+- text: 慢慢查一下钠离子电池的产业化进展，查完告诉我
+  initial_intents: [info.search]
+  expect_final_intents: [research.run]
+  source: "M-A journey A6-1 real-stack badcase b8db82fa23174adc"
+  tags: [research, replace, recall, async]
+
+- text: 深入研究一下这个
+  initial_intents: [research.run]
+  expect_final_intents: [research.run]
+  source: "orchestrator/cloud/tests/test_route_hints.py::test_replace_keeps_when_intent_already_present"
+  tags: [research, replace, already_routed]
+
+- text: 搜一下固态电池
+  initial_intents: [info.search]
+  expect_final_intents: [info.search]
+  source: "orchestrator/cloud/tests/test_planning.py::test_plain_search_not_hijacked_by_research_net"
+  tags: [research, guardrail]
+
+- text: 导航去北京南站
+  initial_intents: [navigation.navigate_to]
+  expect_final_intents: [navigation.navigate_to]
+  source: "orchestrator/cloud/tests/test_planning.py::test_does_not_inject_trip_for_plain_navigation"
+  tags: [trip, guardrail]
+
+- text: 周末去杭州两天带老人看看天气
+  initial_intents: [info.weather]
+  agents: [info]                          # trip-planner 故意不注册，验证「Agent 缺席不炸」
+  expect_final_intents: [info.weather]
+  source: "orchestrator/cloud/tests/test_planning.py::test_does_not_inject_trip_when_planner_unavailable"
+  tags: [trip, guardrail, agent_absent]
+
+# 赛事追问 vs 周边发现（真机漏例 2026-07-07：「那一场…详情」被 nearby.detail 劫持）
+# 赛事预测指代句（badcase bfb5d9c7 2026-07-19：「这场比赛你预测谁会赢」无联赛词，
+# 原预测 hint 接不住 → planner 缝合幻觉对阵「决赛 法国vs英格兰」且对已完赛季军赛出预测）
+- text: 这场官司你觉得谁会赢
+  initial_intents: []
+  expect_final_intents: []
+  source: "guard 反例：非赛事的「这场…谁会赢」不进赛事域"
+  tags: [sports, predictive, guardrail]
+
+# ── reminder（2026-07-11 设计 §6.3）：车辆功能"提醒"反例不被劫持 ──
+#
+# ⚠ **`reminder.create` 的 replace hint 已于 2026-08-02 退役**（它在踩掉 planner 已经
+#   规划对的计划）。本层「施加 hint 后应得 reminder.create」的**正例**断言随之全部失效
+#   ——规则没了，这个层面不存在可断言的命题（同 vision 退役先例，见
+#   `agents/vision/manifest.yaml` 注释）。回归保护没有消失，只是换了口径：绝对时点 /
+#   地理触发 / 周期三类代表形态已作**端到端**用例落在
+#   `test/eval_corpus/mode_routing_cases.yaml`（tag `retired_hint`），守的是
+#   「没有规则也要落对」。剩余 reminder 反例保留为**再引入绊线**：今天它们恒绿
+#   （一条 create hint 都没有），一旦有人重新引入过宽的 create hint 就会当场变红。
+#   reminder 现存唯一 hint 是赛事 append（priority 57，无 guard），见本文件 M-A 段。
+
+# R4（旅程 B5-1）：回忆/疑问式不是建新提醒。
+# 原判据是「guard 排除什么来着/让你提醒/提醒过」；guard 随 replace hint 一并退役，
+# 现在这两条守的是「不许有任何 create hint 把它们捞走」。
+- text: 我刚才让你提醒我什么来着
+  initial_intents: []
+  expect_final_intents: []
+  source: "docs/design/2026-07-14-journey-e2e-test-system.md §10 R4（hint 退役后转再引入绊线）"
+  tags: [reminder, guard, retired_hint]
+
+- text: 你提醒过我什么事
+  initial_intents: []
+  expect_final_intents: []
+  source: "docs/design/2026-07-14-journey-e2e-test-system.md §10 R4（hint 退役后转再引入绊线）"
+  tags: [reminder, guard, retired_hint]
+
+# R6（旅程 A1-4）：条件句让给 LLM 规划走 adaptive（整句 replace 会把条件吞成标题反问时间）
+- text: 查一下明天深圳会不会下雨，要是下雨就提醒我明早带伞
+  initial_intents: []
+  expect_final_intents: []
+  source: "docs/design/2026-07-14-journey-e2e-test-system.md §10 R6"
+  tags: [reminder, guard, conditional]
+
+# 2026-07-27 条件形态扩面（eval_skills live holdout 抓到）：不带「要是/如果」的条件句
+# （「要下就叫我」）同样必须让给 LLM 走 adaptive——guard 补查询式标记 会不会/有没有/下不下
+- text: 看下明晚会不会下雨，要下就叫我收衣服
+  initial_intents: []
+  expect_final_intents: []
+  source: "eval_skills live holdout 2026-07-27（叫我 劫持条件句）"
+  tags: [reminder, guard, conditional]
+
+# 2026-07-27 charging 教科书形态钉死（eval_skills live 采样方差）：paraphrase 归 skill 层
+# 2026-07-27 评审二批：非车辆设备的「没电/找地方充」不归车辆充电域（guard 设备词）
+- text: 手机快没电了，附近找个地方充一下
+  initial_intents: []
+  expect_final_intents: []
+  source: "评审二批 2026-07-27（设备充电误接回归）"
+  tags: [charging, guard, device]
+- text: 笔记本电量不够了，找个地方补电
+  initial_intents: []
+  expect_final_intents: []
+  source: "评审二批 2026-07-27"
+  tags: [charging, guard, device]
+- text: 耳机快没电了，找个充电宝
+  initial_intents: []
+  expect_final_intents: []
+  source: "评审二批 2026-07-27"
+  tags: [charging, guard, device]
+# 2026-07-27 三批：黑名单枚举不完（游戏机/牙刷）→ find 换正向锚（句首/「车」后才认）；
+# plan 形态同样有设备劫持面（露营手机/充电宝）。阻断面在 test_route_hints.py（真 manifest）
+- text: 游戏机快没电了，找个地方充一下
+  initial_intents: []
+  expect_final_intents: []
+  source: "评审三批 2026-07-27（正向锚兜未枚举设备）"
+  tags: [charging, guard, device]
+- text: 电动牙刷快没电了，找地方充下
+  initial_intents: []
+  expect_final_intents: []
+  source: "评审三批 2026-07-27"
+  tags: [charging, guard, device]
+- text: 去露营手机怎么充电
+  initial_intents: []
+  expect_final_intents: []
+  source: "评审三批 2026-07-27（plan 形态设备劫持）"
+  tags: [charging, guard, device]
+- text: 去露营怎么充电宝
+  initial_intents: []
+  expect_final_intents: []
+  source: "评审三批 2026-07-27"
+  tags: [charging, guard, device]
+# 2026-07-27 四批：分句首锚被「前一分句藏主语」绕过——锚收紧为句首（含感叹前缀）或「车」后
+- text: 剃须刀坏了，快没电了，找地方充一下
+  initial_intents: []
+  expect_final_intents: []
+  source: "评审四批 2026-07-27（分句首锚绕过面）"
+  tags: [charging, guard, device]
+- text: 助听器坏了，快没电了，找地方充一下
+  initial_intents: []
+  expect_final_intents: []
+  source: "评审四批 2026-07-27"
+  tags: [charging, guard, device]
+# 2026-07-30 金标改判：原断言 [nearby.search]，理由「纯设施发现仍归 nearby」——那条判据
+# 已作废（充电桩发现归 charging.find，它读真实 SOC + 空闲优先排序）。nearby hint 的充电类目
+# 已收窄移除、charging 两条 hint 已在 P2 退役，故本例现在**不该有任何 hint 施加**。
+# ⚠ 顺带记一条方法论：这条 gold 当初就是 nearby#1 的产物——**为某条规则写的语料，它的 gold
+# 就是那条规则的输出，双臂裸跑只能证明「摘掉它 gold 就不满足」，不能证明规则是对的**。
+# 这正是「带着 hint 也答错」那批必须由人裁定、不能自动退役或自动保留的原因。
+# 端到端保护改口径迁入 mode_routing_cases.yaml（expect charging.find）。
+- text: 附近有没有充电站
+  initial_intents: []
+  expect_final_intents: []
+  source: "2026-07-30 改判：充电桩发现归 charging.find；本例改守「不再有 hint 劫持」"
+  tags: [charging, nearby, guard]
+
+# R3（旅程 B1-3）：焦点指代「那附近」让给 LLM 规划（replace 灌整句会剥 location 槽）
+- text: 那附近有停车场吗
+  initial_intents: []
+  expect_final_intents: []
+  source: "docs/design/2026-07-14-journey-e2e-test-system.md §10 R3"
+  tags: [nearby, guard, focus]
+
+# 「半小时后提醒我给客户回电话」的正例断言随 create hint 退役迁出（见本文件 reminder 段说明）。
+
+- text: 打开限速提醒
+  initial_intents: []
+  expect_final_intents: []
+  source: "orchestrator/edge/fast_intent.py:1090 词面冲突消解"
+  tags: [reminder, guard, adas]
+
+- text: 把车道偏离提醒关掉
+  initial_intents: []
+  expect_final_intents: []
+  source: "docs/design/2026-07-11-reminder-agent-design.md §6.3"
+  tags: [reminder, guard, adas]
+
+- text: 限速提醒是什么意思
+  initial_intents: []
+  expect_final_intents: []
+  source: "docs/design/2026-07-11-reminder-agent-design.md §6.3"
+  tags: [reminder, guard, manual]
+
+# ── reminder P1a（2026-07-11）：update 改时间 / recur / snooze / 序号续接 ──
+- text: 空调改到26度
+  initial_intents: []
+  # 设备量：pattern 要求"改到"后紧跟时间词形 + guard 空调 双保险
+  expect_final_intents: []
+  source: "docs/design/2026-07-11-reminder-agent-design.md §11 P1a"
+  tags: [reminder, guard, hvac]
+
+- text: 音量改到50
+  initial_intents: []
+  expect_final_intents: []
+  source: "docs/design/2026-07-11-reminder-agent-design.md §11 P1a"
+  tags: [reminder, guard, volume]
+
+# recur「每天早上八点提醒我吃药」与 snooze「过10分钟再提醒我」的正例断言随 create hint
+# 退役迁出。2026-08-02 迁出时只取了绝对时点/地理触发/周期三类代表形态，snooze 是
+# 第四类、端到端侧一直空白。**2026-08-10 已补**：原句「过10分钟再提醒我」以
+# tag `reminder_wordform` 进 mode_routing_cases.yaml，两趟独立 live（minimax:MiniMax-M3）
+# 各 3/3。缺口关闭，本行保留是为了记住「规则退役 ≠ 覆盖自动搬家」。
+
+# ── reminder P1c 跨域（2026-07-11）：trace b3ecd195 复现词形 ──
+- text: 第一场提醒我观看
+  initial_intents: []
+  # 「提醒我」命中 create hint；开赛时间由 REMINDABLE_ACTIVE 跨域推导（Agent 内，不在路由层）
+  expect_final_intents: [reminder.create]
+  source: "docs/design/2026-07-11-reminder-cross-domain.md §1 trace b3ecd19599c0f6aa"
+  tags: [reminder, cross_domain]
+
+- text: 开赛前半小时提醒我
+  initial_intents: []
+  expect_final_intents: [reminder.create]
+  source: "docs/design/2026-07-11-reminder-cross-domain.md §3.3 lead"
+  tags: [reminder, cross_domain, lead]
+
+# ── 四模式 P0-4（2026-07-12）：info.search / info.news 确定性护栏 ──
+# 设计 docs/design/2026-07-12-mode-routing-and-answer-quality.md §2 P0-4
+
+- text: 搜一下固态电池最新进展
+  initial_intents: []
+  expect_final_intents: [info.search]
+  source: "search hint 召回：LLM 全挂/降级时显式搜索动词也有网兜"
+  tags: [search, replace, recall]
+
+- text: 帮我查一下iPhone现在什么价格
+  initial_intents: []
+  expect_final_intents: [info.search]
+  tags: [search, replace, recall]
+
+- text: 检索一下宁德时代最新财报要点
+  initial_intents: []
+  expect_final_intents: [info.search]
+  tags: [search, replace, recall]
+
+- text: 查一下固态电池
+  initial_intents: [info.search]
+  expect_final_intents: [info.search]
+  source: "already-routed 保留态（replace 命中但 intent 已在计划）"
+  tags: [search, already_routed]
+
+- text: 搜索引擎是怎么工作的
+  initial_intents: []
+  expect_final_intents: []
+  source: "「搜索引擎」名词开头不是搜索指令——pattern 用 搜索(?!引擎)"
+  tags: [search, guardrail]
+
+- text: 查理和巧克力工厂是谁写的
+  initial_intents: []
+  expect_final_intents: []
+  source: "裸「查」刻意不进动词表（查理≠查询）"
+  tags: [search, guardrail]
+
+- text: 查一下我老婆叫什么名字
+  initial_intents: []
+  expect_final_intents: []
+  source: "个人事实走 chitchat 记忆召回，不上网搜（guard 我老婆/我的）"
+  tags: [search, guardrail, personal]
+
+- text: 查询麦当劳订单 1111222233334444555566667777
+  initial_intents: [mcd.order_status]
+  expect_final_intents: [mcd.order_status]
+  source: "2026-08-12 HMI 真栈：订单卡按钮已规划正确，却被 info.search replace 劫持"
+  tags: [search, guardrail, merchant, mcdonalds]
+
+- text: 查询瑞幸订单 8888777766665555444
+  initial_intents: [luckin.order_status]
+  expect_final_intents: [luckin.order_status]
+  source: "商户订单卡查单动作必须保留账号型 MCP 查询能力"
+  tags: [search, guardrail, merchant, luckin]
+
+- text: 查一下明天杭州的天气
+  initial_intents: [info.forecast]
+  expect_final_intents: [info.forecast]
+  source: "guard 天气/预报：已正确路由的 forecast 不被劫持"
+  tags: [search, guardrail, weather]
+
+- text: 查一下这周末适不适合洗车
+  initial_intents: [info.indices]
+  expect_final_intents: [info.indices]
+  source: "guard 洗车/指数：生活指数域不被劫持"
+  tags: [search, guardrail, indices]
+
+- text: 搜一下附近的加油站
+  initial_intents: []
+  expect_final_intents: []
+  source: "2026-07-30：加油站从 nearby hint 类目里收窄移除（无专属 owner、两档模型自己落
+    navigation.search_poi）——本例仍守 info.search 的 guard 让位，只是不再由 nearby 钉死"
+  tags: [search, guardrail, nearby, cross_hint]
+
+- text: 搜一下周杰伦的歌
+  initial_intents: []
+  expect_final_intents: []
+  source: "guard 的歌：媒体域在 edge，云侧 hint 不接"
+  tags: [search, guardrail, media]
+
+- text: 帮我查一下并深入调研固态电池
+  initial_intents: []
+  expect_final_intents: [research.run]
+  source: "guard 深入/调研 让位 research(100)——调研请求不被降级成单次搜索"
+  tags: [search, research, guardrail, cross_hint]
+
+- text: 今天有什么新闻
+  initial_intents: []
+  expect_final_intents: [info.news]
+  tags: [news, replace, recall]
+
+- text: 来点科技新闻
+  initial_intents: []
+  expect_final_intents: [info.news]
+  tags: [news, replace, recall]
+
+- text: 英伟达最新消息
+  initial_intents: []
+  expect_final_intents: [info.news]
+  source: "话题式「X最新消息」=浏览该主题近况 → news"
+  tags: [news, replace, recall, topic_form]
+
+- text: 播放新闻联播
+  initial_intents: [media.play]
+  expect_final_intents: [media.play]
+  source: "guard 播/联播：媒体播放不被新闻 hint 劫持"
+  tags: [news, guardrail, media]
+
+- text: 提醒我晚上看新闻联播
+  initial_intents: []
+  # reminder.create hint 退役后没有规则再接住它，但这条用例证的从来是**另一半**：
+  # news hint 不许把它劫走（pattern 不命中 + guard 提醒/联播 双保险）。那个命题仍然
+  # 活着且仍可证伪，所以是改期望值，不是删用例。落域本身由端到端口径守。
+  expect_final_intents: []
+  source: "news hint 不劫持「提醒我…新闻联播」；reminder 那半随 create hint 退役（2026-08-02）"
+  tags: [news, guardrail, reminder, cross_hint, retired_hint]
+
+- text: 搜一下今天的新闻
+  initial_intents: []
+  expect_final_intents: []
+  source: "刻意保守面：search guard 含新闻、news guard 含搜——双 hint 互斥都不命中，留给
+    LLM 判据段（P0-3）决定"
+  tags: [news, search, guardrail, deliberate_gap]
+
+# badcase 11db5215（2026-07-13）：天气×出行组合句确定性落 info.weather——
+# 弱 LLM 会漂到 safety.driving_advice 反问目的地。两词隔逗号跨子句是关键形态。
+- text: 今天天气怎么样，适合出行吗
+  initial_intents: []
+  expect_final_intents: [info.weather]
+  source: "badcase 11db5215 (2026-07-13)"
+  tags: [weather, go-out, replace]
+
+- text: 今天天气怎么样，适合出行码
+  initial_intents: [safety.driving_advice]
+  expect_final_intents: [info.weather]
+  source: "badcase 11db5215 原始 ASR 同音字形态，误路由被 replace 纠正"
+  tags: [weather, go-out, replace]
+
+- text: 适合出门吗，外面天气如何
+  initial_intents: []
+  expect_final_intents: [info.weather]
+  source: "badcase 11db5215 反序形态"
+  tags: [weather, go-out, replace]
+
+- text: 导航去机场，路上天气适合出行吗
+  initial_intents: [navigate.to]
+  expect_final_intents: [navigate.to]
+  source: "badcase 11db5215 guard：路线/导航语义让位，不劫持"
+  tags: [weather, go-out, guard]
+
+- text: 明天适合出行吗
+  initial_intents: []
+  expect_final_intents: []
+  source: "badcase 11db5215 双词共现约束：无天气词的纯出行问法不召回（留给 LLM）"
+  tags: [weather, go-out, no-hit]
+
+# ── 场景编排（scene-orchestrator v0.2，2026-07-14 重设计）──────────────────
+# 核心是 D8 端云分工：驾驶/动力类模式词是端侧 LOCAL_INTENTS（毫秒级秒回），云端 hint 必须
+# 让路，否则把秒回劫持成 1.5s 云端往返。正例=命名生活场景；反例=端侧模式词/说明书问法。
+- text: 帮我创建一个钓鱼模式：座椅放平，开外循环
+  initial_intents: []
+  expect_final_intents: [scene.create]
+  source: "设计 §6 正例：create 优先级(55)高于 activate(54)，同句两条命中必须走 create"
+  tags: [scene, create, replace]
+
+- text: 新建一个下雨模式，关窗加除雾
+  initial_intents: []
+  expect_final_intents: [scene.create]
+  source: "设计 §6 正例"
+  tags: [scene, create, replace]
+
+- text: 退出性能模式
+  initial_intents: []
+  expect_final_intents: []
+  source: "2026-07-14 评审修复：deactivate guard 补「性能模式」对齐 activate（D8 端侧驾驶模式词）"
+  tags: [scene, edge-mode, guard]
+
+- text: 打开运动模式
+  initial_intents: []
+  expect_final_intents: []
+  source: "D8 反例：端侧 driving_mode.set 毫秒级秒回，云端 guard 必须让路"
+  tags: [scene, edge-mode, guard]
+
+- text: 切换到雪地模式
+  initial_intents: []
+  expect_final_intents: []
+  source: "D8 反例：端侧 driving_mode.set"
+  tags: [scene, edge-mode, guard]
+
+- text: 省电模式怎么开
+  initial_intents: []
+  expect_final_intents: []
+  source: "D8 反例：说明书问法 + 端侧 power_mode，归 manual/chitchat"
+  tags: [scene, manual, guard]
+
+- text: 露营模式是什么意思
+  initial_intents: []
+  expect_final_intents: []
+  source: "反例：知识问法归 manual/chitchat，不激活"
+  tags: [scene, manual, guard]
+
+- text: 开启勿扰模式
+  initial_intents: []
+  expect_final_intents: []
+  source: "D8 反例：系统设置类模式词，不归场景编排"
+  tags: [scene, edge-mode, guard]
+
+- text: 创建省电出行模式：关掉氛围灯、空调调到26度，电量低于20%的时候提醒我开
+  initial_intents: []
+  expect_final_intents: [scene.create]
+  source: "P3：带触发器的造场景句。「提醒我」是触发器描述，不是要建提醒——scene.create(58) 必须压过 reminder.create(56)，否则 reminder 抢走并追问「什么时候提醒你」，把会话挂起（真栈 e2e 实测级联翻车）"
+  tags: [scene, create, trigger, priority]
+
+- text: 明天早上八点提醒我带充电线
+  initial_intents: []
+  # 同上：这条证的是 scene.create 不许抢走无「X模式」词形的普通提醒句。reminder 那半
+  # 随 create hint 退役（2026-08-02），端到端等价用例在 mode_routing_cases.yaml。
+  expect_final_intents: []
+  source: "反向护栏：普通提醒不能被 scene.create 抢走（无「X模式」词形）"
+  tags: [scene, reminder, guard, retired_hint]
+
+- text: 现在几点了
+  initial_intents: [info.search]
+  expect_final_intents: [chitchat.talk]
+  source: "badcase 2026-07-15：planner 把墙钟问句误路由 info.search（联网答不了墙钟→诚实降级话术）；chitchat 钟点 hint(61) replace 纠正 → _clock_answer 系统墙钟直答"
+  tags: [chitchat, clock, replace, recall]
+
+- text: 现在几点了
+  initial_intents: []
+  expect_final_intents: [chitchat.talk]
+  source: "badcase 2026-07-15：LLM 完全没规划时钟点问句也有网兜"
+  tags: [chitchat, clock, replace]
+
+- text: 请问现在是什么时间
+  initial_intents: []
+  expect_final_intents: [chitchat.talk]
+  source: "钟点问句变体（礼貌前缀+时间词形）"
+  tags: [chitchat, clock, replace]
+
+- text: 今天星期几
+  initial_intents: []
+  expect_final_intents: [chitchat.talk]
+  source: "星期问句归墙钟直答家族"
+  tags: [chitchat, clock, replace]
+
+- text: 今天几号
+  initial_intents: []
+  expect_final_intents: [chitchat.talk]
+  source: "日期问句归墙钟直答家族"
+  tags: [chitchat, clock, replace]
+
+- text: 几点提醒我吃药
+  initial_intents: [reminder.create]
+  expect_final_intents: [reminder.create]
+  source: "反向护栏：含「几点」的补槽/提醒句不被钟点 hint 劫持（pattern 占据整句）"
+  tags: [chitchat, clock, guardrail, reminder]
+
+- text: 明天几点有比赛
+  initial_intents: [info.sports]
+  expect_final_intents: [info.sports]
+  source: "反向护栏：赛事时间问句不被钟点 hint 劫持"
+  tags: [chitchat, clock, guardrail, sports]
+
+- text: 现在时间还早吗
+  initial_intents: []
+  expect_final_intents: []
+  source: "反向护栏：时间感慨句非钟点问句（整句锚定不命中），留给 LLM"
+  tags: [chitchat, clock, guardrail]
+
+# ── M2 P0：后台长任务的取消/查询（Task Ledger 消费面）──────────────────
+# pattern 刻意收窄（「别查了」三字太泛 → 只在整句就是它时认）+ guard 排除有自己取消语义
+# 的域（提醒/导航/日程/场景/订单）。下列 expect 均经 --dump 对真实 manifest 实测校准。
+
+- text: 取消明天的提醒
+  initial_intents: [reminder.cancel]
+  expect_final_intents: [reminder.cancel]
+  source: "反向护栏：guard「提醒」拦下——提醒有自己的取消语义，不被调研取消抢"
+  tags: [research, ledger, cancel, guardrail, reminder]
+
+- text: 取消导航
+  initial_intents: []
+  expect_final_intents: []
+  source: "反向护栏：guard「导航」拦下"
+  tags: [research, ledger, cancel, guardrail, navigation]
+
+- text: 别查天气了
+  initial_intents: [info.weather]
+  expect_final_intents: [info.weather]
+  source: "反向护栏：pattern 要求整句就是「别查了」，带宾语的句子不劫持"
+  tags: [research, ledger, cancel, guardrail, weather]
+
+- text: 深入调研一下固态电池
+  initial_intents: []
+  expect_final_intents: [research.run]
+  source: "反向护栏：发起调研不被 cancel/status 抢（run=100 > 95，且 pattern 不重叠）"
+  tags: [research, ledger, guardrail, run]
+
+- text: 那个调研查得怎么样了
+  initial_intents: [chitchat.talk]
+  expect_final_intents: [research.status]
+  source: "M-A A6-1：MiniMax toolcall_degraded 把状态问句落到 chitchat，窄 hint 恢复账本确定性读"
+  tags: [research, ledger, status, replace, m-a]
+
+- text: 还在查吗
+  initial_intents: [chitchat.talk]
+  expect_final_intents: [research.status]
+  source: "Task Ledger 状态短问句"
+  tags: [research, ledger, status, replace]
+
+- text: 导航路线查得怎么样了
+  initial_intents: [navigation.navigate_to]
+  expect_final_intents: [navigation.navigate_to]
+  source: "反向护栏：导航进度不被调研状态抢走"
+  tags: [research, ledger, status, guardrail, navigation]
+
+# ── M-A：赛事事实生产者 + 提醒消费者同轮补齐 ───────────────────────────
+
+- text: 明天欧联第一场是谁踢？开赛前提醒我
+  initial_intents: [info.sports]
+  expect_final_intents: [info.sports, reminder.create]
+  source: "M-A A2-2b：MiniMax goal 含提醒但漏 reminder 步；append 保留赛事生产者并补消费者"
+  tags: [sports, reminder, append, continuity, m-a]
+
+# ── M3 P1 位置提醒（子 RFC §3）──
+# 「到X提醒我Y」「离开X提醒我Y」「到X之前提醒我Y」三条正例断言随 create hint 退役
+# （2026-08-02）迁出本层：它们当初钉的是「既有 create pattern 覆盖到了位置/ETA 词形」，
+# 规则没了这个命题就不存在。地理触发形态在 mode_routing_cases.yaml 有端到端等价用例
+# （「到公司提醒我拿文件」，tag `retired_hint`）；「离开X」与「到X之前」两个词形
+# **2026-08-10 已补**（原句「离开公司提醒我买菜」「到公司之前提醒我交周报」，
+# tag `reminder_wordform`），两趟独立 live（minimax:MiniMax-M3）各 3/3。
+
+# ── vision 触发收窄（数据飞轮 P0 C5，badcase 2026-07-26/27）────────────────────
+# 过宽分支「帮我看看」曾把 LBS 句整句劫持进 vision.describe（replace + 端侧抓帧上传）。
+# 收窄后：LBS 句由 nearby 自己的 hint 确定性接住；真视觉句仍由指代分支覆盖。
+

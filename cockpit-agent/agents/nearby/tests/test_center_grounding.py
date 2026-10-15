@@ -1,0 +1,195 @@
+"""周边检索的中心接地：名字对不上的地名，不拿别的城市冒充「附近」（评审四轮待办，2026-09-25）。
+
+真栈 `8528df0b` RS33 第 2 趟：「第二个」的计划回落到掉档轮抢救出的 `nearby.search {category: 咖啡店, location: 云岚国际中心}`
+（地点取自旧澄清的对象），这个不存在的地名交给无城市偏置的 geocode，落到云南宣威，照样播「为您找到 10 家咖啡厅，推荐：瑞幸咖啡
+(宣威恒泰城店)…」。与导航 E-1 同一类（`agents._sdk.location.LOCAL_RADIUS_KM`，两处同一个数）：落在本地半径内照旧；半径外只有
+用户说出了那座城才算数；geocode 没有结果时修前 provider 退成全国关键字检索，同样不许。
+
+抢救回落本身不动：collector 全量 4498 次规划里回落 137 次，重试轮说「需要澄清」的 26 次里抢救计划对的约 24 次（「把全车门解锁」
+「取消导航」这类，重试轮的澄清反而是错的）——错的这一次，后果落在这里。
+"""
+from __future__ import annotations
+
+import asyncio
+
+from agents._sdk.location import LOCAL_RADIUS_KM, NOT_FOUND_FOLLOW_UP
+from agents._sdk.testing import run_handle
+from agents.nearby.src.agent import NearbyAgent, _names_the_area
+from agents.nearby.src.providers.base import GeocodeHit, GeoPoint, Place
+
+_SHENZHEN = {"current_lat": "22.5410", "current_lng": "114.0579"}
+_XUANWEI = GeocodeHit(lat=26.219, lng=104.104, province="云南省", city="曲靖市", district="宣威市")
+_DONGGUAN = GeocodeHit(lat=22.970, lng=113.750, province="广东省", city="东莞市", district="")
+_BEIJING = GeocodeHit(lat=39.934, lng=116.455, province="北京市", city="北京市", district="朝阳区")
+
+
+class _Place:
+    """偏置搜索按名字搜不到（或搜到的名字对不上）；geocode 按脚本回。记下每一次调用。"""
+
+    def __init__(self, geocoded, *, verified: str = ""):
+        self.geocoded = geocoded
+        self.verified = verified
+        self.searches: list[tuple[str, object]] = []
+        self.geocodes: list[str] = []
+
+    async def search(self, keyword, near=None, meta=None, **kw):
+        self.searches.append((keyword, near))
+        if self.verified and keyword == self.verified:
+            return [Place(id="v", name=f"{keyword}广场", lat=22.53, lng=113.95)]
+        if len(self.searches) == 1:
+            return [Place(id="x", name="不相干的店", lat=22.60, lng=114.10)]    # 名字对不上
+        return [Place(id="c1", name="某咖啡", lat=near.lat if near else 0, lng=near.lng if near else 0,
+                      rating=4.5)]
+
+    async def geocode(self, address, *, meta=None):
+        self.geocodes.append(address)
+        return self.geocoded
+
+
+def _run(place, slots, raw, meta=_SHENZHEN, intent="nearby.search"):
+    agent = NearbyAgent()
+    agent.place = place
+    return asyncio.run(run_handle(agent, intent, slots=slots, raw_text=raw, meta=meta))
+
+
+# ── 修前的真栈形态 ────────────────────────────────────────────────────────────────
+
+def test_rs33_a_place_geocoded_to_another_city_is_not_searched():
+    place = _Place(_XUANWEI)
+    res = _run(place, {"category": "咖啡店", "location": "云岚国际中心"}, "第二个")
+    assert res.speech == "没找到「云岚国际中心」。"
+    assert res.follow_up == NOT_FOUND_FOLLOW_UP
+    # R9 诚实降级：不出卡、不带 data——带了 data，结果校验会把空列表念成「数据源没返回，要不要我再试一次」（真栈 `684bfeec` RS43）
+    assert not res.ui_card and not res.data
+    assert [k for k, _ in place.searches] == ["云岚国际中心"]      # 只有解析中心那一次，没在宣威搜咖啡
+    assert place.geocodes == ["云岚国际中心"]
+
+
+def test_the_unlocated_answer_is_not_reported_as_an_empty_data_source():
+    from orchestrator.cloud.executor import DagExecutor
+    from orchestrator.cloud.models import StepResult, StepStatus
+    res = _run(_Place(_XUANWEI), {"category": "咖啡店", "location": "云岚国际中心"}, "第二个")
+    step_result = StepResult(step_id="s1", status=StepStatus.OK, speech=res.speech, data=res.data or {},
+                             ui_card=res.ui_card)
+    assert DagExecutor._should_report(step_result) is False
+
+
+def test_a_place_that_cannot_be_geocoded_is_not_searched_nationwide():
+    place = _Place(None)
+    res = _run(place, {"category": "咖啡店"}, "云岚国际中心附近的咖啡店")
+    assert res.speech == "没找到「云岚国际中心」。" and not res.data
+    assert len(place.searches) == 1
+
+
+def test_a_failed_search_is_not_reported_as_a_missing_place():
+    """2026-10-08 高德日配额用尽：解析中心的偏置检索报错（10044），全国地理编码没在本地定位到（没结果 / 落到外地）——
+    不知道它在不在本地，说「没找到」是假话，如实说周边搜索服务暂时不可用（同导航地图报错不说没找到）。检索正常、
+    真定位不到的照旧说没找到（上面两条）。"""
+    from agents._sdk.http import ProviderError
+
+    class _Down(_Place):
+        async def search(self, keyword, near=None, meta=None, **kw):
+            self.searches.append((keyword, near))
+            raise ProviderError("amap search failed: USER_DAILY_QUERY_OVER_LIMIT (10044)")
+
+    for geocoded in (None, _XUANWEI):
+        place = _Down(geocoded)
+        res = _run(place, {"category": "咖啡店", "location": "海岸城"}, "海岸城附近的咖啡店")
+        assert "暂时不可用" in res.speech and "海岸城" in res.speech and "没找到" not in res.speech, geocoded
+        assert not res.ui_card and not res.data
+        assert [k for k, _ in place.searches] == ["海岸城"]
+
+
+def test_the_indoor_fanout_takes_the_same_gate():
+    place = _Place(_XUANWEI)
+    res = _run(place, {"category": "室内", "location": "云岚国际中心"}, "云岚国际中心附近有什么室内玩的")
+    assert res.speech == "没找到「云岚国际中心」。"
+    assert len(place.searches) == 1
+
+
+# ── 对照：修前就对的照旧 ──────────────────────────────────────────────────────────
+
+def test_a_place_within_the_local_radius_is_searched_around_its_geocode():
+    place = _Place(_DONGGUAN)
+    res = _run(place, {"category": "咖啡店", "location": "松山湖"}, "松山湖附近的咖啡店")
+    assert res.data["center"] == "slot" and res.data["items"]
+    final_near = place.searches[-1][1]
+    assert isinstance(final_near, GeoPoint) and abs(final_near.lat - _DONGGUAN.lat) < 1e-6
+
+
+def test_a_far_city_the_user_named_is_searched():
+    place = _Place(_BEIJING)
+    res = _run(place, {"category": "咖啡店", "location": "北京三里屯"}, "北京三里屯附近的咖啡店")
+    assert res.data["items"]
+    assert abs(place.searches[-1][1].lat - _BEIJING.lat) < 1e-6
+
+
+def test_a_verified_name_never_needs_the_geocode():
+    place = _Place(_XUANWEI, verified="科技园")
+    res = _run(place, {"category": "咖啡店", "location": "科技园"}, "科技园附近的咖啡店")
+    assert res.data["items"] and place.geocodes == []
+    assert abs(place.searches[-1][1].lat - 22.53) < 1e-6
+
+
+def test_without_a_vehicle_position_the_old_path_stands():
+    """判不了远近 ⇒ 照旧把地名交给 provider（不猜、也不拒）。"""
+    place = _Place(_XUANWEI)
+    res = _run(place, {"category": "咖啡店", "location": "云岚国际中心"}, "第二个", meta={})
+    assert place.geocodes == [] and res.data.get("center") != "unlocated"
+    assert place.searches[-1][1].address == "云岚国际中心"
+
+
+def test_a_provider_without_geocoding_keeps_the_old_path():
+    class _NoGeocode:
+        def __init__(self):
+            self.calls = []
+
+        async def search(self, keyword, near=None, meta=None, **kw):
+            self.calls.append((keyword, near))
+            return []
+
+    place = _NoGeocode()
+    res = _run(place, {"category": "咖啡店", "location": "云岚国际中心"}, "第二个")
+    assert res.speech != "没找到「云岚国际中心」。"
+    assert len(place.calls) == 2 and place.calls[-1][1].address == "云岚国际中心"
+
+
+# ── location 槽尾巴上的「附近」不是地名 ───────────────────────────────────────────────
+
+def test_a_nearby_tail_on_the_location_slot_is_not_part_of_the_place():
+    """真栈 `ee94c595`：规划写成 `location=霁川国际中心附近` ⇒ 答「没找到「霁川国际中心附近」」。"""
+    place = _Place(_XUANWEI)
+    res = _run(place, {"category": "咖啡店", "location": "霁川国际中心附近"}, "霁川国际中心附近的咖啡店")
+    assert res.speech == "没找到「霁川国际中心」。"
+    assert place.searches[0][0] == "霁川国际中心" and place.geocodes == ["霁川国际中心"]
+
+
+def test_a_real_place_with_a_nearby_tail_still_verifies_by_name():
+    """存在的地名带着「附近」去做名字校验必然不过（「万象城附近」⊄「万象城广场」），剥掉才对得上。"""
+    place = _Place(_XUANWEI, verified="万象城")
+    res = _run(place, {"category": "咖啡店", "location": "万象城的周边"}, "万象城周边的咖啡店")
+    assert res.data["items"] and place.geocodes == []
+
+
+def test_the_tail_strip_keeps_a_too_short_stem():
+    from types import SimpleNamespace
+    slot = NearbyAgent._location_slot
+    assert slot(SimpleNamespace(slots={"location": "科技园一带"})) == "科技园"
+    assert slot(SimpleNamespace(slots={"location": "附近"})) == "附近"          # 剥完不足 2 个字：不剥
+    assert slot(SimpleNamespace(slots={"location": "113.9,22.5"})) == "113.9,22.5"
+
+
+# ── 判据本身 ─────────────────────────────────────────────────────────────────────
+
+def test_names_the_area():
+    assert _names_the_area(_BEIJING, "北京三里屯 北京三里屯附近的咖啡店")
+    assert _names_the_area(_XUANWEI, "宣威火车站附近")
+    assert _names_the_area(_XUANWEI, "去云南那边的咖啡店")
+    assert not _names_the_area(_XUANWEI, "云岚国际中心 第二个")
+    assert not _names_the_area(GeocodeHit(lat=0, lng=0, province="市"), "市中心")
+
+
+def test_the_radius_is_the_navigation_one():
+    from agents.navigation.src import agent as navigation
+    assert navigation._LOCAL_RADIUS_KM == LOCAL_RADIUS_KM == 150.0
+    assert navigation._NOT_FOUND_FOLLOW_UP == NOT_FOUND_FOLLOW_UP

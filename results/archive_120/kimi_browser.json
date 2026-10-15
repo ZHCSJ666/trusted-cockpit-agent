@@ -1,0 +1,169 @@
+{
+  "status": "executed",
+  "message": "模拟车已完成：副驾车窗设为50%。",
+  "vehicle": {
+    "speed": 0,
+    "gear": "P",
+    "windows": {
+      "front_left": 0,
+      "front_right": 50,
+      "rear_left": 0,
+      "rear_right": 0
+    },
+    "temperature": 24,
+    "doors": {
+      "front_left": false,
+      "front_right": false,
+      "rear_left": false,
+      "rear_right": false
+    },
+    "trunk_open": false,
+    "massage": false,
+    "profile": "standard",
+    "source": "simulated",
+    "revision": 1,
+    "navigation_destination": null,
+    "state_age_ms": 0
+  },
+  "trace": [
+    {
+      "stage": "input",
+      "status": "ok",
+      "detail": "原话用于授权；模型计划只作为候选。"
+    },
+    {
+      "stage": "model",
+      "status": "ok",
+      "detail": {
+        "model": "moonshotai/Kimi-K3",
+        "usage": {
+          "prompt_tokens": 969,
+          "completion_tokens": 124,
+          "total_tokens": 1093
+        },
+        "latency_ms": 1212.8
+      }
+    },
+    {
+      "stage": "ambiguity",
+      "status": "ok",
+      "detail": "必要信息来自原话或单一有效对话上下文。"
+    },
+    {
+      "stage": "schema",
+      "status": "ok",
+      "detail": "参数类型、必填项、范围和额外字段检查通过。"
+    },
+    {
+      "stage": "semantic",
+      "status": "ok",
+      "detail": {
+        "slot_sources": {
+          "position": "utterance",
+          "percent": "utterance"
+        }
+      }
+    },
+    {
+      "stage": "capability",
+      "status": "ok",
+      "detail": "工具存在且符合standard车型配置。"
+    },
+    {
+      "stage": "permission",
+      "status": "ok",
+      "detail": "会话具备该工具的模拟执行权限。"
+    },
+    {
+      "stage": "safety",
+      "status": "ok",
+      "detail": "车态新鲜度、车速、档位及硬性规则检查通过。"
+    },
+    {
+      "stage": "execute",
+      "status": "acknowledged",
+      "detail": {
+        "operation_id": "1f872fe8a34a4ddc17b9da93488c8a23",
+        "via": "VAL.execute"
+      }
+    },
+    {
+      "stage": "verify",
+      "status": "ok",
+      "detail": "目标状态符合请求，其他受监测设备没有意外变化；证据仅限模拟车。"
+    }
+  ],
+  "calls": [
+    {
+      "tool": "set_window",
+      "args": {
+        "position": "front_right",
+        "percent": 50
+      },
+      "operation_id": "1f872fe8a34a4ddc17b9da93488c8a23",
+      "receipt": "acknowledged",
+      "source": "simulated",
+      "executed_via": "VAL.execute",
+      "actual_command": {
+        "domain": "vehicle",
+        "intent": "set_window",
+        "data": {
+          "object": "window",
+          "operate": "open",
+          "positions": [
+            "front_right"
+          ],
+          "value": 50,
+          "unit": "percent"
+        }
+      }
+    }
+  ],
+  "evidence": [],
+  "plan": {
+    "kind": "action",
+    "tool": "set_window",
+    "args": {
+      "position": "front_right",
+      "percent": 50
+    }
+  },
+  "source": "simulated",
+  "model": {
+    "model": "moonshotai/Kimi-K3",
+    "usage": {
+      "prompt_tokens": 969,
+      "completion_tokens": 124,
+      "total_tokens": 1093
+    },
+    "latency_ms": 1212.8
+  },
+  "before": {
+    "speed": 0,
+    "gear": "P",
+    "windows": {
+      "front_left": 0,
+      "front_right": 0,
+      "rear_left": 0,
+      "rear_right": 0
+    },
+    "temperature": 24,
+    "doors": {
+      "front_left": false,
+      "front_right": false,
+      "rear_left": false,
+      "rear_right": false
+    },
+    "trunk_open": false,
+    "massage": false,
+    "profile": "standard",
+    "source": "simulated",
+    "revision": 0,
+    "navigation_destination": null,
+    "state_age_ms": 0
+  },
+  "provider": "kimi",
+  "mode": "guarded",
+  "elapsed_ms": 1214.2,
+  "session_id": "studio-be7811dd-73c7-4845-b634-94362fc92f0f"
+}

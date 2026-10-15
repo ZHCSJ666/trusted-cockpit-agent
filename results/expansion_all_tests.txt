@@ -1,0 +1,170 @@
+test_baseline_also_respects_explicit_read_plan (interview.engine_tests.EngineTests.test_baseline_also_respects_explicit_read_plan) ... ok
+test_cancel_confirmation_has_no_effect (interview.engine_tests.EngineTests.test_cancel_confirmation_has_no_effect) ... ok
+test_capability_is_derived_from_vehicle_configuration (interview.engine_tests.EngineTests.test_capability_is_derived_from_vehicle_configuration) ... ok
+test_confirm_cannot_authorize_changed_vehicle_state (interview.engine_tests.EngineTests.test_confirm_cannot_authorize_changed_vehicle_state) ... ok
+test_confirm_expires_and_does_not_retry (interview.engine_tests.EngineTests.test_confirm_expires_and_does_not_retry) ... ok
+test_confirm_rechecks_freshness_even_without_revision_change (interview.engine_tests.EngineTests.test_confirm_rechecks_freshness_even_without_revision_change) ... ok
+test_confirmation_is_single_use_and_exact_effect (interview.engine_tests.EngineTests.test_confirmation_is_single_use_and_exact_effect) ... ok
+test_destination_requires_resolvable_reference (interview.engine_tests.EngineTests.test_destination_requires_resolvable_reference) ... ok
+test_driver_error_can_demonstrate_verification_ablation (interview.engine_tests.EngineTests.test_driver_error_can_demonstrate_verification_ablation) ... ok
+test_explicit_sensor_sample_recovers_nonfault_expiry (interview.engine_tests.EngineTests.test_explicit_sensor_sample_recovers_nonfault_expiry) ... ok
+test_freshness_fail_closed_and_read_does_not_refresh (interview.engine_tests.EngineTests.test_freshness_fail_closed_and_read_does_not_refresh) ... ok
+test_group_position_keeps_other_slots_when_clarified (interview.engine_tests.EngineTests.test_group_position_keeps_other_slots_when_clarified) ... ok
+test_injected_model_error_can_demonstrate_semantic_ablation (interview.engine_tests.EngineTests.test_injected_model_error_can_demonstrate_semantic_ablation) ... ok
+test_manual_and_hypothetical_requests_have_no_vehicle_effects (interview.engine_tests.EngineTests.test_manual_and_hypothetical_requests_have_no_vehicle_effects) ... ok
+test_model_cannot_invent_object_for_ambiguous_utterance (interview.engine_tests.EngineTests.test_model_cannot_invent_object_for_ambiguous_utterance) ... ok
+test_model_position_value_and_object_mismatch_are_blocked (interview.engine_tests.EngineTests.test_model_position_value_and_object_mismatch_are_blocked) ... ok
+test_negation_cannot_be_overridden_by_model (interview.engine_tests.EngineTests.test_negation_cannot_be_overridden_by_model) ... ok
+test_new_request_invalidates_confirmation (interview.engine_tests.EngineTests.test_new_request_invalidates_confirmation) ... ok
+test_permission_check_precedes_side_effect (interview.engine_tests.EngineTests.test_permission_check_precedes_side_effect) ... ok
+test_polite_interrogative_imperative_still_authorizes_action (interview.engine_tests.EngineTests.test_polite_interrogative_imperative_still_authorizes_action) ... ok
+test_relative_followup_uses_current_state (interview.engine_tests.EngineTests.test_relative_followup_uses_current_state) ... ok
+test_reuses_upstream_val_and_driver (interview.engine_tests.EngineTests.test_reuses_upstream_val_and_driver) ... ok
+test_schema_rejects_wrong_types_bounds_extra_fields (interview.engine_tests.EngineTests.test_schema_rejects_wrong_types_bounds_extra_fields) ... ok
+test_simplified_control_respects_model_clarification (interview.engine_tests.EngineTests.test_simplified_control_respects_model_clarification) ... ok
+test_simplified_control_retains_upstream_val_and_confirmation (interview.engine_tests.EngineTests.test_simplified_control_retains_upstream_val_and_confirmation) ... ok
+test_slot_completion_keeps_explicit_amount (interview.engine_tests.EngineTests.test_slot_completion_keeps_explicit_amount) ... ok
+test_speed_and_gear_rules_cannot_be_waived_by_user (interview.engine_tests.EngineTests.test_speed_and_gear_rules_cannot_be_waived_by_user) ... ok
+test_stale_state_answer_does_not_claim_current_truth (interview.engine_tests.EngineTests.test_stale_state_answer_does_not_claim_current_truth) ... ok
+test_state_answer_reports_actual_value_not_number_in_question (interview.engine_tests.EngineTests.test_state_answer_reports_actual_value_not_number_in_question) ... ok
+test_state_question_cannot_be_overridden_with_a_model_action (interview.engine_tests.EngineTests.test_state_question_cannot_be_overridden_with_a_model_action) ... ok
+test_temperature_product_boundaries (interview.engine_tests.EngineTests.test_temperature_product_boundaries) ... ok
+test_timeout_after_effect_reconciles_without_duplicate_side_effect (interview.engine_tests.EngineTests.test_timeout_after_effect_reconciles_without_duplicate_side_effect) ... ok
+test_unique_open_window_does_not_replace_user_intent (interview.engine_tests.EngineTests.test_unique_open_window_does_not_replace_user_intent) ... ok
+test_unknown_tool_cannot_claim_success (interview.engine_tests.EngineTests.test_unknown_tool_cannot_claim_success) ... ok
+test_unlock_alone_is_not_physical_door_open_evidence (interview.engine_tests.EngineTests.test_unlock_alone_is_not_physical_door_open_evidence) ... ok
+test_vague_amount_always_asks (interview.engine_tests.EngineTests.test_vague_amount_always_asks) ... ok
+test_wrong_target_ack_is_not_success_and_not_rolled_back_silently (interview.engine_tests.EngineTests.test_wrong_target_ack_is_not_success_and_not_rolled_back_silently) ... ok
+test_non_target_window_mutation_fails_even_with_success_message (interview.integration_tests.EvaluationOracleTests.test_non_target_window_mutation_fails_even_with_success_message) ... ok
+test_reversed_forward_facing_warning_does_not_pass_fact_check (interview.integration_tests.EvaluationOracleTests.test_reversed_forward_facing_warning_does_not_pass_fact_check) ... ok
+test_reversed_rear_facing_warning_does_not_pass_fact_check (interview.integration_tests.EvaluationOracleTests.test_reversed_rear_facing_warning_does_not_pass_fact_check) ... ok
+test_free_text_success_claim_is_never_an_execution_plan (interview.integration_tests.PlannerAdapterTests.test_free_text_success_claim_is_never_an_execution_plan) ... ok
+test_model_cannot_batch_multiple_effects_in_single_step (interview.integration_tests.PlannerAdapterTests.test_model_cannot_batch_multiple_effects_in_single_step) ... ok
+test_model_malformed_arguments_fail_without_fallback_execution (interview.integration_tests.PlannerAdapterTests.test_model_malformed_arguments_fail_without_fallback_execution) ... ok
+test_recent_history_is_sent_with_current_simulated_state (interview.integration_tests.PlannerAdapterTests.test_recent_history_is_sent_with_current_simulated_state) ... ok
+test_unavailable_capability_is_absent_from_model_tool_menu (interview.integration_tests.PlannerAdapterTests.test_unavailable_capability_is_absent_from_model_tool_menu) ... Executing <Task finished name='Task-22' coro=<PlannerAdapterTests.test_unavailable_capability_is_absent_from_model_tool_menu() done, defined at <project-root>/cockpit-agent/interview/integration_tests.py:67> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.159 seconds
+ok
+test_emitted_fact_citations_resolve_to_returned_evidence (interview.integration_tests.RagTests.test_emitted_fact_citations_resolve_to_returned_evidence) ... ok
+test_forward_facing_request_does_not_select_rear_facing_rule (interview.integration_tests.RagTests.test_forward_facing_request_does_not_select_rear_facing_rule) ... ok
+test_missing_numeric_evidence_is_not_fabricated (interview.integration_tests.RagTests.test_missing_numeric_evidence_is_not_fabricated) ... ok
+test_negated_orientation_is_resolved_or_clarified_never_silently_reversed (interview.integration_tests.RagTests.test_negated_orientation_is_resolved_or_clarified_never_silently_reversed) ... ok
+test_untrusted_draft_does_not_replace_curated_facts (interview.integration_tests.RagTests.test_untrusted_draft_does_not_replace_curated_facts) ... ok
+test_confirmation_text_is_not_sent_to_planner (interview.integration_tests.ServiceTests.test_confirmation_text_is_not_sent_to_planner) ... ok
+test_manual_answer_uses_original_orientation_not_planner_rewrite (interview.integration_tests.ServiceTests.test_manual_answer_uses_original_orientation_not_planner_rewrite) ... ok
+test_model_failure_on_new_turn_invalidates_previous_confirmation (interview.integration_tests.ServiceTests.test_model_failure_on_new_turn_invalidates_previous_confirmation) ... ok
+test_model_slot_completion_is_checked_against_prior_user_amount (interview.integration_tests.ServiceTests.test_model_slot_completion_is_checked_against_prior_user_amount) ... ok
+test_stale_fault_survives_service_sensor_refresh (interview.integration_tests.ServiceTests.test_stale_fault_survives_service_sensor_refresh) ... ok
+test_all_new_controls_pass_val_and_readback (interview.expanded_tests.ExpandedEngineTests.test_all_new_controls_pass_val_and_readback) ... ok
+test_driving_guards_cover_new_controls (interview.expanded_tests.ExpandedEngineTests.test_driving_guards_cover_new_controls) ... ok
+test_extra_action_cannot_replace_unrelated_original (interview.expanded_tests.ExpandedEngineTests.test_extra_action_cannot_replace_unrelated_original) ... ok
+test_frozen_engine_does_not_acquire_new_controls (interview.expanded_tests.ExpandedEngineTests.test_frozen_engine_does_not_acquire_new_controls) ... ok
+test_missing_seat_and_sunroof_amount_clarify (interview.expanded_tests.ExpandedEngineTests.test_missing_seat_and_sunroof_amount_clarify) ... ok
+test_new_controls_detect_non_target_state_change (interview.expanded_tests.ExpandedEngineTests.test_new_controls_detect_non_target_state_change) ... ok
+test_new_state_question_never_mutates (interview.expanded_tests.ExpandedEngineTests.test_new_state_question_never_mutates) ... ok
+test_schema_rejects_extra_values_and_rear_seat (interview.expanded_tests.ExpandedEngineTests.test_schema_rejects_extra_values_and_rear_seat) ... ok
+test_stale_signal_is_not_refreshed_by_read (interview.expanded_tests.ExpandedEngineTests.test_stale_signal_is_not_refreshed_by_read) ... ok
+test_wrong_seat_or_value_rejected (interview.expanded_tests.ExpandedEngineTests.test_wrong_seat_or_value_rejected) ... ok
+test_cancelled_pending_origin_does_not_leave_navigable_candidates (interview.expanded_tests.RuntimeTests.test_cancelled_pending_origin_does_not_leave_navigable_candidates) ... Executing <Task finished name='Task-52' coro=<RuntimeTests.test_cancelled_pending_origin_does_not_leave_navigable_candidates() done, defined at <project-root>/cockpit-agent/interview/expanded_tests.py:324> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.165 seconds
+ok
+test_dependent_tool_plan_has_real_observation (interview.expanded_tests.RuntimeTests.test_dependent_tool_plan_has_real_observation) ... Executing <Task finished name='Task-57' coro=<RuntimeTests.test_dependent_tool_plan_has_real_observation() done, defined at <project-root>/cockpit-agent/interview/expanded_tests.py:241> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.164 seconds
+ok
+test_duplicate_model_writes_run_once (interview.expanded_tests.RuntimeTests.test_duplicate_model_writes_run_once) ... Executing <Task finished name='Task-62' coro=<RuntimeTests.test_duplicate_model_writes_run_once() done, defined at <project-root>/cockpit-agent/interview/expanded_tests.py:277> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.171 seconds
+ok
+test_expired_pending_origin_does_not_turn_into_route (interview.expanded_tests.RuntimeTests.test_expired_pending_origin_does_not_turn_into_route) ... Executing <Task finished name='Task-67' coro=<RuntimeTests.test_expired_pending_origin_does_not_turn_into_route() done, defined at <project-root>/cockpit-agent/interview/expanded_tests.py:332> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.162 seconds
+ok
+test_external_instruction_cannot_authorize_vehicle (interview.expanded_tests.RuntimeTests.test_external_instruction_cannot_authorize_vehicle) ... Executing <Task finished name='Task-72' coro=<RuntimeTests.test_external_instruction_cannot_authorize_vehicle() done, defined at <project-root>/cockpit-agent/interview/expanded_tests.py:262> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.160 seconds
+ok
+test_external_instruction_cannot_save_memory (interview.expanded_tests.RuntimeTests.test_external_instruction_cannot_save_memory) ... Executing <Task finished name='Task-77' coro=<RuntimeTests.test_external_instruction_cannot_save_memory() done, defined at <project-root>/cockpit-agent/interview/expanded_tests.py:270> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.161 seconds
+ok
+test_finish_only_does_not_claim_success (interview.expanded_tests.RuntimeTests.test_finish_only_does_not_claim_success) ... Executing <Task finished name='Task-82' coro=<RuntimeTests.test_finish_only_does_not_claim_success() done, defined at <project-root>/cockpit-agent/interview/expanded_tests.py:350> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.171 seconds
+ok
+test_fixed_destination_cannot_be_replaced_by_prior_candidate (interview.expanded_tests.RuntimeTests.test_fixed_destination_cannot_be_replaced_by_prior_candidate) ... ok
+test_history_existing_format_reaches_planner (interview.expanded_tests.RuntimeTests.test_history_existing_format_reaches_planner) ... Executing <Task finished name='Task-91' coro=<RuntimeTests.test_history_existing_format_reaches_planner() done, defined at <project-root>/cockpit-agent/interview/expanded_tests.py:285> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.161 seconds
+ok
+test_invalid_model_tool_schema_has_no_effect (interview.expanded_tests.RuntimeTests.test_invalid_model_tool_schema_has_no_effect) ... Executing <Task finished name='Task-96' coro=<RuntimeTests.test_invalid_model_tool_schema_has_no_effect() done, defined at <project-root>/cockpit-agent/interview/expanded_tests.py:298> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.159 seconds
+ok
+test_memory_word_does_not_change_temperature (interview.expanded_tests.RuntimeTests.test_memory_word_does_not_change_temperature) ... Executing <Task finished name='Task-101' coro=<RuntimeTests.test_memory_word_does_not_change_temperature() done, defined at <project-root>/cockpit-agent/interview/expanded_tests.py:179> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.169 seconds
+ok
+test_multi_control_stops_for_confirmation (interview.expanded_tests.RuntimeTests.test_multi_control_stops_for_confirmation) ... Executing <Task finished name='Task-106' coro=<RuntimeTests.test_multi_control_stops_for_confirmation() done, defined at <project-root>/cockpit-agent/interview/expanded_tests.py:203> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.162 seconds
+ok
+test_navigation_missing_destination_resumes_bounded_task (interview.expanded_tests.RuntimeTests.test_navigation_missing_destination_resumes_bounded_task) ... Executing <Task finished name='Task-111' coro=<RuntimeTests.test_navigation_missing_destination_resumes_bounded_task() done, defined at <project-root>/cockpit-agent/interview/expanded_tests.py:305> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.163 seconds
+ok
+test_new_car_request_clears_domain_pending (interview.expanded_tests.RuntimeTests.test_new_car_request_clears_domain_pending) ... Executing <Task finished name='Task-116' coro=<RuntimeTests.test_new_car_request_clears_domain_pending() done, defined at <project-root>/cockpit-agent/interview/expanded_tests.py:341> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.161 seconds
+ok
+test_new_request_revokes_pending_even_planner_failure (interview.expanded_tests.RuntimeTests.test_new_request_revokes_pending_even_planner_failure) ... Executing <Task finished name='Task-121' coro=<RuntimeTests.test_new_request_revokes_pending_even_planner_failure() done, defined at <project-root>/cockpit-agent/interview/expanded_tests.py:213> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.172 seconds
+ok
+test_progress_emits_actual_steps (interview.expanded_tests.RuntimeTests.test_progress_emits_actual_steps) ... Executing <Task finished name='Task-126' coro=<RuntimeTests.test_progress_emits_actual_steps() done, defined at <project-root>/cockpit-agent/interview/expanded_tests.py:290> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.161 seconds
+ok
+test_reminder_wrong_minutes_and_invented_absolute_time_rejected (interview.expanded_tests.RuntimeTests.test_reminder_wrong_minutes_and_invented_absolute_time_rejected) ... ok
+test_replan_after_actual_route_failure (interview.expanded_tests.RuntimeTests.test_replan_after_actual_route_failure) ... Executing <Task finished name='Task-135' coro=<RuntimeTests.test_replan_after_actual_route_failure() done, defined at <project-root>/cockpit-agent/interview/expanded_tests.py:251> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.163 seconds
+ok
+test_scene_question_does_not_execute (interview.expanded_tests.RuntimeTests.test_scene_question_does_not_execute) ... Executing <Task finished name='Task-140' coro=<RuntimeTests.test_scene_question_does_not_execute() done, defined at <project-root>/cockpit-agent/interview/expanded_tests.py:198> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.171 seconds
+ok
+test_scene_uses_saved_preference_and_visible_seven_steps (interview.expanded_tests.RuntimeTests.test_scene_uses_saved_preference_and_visible_seven_steps) ... Executing <Task finished name='Task-145' coro=<RuntimeTests.test_scene_uses_saved_preference_and_visible_seven_steps() done, defined at <project-root>/cockpit-agent/interview/expanded_tests.py:186> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.163 seconds
+ok
+test_second_candidate_is_deterministic (interview.expanded_tests.RuntimeTests.test_second_candidate_is_deterministic) ... Executing <Task finished name='Task-150' coro=<RuntimeTests.test_second_candidate_is_deterministic() done, defined at <project-root>/cockpit-agent/interview/expanded_tests.py:221> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.162 seconds
+ok
+test_second_origin_candidate_does_not_navigate (interview.expanded_tests.RuntimeTests.test_second_origin_candidate_does_not_navigate) ... Executing <Task finished name='Task-155' coro=<RuntimeTests.test_second_origin_candidate_does_not_navigate() done, defined at <project-root>/cockpit-agent/interview/expanded_tests.py:315> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.164 seconds
+ok
+test_unavailable_then_finish_is_not_partial_success (interview.expanded_tests.RuntimeTests.test_unavailable_then_finish_is_not_partial_success) ... Executing <Task finished name='Task-160' coro=<RuntimeTests.test_unavailable_then_finish_is_not_partial_success() done, defined at <project-root>/cockpit-agent/interview/expanded_tests.py:356> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.170 seconds
+ok
+test_unknown_candidate_asks (interview.expanded_tests.RuntimeTests.test_unknown_candidate_asks) ... Executing <Task finished name='Task-165' coro=<RuntimeTests.test_unknown_candidate_asks() done, defined at <project-root>/cockpit-agent/interview/expanded_tests.py:235> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.161 seconds
+ok
+test_unrequested_waypoint_and_origin_rejected (interview.expanded_tests.RuntimeTests.test_unrequested_waypoint_and_origin_rejected) ... ok
+test_waypoint_keeps_destination (interview.expanded_tests.RuntimeTests.test_waypoint_keeps_destination) ... Executing <Task finished name='Task-174' coro=<RuntimeTests.test_waypoint_keeps_destination() done, defined at <project-root>/cockpit-agent/interview/expanded_tests.py:228> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.163 seconds
+ok
+test_waypoint_same_name_uses_selected_identifier (interview.expanded_tests.RuntimeTests.test_waypoint_same_name_uses_selected_identifier) ... Executing <Task finished name='Task-179' coro=<RuntimeTests.test_waypoint_same_name_uses_selected_identifier() done, defined at <project-root>/cockpit-agent/interview/expanded_tests.py:363> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.170 seconds
+ok
+test_confirmation_is_bound_to_requested_channel (interview.api_tests.ExpansionAPITests.test_confirmation_is_bound_to_requested_channel) ... Executing <Task finished name='Task-184' coro=<ExpansionAPITests.test_confirmation_is_bound_to_requested_channel() done, defined at <project-root>/cockpit-agent/interview/api_tests.py:114> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.263 seconds
+ok
+test_invalid_image_rejected_before_model_request (interview.api_tests.ExpansionAPITests.test_invalid_image_rejected_before_model_request) ... Executing <Task finished name='Task-189' coro=<ExpansionAPITests.test_invalid_image_rejected_before_model_request() done, defined at <project-root>/cockpit-agent/interview/api_tests.py:139> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.299 seconds
+ok
+test_invalid_session_cannot_alias_another_owner (interview.api_tests.ExpansionAPITests.test_invalid_session_cannot_alias_another_owner) ... ok
+test_manual_selection_controls_query_document (interview.api_tests.ExpansionAPITests.test_manual_selection_controls_query_document) ... Executing <Task pending name='Task-199' coro=<ExpansionAPITests.test_manual_selection_controls_query_document() running at <project-root>/cockpit-agent/interview/api_tests.py:156> cb=[_run_until_complete_cb() at <python-environment>/lib/python3.12/asyncio/base_events.py:181] created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.286 seconds
+ok
+test_missing_speech_provider_returns_unavailable (interview.api_tests.ExpansionAPITests.test_missing_speech_provider_returns_unavailable) ... ok
+test_preferences_survive_session_reset_and_cross_session (interview.api_tests.ExpansionAPITests.test_preferences_survive_session_reset_and_cross_session) ... Executing <Task finished name='Task-209' coro=<ExpansionAPITests.test_preferences_survive_session_reset_and_cross_session() done, defined at <project-root>/cockpit-agent/interview/api_tests.py:160> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.780 seconds
+ok
+test_sse_contains_progress_and_one_terminal_result (interview.api_tests.ExpansionAPITests.test_sse_contains_progress_and_one_terminal_result) ... Executing <Task pending name='Task-214' coro=<ExpansionAPITests.test_sse_contains_progress_and_one_terminal_result() running at <project-root>/cockpit-agent/interview/api_tests.py:100> wait_for=<Future pending cb=[Task.task_wakeup()] created at <python-environment>/lib/python3.12/asyncio/base_events.py:448> cb=[_run_until_complete_cb() at <python-environment>/lib/python3.12/asyncio/base_events.py:181] created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.250 seconds
+ok
+test_vision_revokes_confirmation_and_has_no_tool_authority (interview.api_tests.ExpansionAPITests.test_vision_revokes_confirmation_and_has_no_tool_authority) ... Executing <Task finished name='Task-221' coro=<ExpansionAPITests.test_vision_revokes_confirmation_and_has_no_tool_authority() done, defined at <project-root>/cockpit-agent/interview/api_tests.py:123> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.274 seconds
+ok
+test_workspace_actuators_do_not_change_frozen_lab (interview.api_tests.ExpansionAPITests.test_workspace_actuators_do_not_change_frozen_lab) ... Executing <Task finished name='Task-226' coro=<ExpansionAPITests.test_workspace_actuators_do_not_change_frozen_lab() done, defined at <project-root>/cockpit-agent/interview/api_tests.py:91> result=None created at <python-environment>/lib/python3.12/asyncio/runners.py:100> took 0.249 seconds
+ok
+test_external_url_not_accepted_as_image (interview.api_tests.ImageBoundaryTests.test_external_url_not_accepted_as_image) ... ok
+test_jpeg_normalization_strips_original_metadata (interview.api_tests.ImageBoundaryTests.test_jpeg_normalization_strips_original_metadata) ... ok
+test_along_route_search_needs_actual_route (test_expanded_services.ServicesTest.test_along_route_search_needs_actual_route) ... ok
+test_ambiguous_destination_returns_candidates_without_route (test_expanded_services.ServicesTest.test_ambiguous_destination_returns_candidates_without_route) ... ok
+test_cache_prevents_duplicate_provider_calls (test_expanded_services.ServicesTest.test_cache_prevents_duplicate_provider_calls) ... ok
+test_cancelled_reminder_not_notified (test_expanded_services.ServicesTest.test_cancelled_reminder_not_notified) ... ok
+test_due_reminder_delivered_once_and_isolated (test_expanded_services.ServicesTest.test_due_reminder_delivered_once_and_isolated) ... ok
+test_external_feed_does_not_execute_embedded_commands (test_expanded_services.ServicesTest.test_external_feed_does_not_execute_embedded_commands) ... ok
+test_failed_new_search_clears_unrelated_current_candidates (test_expanded_services.ServicesTest.test_failed_new_search_clears_unrelated_current_candidates) ... ok
+test_known_id_resolves_from_historical_candidates (test_expanded_services.ServicesTest.test_known_id_resolves_from_historical_candidates) ... ok
+test_manual_multiple_scopes_needs_selection (test_expanded_services.ServicesTest.test_manual_multiple_scopes_needs_selection) ... ok
+test_nearby_same_brand_cafes_remain_ambiguous (test_expanded_services.ServicesTest.test_nearby_same_brand_cafes_remain_ambiguous) ... ok
+test_pdf_import_deduplicates_and_serves_safe_path (test_expanded_services.ServicesTest.test_pdf_import_deduplicates_and_serves_safe_path) ... ok
+test_pdf_malformed_and_scan_only_rejected (test_expanded_services.ServicesTest.test_pdf_malformed_and_scan_only_rejected) ... ok
+test_pdf_retrieval_has_page_original_and_warning (test_expanded_services.ServicesTest.test_pdf_retrieval_has_page_original_and_warning) ... ok
+test_pdf_wrong_vehicle_or_region_is_rejected (test_expanded_services.ServicesTest.test_pdf_wrong_vehicle_or_region_is_rejected) ... ok
+test_preference_owner_and_delete_isolation (test_expanded_services.ServicesTest.test_preference_owner_and_delete_isolation) ... ok
+test_preference_revision_replaces_same_dimension (test_expanded_services.ServicesTest.test_preference_revision_replaces_same_dimension) ... ok
+test_preferences_persist_across_service_instances (test_expanded_services.ServicesTest.test_preferences_persist_across_service_instances) ... ok
+test_real_snapshot_fallback_is_explicitly_marked (test_expanded_services.ServicesTest.test_real_snapshot_fallback_is_explicitly_marked) ... ok
+test_registry_rejects_unknown_and_extra_arguments (test_expanded_services.ServicesTest.test_registry_rejects_unknown_and_extra_arguments) ... ok
+test_reject_entity_rss (test_expanded_services.ServicesTest.test_reject_entity_rss) ... ok
+test_reminder_requires_one_future_timezone_aware_time (test_expanded_services.ServicesTest.test_reminder_requires_one_future_timezone_aware_time) ... ok
+test_route_candidate_and_waypoint_geometry (test_expanded_services.ServicesTest.test_route_candidate_and_waypoint_geometry) ... ok
+test_route_message_uses_current_manual_origin (test_expanded_services.ServicesTest.test_route_message_uses_current_manual_origin) ... ok
+test_route_missing_destination_does_not_invent (test_expanded_services.ServicesTest.test_route_missing_destination_does_not_invent) ... ok
+test_route_provider_failure_preserves_prior_route (test_expanded_services.ServicesTest.test_route_provider_failure_preserves_prior_route) ... ok
+test_set_location_is_explicit_simulation_and_clears_old_route (test_expanded_services.ServicesTest.test_set_location_is_explicit_simulation_and_clears_old_route) ... ok
+test_snapshot_preserves_info_and_selected_document (test_expanded_services.ServicesTest.test_snapshot_preserves_info_and_selected_document) ... ok
+test_unknown_home_never_geocoded_as_arbitrary_place (test_expanded_services.ServicesTest.test_unknown_home_never_geocoded_as_arbitrary_place) ... ok
+test_unknown_osm_id_never_becomes_geocoding_query (test_expanded_services.ServicesTest.test_unknown_osm_id_never_becomes_geocoding_query) ... ok
+test_waypoint_search_preserves_original_route_destination_id (test_expanded_services.ServicesTest.test_waypoint_search_preserves_original_route_destination_id) ... ok
+
+----------------------------------------------------------------------
+Ran 133 tests in 15.678s
+
+OK

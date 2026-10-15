@@ -1,0 +1,366 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  e2e-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install E2E contract dependencies
+        run: python -m pip install PyYAML
+
+      - name: Ensure PowerShell is available for wrapper parity
+        run: |
+          if ! command -v pwsh >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y powershell
+          fi
+          pwsh -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion'
+
+      - name: E2E wrapper-parity (Python, PowerShell, Bash)
+        run: |
+          python scripts/run_e2e.py --dry-run --group default >/dev/null
+          pwsh -NoProfile -NonInteractive -File scripts/run_e2e.ps1 --dry-run --group default >/dev/null
+          bash scripts/run_e2e.sh --dry-run --group default >/dev/null
+          python - <<'PY'
+          import json
+          import subprocess
+          import sys
+
+          entries = (
+              ("python", [sys.executable, "scripts/run_e2e.py"]),
+              (
+                  "powershell",
+                  [
+                      "pwsh",
+                      "-NoProfile",
+                      "-NonInteractive",
+                      "-File",
+                      "scripts/run_e2e.ps1",
+                  ],
+              ),
+              ("shell", ["bash", "scripts/run_e2e.sh"]),
+          )
+
+          def invoke(prefix, args):
+              completed = subprocess.run(
+                  [*prefix, *args],
+                  text=True,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE,
+                  check=False,
+              )
+              final = next(
+                  json.loads(line)
+                  for line in reversed(completed.stdout.splitlines())
+                  if line.startswith("{")
+              )
+              return completed.returncode, final
+
+          for args, expected_rc in (
+              (["--dry-run", "--group", "default"], 0),
+              (["--dry-run", "--id", "__missing_wrapper_contract__"], 2),
+          ):
+              observed = {
+                  name: invoke(prefix, args)
+                  for name, prefix in entries
+              }
+              reference = observed["python"]
+              if reference[0] != expected_rc:
+                  raise SystemExit(
+                      f"Python runner rc mismatch: {reference[0]} != {expected_rc}"
+                  )
+              for name, value in observed.items():
+                  if value != reference:
+                      raise SystemExit(
+                          f"{name} wrapper mismatch:\n"
+                          f"reference={reference!r}\nobserved={value!r}"
+                      )
+          PY
+
+      - name: E2E manifest, protocol, architecture and stale structure gate
+        run: python scripts/run_e2e.py --check --stale-policy warn
+
+      - name: Deterministic non-Docker E2E CI lane
+        run: python scripts/run_e2e.py --lane ci --full --stale-policy warn
+
+  python-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        # 聚合安装各服务 requirements.txt（单一真相源，避免手写清单与 requirements 漂移，D12）
+        # + 仅测试用的 pytest/pytest-asyncio/pytest-xdist（不在运行时 requirements 内；
+        # xdist 是本地 `make test -n auto` 的对齐依赖，本 job 分组跑法暂未并行化）。
+        run: |
+          python -m pip install --upgrade pip
+          reqs=$(find . -name requirements.txt \
+                   -not -path './.worktrees/*' \
+                   -not -path './gen/*' \
+                   -not -path '*/node_modules/*' \
+                   -printf '-r %p ')
+          echo "aggregated requirements: $reqs"
+          pip install pytest pytest-asyncio pytest-xdist $reqs
+
+      - name: Set up buf
+        uses: bufbuild/buf-setup-action@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate gRPC code (buf)
+        run: buf generate proto
+
+      - name: Syntax check (py_compile)
+        run: |
+          python -m py_compile $(find . -name "*.py" -not -path "*/__pycache__/*" -not -path "*/gen/*" -not -path "*/.worktrees/*" | tr "\n" " ")
+
+      - name: Smoke tests (edge logic)
+        run: python test/smoke_edge.py
+
+      - name: Unit tests (full — CI 绿必须等价本地全量绿)
+        # 覆盖本地全量目录：编排 edge/cloud、全 Agent、memory、registry、llm-gateway、
+        # security、observability(含 collector)。断言型 e2e（test/e2e_*.py）需 live stack，
+        # 走 nightly（Roadmap T3.3），此处不收集。
+        #
+        # 分进程运行的原因：llm-gateway/edge/registry/memory 等服务用 sys.path.insert + 裸
+        # import，顶层模块名（providers/server/…）跨服务重名；放同一 pytest 进程会互相污染
+        # sys.modules 导致收集期 ImportError。故「包式 agents 绿组 + 各裸 import 服务各自
+        # 隔离」分组运行，任一组失败则整步失败（不 fail-fast，跑完所有组便于一次看全）。
+        run: |
+          set +e
+          fail=0
+          run_group() {
+            echo "::group::pytest $*"
+            python -m pytest "$@" --import-mode=importlib -v --tb=short 2>&1 | tee /tmp/pytest-group.log
+            rc=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            if [ $rc -ne 0 ]; then
+              fail=1
+              echo "::error::pytest group FAILED: $*"
+              # 逐条把失败用例升成 annotation。**没有 admin 权限读不到 job 日志**，
+              # 而 annotation 是公开可读的——只报组名等于「知道它红了，不知道哪红」。
+              # 2026-07-31 起 CI 连红五次，定位靠的是本地按同样分组复跑而不是看 CI，
+              # 那说明 CI 的失败输出本身不可用。
+              grep -E '^(FAILED|ERROR) ' /tmp/pytest-group.log | head -40 | while IFS= read -r line; do
+                echo "::error::$line"
+              done
+            fi
+          }
+          # runtime/tests/ 是 B3 部署形态闸（DEPLOY_PROFILE）的单测 + HMI 隐私默认挡位的
+          # 源码级断言。runtime 是常规包（有 __init__.py、无裸 sys.path 插入），并进绿组即可。
+          run_group test/ orchestrator/cloud/tests/ security/tests/ observability/tests/ agents/ runtime/tests/
+          run_group orchestrator/edge/tests/
+          run_group memory/tests/
+          run_group registry/tests/
+          run_group llm-gateway/tests/
+          run_group observability/collector/tests/
+          # 2026-07-27 评审补漏：这两组此前不在任何 CI 分组里（evolve/shadow-nlu 与主动
+          # 治理器的测试只在本地跑）。按既有「各裸 import 服务各自隔离」惯例各占一组。
+          run_group scripts/tests/
+          run_group proactive/tests/
+          exit $fail
+
+  intent-eval-baseline:
+    # T3.4：fast_intent/route_hints 都是纯规则引擎（零 LLM/docker 依赖），跑一次秒级，
+    # 不需要 3.11/3.12 matrix（评测脚本只调既有代码，不测 Python 版本兼容性）也不需要等
+    # nightly。"跌破基线告警但不阻塞"——脚本默认 exit 0 + 本步骤 continue-on-error 双保险，
+    # 只做观测，不拦 PR（roadmap 原话「不阻塞，先观测」）。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          reqs=$(find . -name requirements.txt \
+                   -not -path './.worktrees/*' \
+                   -not -path './gen/*' \
+                   -printf '-r %p ')
+          pip install pytest pytest-asyncio $reqs
+
+      - name: Set up buf
+        uses: bufbuild/buf-setup-action@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate gRPC code (buf)
+        # eval_route_hints.py 经 agents._sdk.manifest 间接 import cockpit.agent.v1（proto 生成代码）。
+        run: buf generate proto
+
+      - name: Intent routing eval vs baseline
+        continue-on-error: true
+        run: |
+          python test/eval_fast_intent.py \
+            --baseline docs/reviews/eval/baseline_fast_intent.json \
+            --out-json docs/reviews/eval/_ci-run-fast_intent.json \
+            --out-md docs/reviews/eval/_ci-run-fast_intent.md
+          python test/eval_route_hints.py \
+            --baseline docs/reviews/eval/baseline_route_hints.json \
+            --out-json docs/reviews/eval/_ci-run-route_hints.json \
+            --out-md docs/reviews/eval/_ci-run-route_hints.md
+          # R4.1 P1：Registry Resolve 路由（离线关键词层，requires_embed 用例需活栈另经 --semantic）
+          python test/eval_registry_resolve.py \
+            --baseline docs/reviews/eval/baseline_registry_resolve.json \
+            --out-json docs/reviews/eval/_ci-run-registry_resolve.json \
+            --out-md docs/reviews/eval/_ci-run-registry_resolve.md
+          # R4.1 P2：全量飞书语料覆盖率报告（总体较快照下降 >1pt 则 ::warning::，报告型不阻塞）
+          python test/eval_fast_intent.py --corpus full \
+            --out-json docs/reviews/eval/_ci-run-coverage_fast_intent.json \
+            --out-md docs/reviews/eval/_ci-run-coverage_fast_intent.md
+
+      # M0b Skill 层离线门禁（2026-07-27 评审：从上面 continue-on-error 观测步拆出——
+      # 「跌破基线告警不阻塞」的哲学只适用于会随语料漂移的意图基线；skill 契约校验
+      # （文件 schema/golden 召回/反例噪声/expect 意图存在性）是确定性检查，失败必须红）。
+      # paraphrase/live 车道需 llm-gateway，归 evolve nightly 与人工触发。
+      - name: Skill contract gate (blocking)
+        run: python test/eval_skills.py
+
+      # M5 P1 范例库门禁：契约静态校验（intent 存在性/同句冲突/schema）+ 域路由探针
+      # 错配率上限。同 skill 门禁的理由——这两项都是确定性检查，不随 LLM 采样漂移。
+      # 语义扫描与 live A/B 需 llm-gateway，归人工触发。
+      - name: Exemplar contract gate (blocking)
+        run: python test/eval_exemplars.py
+
+      # B2：意图对抗 L0 门禁（阻断）。与上面两条同类——确定性、零 LLM、失败必须红；
+      # 上面 continue-on-error 那组是会随语料漂移的意图基线，两者准入不同，不要合并。
+      # 跑的是 --strict 档：普通 --list 只**展示** coverage gap，--strict 才把它升级成
+      # 阻断。2026-08-10 除雾能力补齐漏了对抗覆盖、strict 实际 exit 2 却被人工读成
+      # exit 0（管道吞码），最能防住那次遗漏的门禁当时根本不在 CI 里。
+      # 退出码由封装脚本用 Python 读，证据链上不出现 shell 管道。
+      - name: Intent adversarial L0 gate (blocking)
+        run: python scripts/check_intent_gate.py --json docs/reviews/eval/_ci-run-intent_gate.json
+
+      # B4：能力完整性门禁（阻断）。同上三条一样是确定性检查、零 LLM、零网络。
+      # 它挡的是「新增一个车控能力＝同时记得改十来个位置」里漏掉的那一处：
+      # 执行定义 / 话术 / 等价类 / 风险 / 验证 五个维度逐对象断言，联合能力清单从
+      # manifest ∪ servers.yaml ∪ 端侧意图集三源取（只读一个文件正是 shop 域零范例
+      # 事故的根因）。对抗覆盖那一维**不重复实现**，只确认上一条的 --strict 入口还在。
+      # ⚠ 跑的是默认档（阻断）；`--list` 只展示不判红，报绿前先确认自己跑的是哪档。
+      - name: Capability integrity gate (blocking)
+        run: python test/eval_capability_integrity.py
+
+      - name: Upload fresh eval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: intent-eval-report-${{ github.run_id }}
+          path: docs/reviews/eval/_ci-run-*
+          retention-days: 14
+
+  go-build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Set up buf
+        uses: bufbuild/buf-setup-action@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate gRPC code (buf)
+        # Go 网关依赖 gen/go（buf 生成，gitignored）；必须先于 go build。
+        run: buf generate proto
+
+      - name: Go mod tidy
+        # 与 Docker 构建一致（gateway/*/Dockerfile 均先 `go mod tidy`）：gen/go 每次新生成、
+        # 且提交的 go.sum 不覆盖其全部传递依赖，直接 `go build ./...` 会「missing go.sum entry」。
+        # 本机无 Go 工具链、无法预先 tidy 提交，故在 CI 内重算模块图（不改动仓库文件）。
+        run: go mod tidy
+
+      - name: Go build
+        run: go build ./...
+
+      - name: Go test
+        run: go test ./...
+
+  # Android 陪伴端（mobile/，实施计划 M0-8）：tsc + jest（含共享白名单守卫——
+  # mobile 只许引 hmi/src 台账内模块，三种漂移即红）。刻意不跑 gradle：
+  # 原生构建时长/密钥不值得每 push，出 debug APK 走 mobile-apk.yml 手动档。
+  mobile:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck (tsc --noEmit, strict, 含 @shared 引用)
+        run: npm run typecheck
+
+      # AR06 / A06-5：lint 口径钉在仓库里的 mobile/eslint.config.js 上（此前 `expo lint`
+      # 在缺配置时会**自己生成**一份 ⇒ 本地与 CI 可能落在不同规则集上，数字不可比）。
+      # 零网络：eslint 与 eslint-config-expo 都在 devDependencies 里，`npm ci` 已装。
+      # 门槛 `--max-warnings 0` 写在 npm script 里，本地跑的是同一条命令。
+      - name: Lint (eslint, 0 error / 0 warning)
+        run: npm run lint
+
+      - name: Unit tests + shared allowlist guard (jest)
+        run: npx jest --ci
+
+  frontend:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        app: [hmi, dashboard]
+    defaults:
+      run:
+        working-directory: ${{ matrix.app }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ${{ matrix.app }}/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build

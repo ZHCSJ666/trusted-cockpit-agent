@@ -1,0 +1,65 @@
+// 动效策略——唯一判据（B3-1 立「Composer 球动不动」，B4-3 扩成三档）。
+// 三个利益方在这里一处裁：G5 性能（层开时主球让出那「1 个」循环动画名额）/ §8 reduce-motion
+// （循环全部降静帧 + 单次过渡，十条不变量⑩「降级脚本化」）/ §6 行车（×0.5 频率、×0.6 透明度，A-1 §10）。
+// AuroraOrb / EdgeGlow / ThinkDots / StreamCursor 只消费，各自不再判。
+// ⚠ 它只回答「动不动、多快」；「静止时 speaking 还读不读得出」仍是 AuroraOrb 静态标记的事（B3-1），
+//   两个判据刻意分开——合成一个就会回到「要么动（破 G5）要么盲（S4）」的二选一。
+import type { PresenceSnapshot } from './presence'
+
+export interface MotionEnv {
+  /** 系统「减少动效」（AccessibilityInfo.isReduceMotionEnabled）∨ 实验室强制开关（settings.reduceMotionForce） */
+  reduceMotion: boolean
+  /** 空闲静置（core/presence/orbIdle.ts 的表）：ORB_IDLE_STILL_MS 内没有触摸 / 键盘 / 状态变化 / 换页。
+   *  缺省 false = 旧行为。它只压住 idle / armed 两个态（见 orbStill），听 / 想 / 说永远照动。 */
+  idleStill?: boolean
+}
+
+export const FULL_MOTION: MotionEnv = { reduceMotion: false }
+
+export type OrbTempo = 'loop' | 'slow' | 'static'
+
+/** 空闲静置命中：表翻了 ∧ 光球本来就没在表达什么（idle 呼吸 / armed 等唤醒）。
+ *  2026-09-13 性能评审：对话页空闲光球 = 1.5 核常驻（RenderThread + hwuiTask + 主线程），断连静止只剩 7–10%。
+ *  用户裁决取「空闲 N 秒静置」——视觉一帧不改，只改多久没人理它之后停。muted 本来就静止。 */
+export function orbStill(s: Partial<Pick<PresenceSnapshot, 'primary'>>, env: MotionEnv): boolean {
+  return !!env.idleStill && (s.primary === 'idle' || s.primary === 'armed')
+}
+
+/** 光球节律：reduce-motion ⇒ 静帧；空闲静置 ⇒ 静帧；行车 ⇒ ×0.5 频率（HMI AuroraOrb.tsx:30 的 dm=2）；其余全速 */
+export function orbTempo(
+  s: Pick<PresenceSnapshot, 'driving'> & Partial<Pick<PresenceSnapshot, 'primary'>>,
+  env: MotionEnv,
+): OrbTempo {
+  if (env.reduceMotion) return 'static'
+  if (orbStill(s, env)) return 'static'
+  return s.driving ? 'slow' : 'loop'
+}
+
+/** 支持页浮动光球的节律（AR04 第十五节）：它是压在设置文字 / 地图上的 FAB，不是对话页的主角——
+ *  闲置 / 待唤醒 / 断开时静帧（省一份循环动画；也让 uiautomator 在支持页能 idle，OPPO 首轮取证时
+ *  常驻呼吸的光球让设置页 dump 一直 `could not get idle state`），只有听 / 想 / 说 / 等确认 / 看一眼
+ *  这些「动起来才有信息」的态跟 orbTempo 走。 */
+export function presenceOrbTempo(s: Pick<PresenceSnapshot, 'driving' | 'primary'>, env: MotionEnv): OrbTempo {
+  if (s.primary === 'idle' || s.primary === 'armed' || s.primary === 'muted') return 'static'
+  return orbTempo(s, env)
+}
+
+export function composerOrbAnimated(
+  s: Pick<PresenceSnapshot, 'input'> & Partial<Pick<PresenceSnapshot, 'primary'>>,
+  env: MotionEnv = FULL_MOTION,
+): boolean {
+  if (env.reduceMotion) return false
+  if (orbStill(s, env)) return false
+  // 层开着：层内大球（VoiceSheet）接管那「1 个」循环动画
+  return s.input !== 'voice-sheet'
+}
+
+/** 语音层顶缘极光只在听 / 想（方案 §5.2 规则 6）。此前内联在 VoiceSheet.tsx 的 JSX 里、零 jest（B2 出账⑩） */
+export function edgeGlowActive(s: Pick<PresenceSnapshot, 'primary'>): boolean {
+  return s.primary === 'listening' || s.primary === 'thinking'
+}
+
+/** 循环类小动效（EdgeGlow 呼吸 / ThinkDots / StreamCursor）要不要动：只看 reduce-motion */
+export function loopsAnimated(env: MotionEnv): boolean {
+  return !env.reduceMotion
+}

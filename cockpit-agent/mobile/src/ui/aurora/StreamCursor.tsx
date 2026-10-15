@@ -1,0 +1,31 @@
+// 流式虹彩光标（aurora.css .au-cursor）：极光渐变小块 1Hz 步进闪烁（半周期 MOTION.blink）——§5 允许的 AI 时刻之一。
+// RN Text 内可内嵌 View（Android inline view），随文字基线排布。
+import { useEffect } from 'react'
+import Animated, { cancelAnimation, useAnimatedStyle, useSharedValue, withRepeat, withSequence, withTiming } from 'react-native-reanimated'
+
+import { AURORA } from '../theme'
+import { MOTION } from '../tokens'
+
+export function StreamCursor({ h = 16, animated = true }: { h?: number; animated?: boolean }) {
+  const on = useSharedValue(1)
+  useEffect(() => {
+    if (!animated) {
+      on.value = 1 // 定格：光标常显（reduce-motion，B4-3）
+      return
+    }
+    on.value = withRepeat(
+      withSequence(withTiming(1, { duration: MOTION.blink }), withTiming(0, { duration: 0 }), withTiming(0, { duration: MOTION.blink }), withTiming(1, { duration: 0 })),
+      -1,
+    )
+    return () => cancelAnimation(on)
+  }, [animated, on])
+  const style = useAnimatedStyle(() => ({ opacity: on.value }))
+  return (
+    <Animated.View
+      style={[
+        { width: h * 0.45, height: h, marginLeft: 3, borderRadius: 2, experimental_backgroundImage: AURORA.gradient },
+        style,
+      ]}
+    />
+  )
+}

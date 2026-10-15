@@ -1,0 +1,24 @@
+{
+  "checked_at": "2026-10-11T14:14:53.362190+00:00",
+  "cases": 250,
+  "cases_per_category": {
+    "ambiguity": 50,
+    "tool_calling": 50,
+    "capability": 50,
+    "safety": 50,
+    "rag": 50
+  },
+  "repeats": 3,
+  "records": 1500,
+  "groups": 2,
+  "model": "vllm/moonshotai/Kimi-K3",
+  "main_source_hashes": "matched",
+  "source_changed_during_run": false,
+  "original_120_cases": "unchanged",
+  "markdown_links": "passed",
+  "frontend_typecheck_build": "passed",
+  "benchmark_browser": "desktop and mobile passed with real API",
+  "pdf_pages": 8,
+  "existing_user_server": "reused, not stopped",
+  "historical_results": "results/archive_120"
+}

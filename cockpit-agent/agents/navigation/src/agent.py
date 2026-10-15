@@ -1,0 +1,3199 @@
+"""导航 Agent —— 所有 Agent 的参考范本。
+
+演示：意图分发、缺槽位追问(NEED_SLOT)、按引用取上下文(ctx.fetch)、
+产出动作(action) 与 HMI 卡片(ui_card)。
+Phase 1：使用 Provider 适配层（mock/real 可切换）。
+"""
+from __future__ import annotations
+import json
+import logging
+import os
+import re
+import time
+from contextvars import ContextVar
+from dataclasses import dataclass
+
+from agents._sdk import BaseAgent, AgentResult, NEED_SLOT, FAILED
+from agents._sdk.http import ProviderError
+from agents._sdk.location import (LOCAL_RADIUS_KM, NOT_FOUND_FOLLOW_UP, current_location_from_meta,
+                                  location_age_s, location_is_stale, rough_km)
+from agents._sdk.provenance import attach
+from runtime.vehicle_reading import Reading
+from runtime.charger_swap import asks_to_swap_charger, is_charger_name
+from runtime.route_stops import on_route, plain_name, same_stop
+from runtime.slots import STEP_ORIGIN_META, is_place_placeholder
+from agents._sdk.shared_state import NAVIGATION_DEST_CHOICES, REMINDABLE_ACTIVE
+from agents._sdk.dest_choice import ordinal_in, resolve_choice, save_choices
+from agents._sdk.landmark import (
+    is_landmark_description, landmark_candidates, name_matches)
+from agents._sdk.timewindow import fmt_clock, parse_clock_time
+from runtime.clause_split import split_clauses
+from runtime.cntime import SEG_ALT
+from .providers import build_poi_provider
+from .providers.base import GeoPoint, POI
+from .route_geometry import card_geometry
+
+logger = logging.getLogger("agent.navigation")
+
+
+@dataclass
+class _LookupLog:
+    """一个请求里地点检索成功 / 报错的次数。一次都没成功、却有报错 ⇒ 是地图服务不可用（配额用尽、限流、网络），
+    不是没找到（2026-10-08：高德基础搜索日配额用尽时，每次检索都报 10044，用户听到的却是「暂时无法确定…请补充城市」）。"""
+    ok: int = 0
+    failed: int = 0
+
+
+#: `NavigationAgent.handle` 每个请求开一份；并发请求各在自己的任务上下文里，互不串
+_LOOKUP: ContextVar[_LookupLog | None] = ContextVar("navigation_lookup", default=None)
+
+
+def _note_lookup(ok: bool) -> None:
+    log = _LOOKUP.get()
+    if log is not None:
+        if ok:
+            log.ok += 1
+        else:
+            log.failed += 1
+
+_MANIFEST = os.path.join(os.path.dirname(os.path.dirname(__file__)), "manifest.yaml")
+
+# 常用地点别名 → (画像 key, 中文标签)。精确匹配整段目的地，避免误伤含字地名。
+_PLACE_ALIASES: dict[str, tuple[list[str], str]] = {
+    "home": (["家", "我家", "回家", "家里"], "家"),
+    "company": (["公司", "单位", "我公司", "我单位"], "公司"),
+    "school": (["学校", "我的学校"], "学校"),
+}
+
+
+def _match_place_alias(text: str) -> tuple[str | None, str]:
+    """目的地是否是常用地点别名。精确匹配 → (key, 标签)，否则 (None, '')。"""
+    t = (text or "").strip().rstrip("。，,. ")
+    for key, (aliases, label) in _PLACE_ALIASES.items():
+        if t in aliases:
+            return key, label
+    return None, ""
+
+
+# ── M2 记忆图谱 P1：人称目的地（「去接孩子放学」）────────────────────────
+# 人称词表与 memory/relation.py::_KINSHIP_SYNONYMS 同源（那边是权威登记，这里只做
+# 消费侧识别；跨服务不共享代码，保持各自可独立部署）。
+# 含裸「妈/爸」：口语里「去接我妈」比「去接妈妈」更常见（真栈首验实测漏掉）。
+# 单字不会误伤——`_person_destination` 要求「去掉人称词与填充词后没有实质内容」，
+# 「大妈」剥掉「妈」剩「大」即不触发。
+# 含对偶称谓「爸妈/父母」（person-pickup 卡 §4.2，2026-08-20 补）：此前
+# 「接爸妈去吃饭」匹配到的是单字「爸」，教学问于是说成「我还不知道你**爸爸**平时在哪」
+# ——用户问的是两个人。nearby 早就有这张对偶表（`_KIN_PAIR`），navigation 侧漏了。
+_PERSON_WORDS = ("女儿", "闺女", "儿子", "孩子", "娃", "小孩",
+                 "老婆", "妻子", "太太", "媳妇", "老公", "丈夫",
+                 "爸妈", "父母",
+                 "妈妈", "母亲", "老妈", "妈", "爸爸", "父亲", "老爸", "爸")
+_PERSON_RE = re.compile("|".join(sorted(_PERSON_WORDS, key=len, reverse=True)))
+# 目的地里去掉人称词后剩下的"非实质内容"：动词、泛称地点、方位词。剩下这些说明用户
+# 没给具体地名（"接孩子"/"孩子的学校"），才需要走关系边解析。
+# 含人称代词「我/你/他/她」：「接我妈」里的「我」不是地点信息（真栈首验实测漏掉——
+# 剥完「妈」剩个「我」被当成实质内容，整条链路不触发）。
+_PERSON_FILLER_RE = re.compile(
+    r"导航|接|送|去|到|的|我|你|他|她|那边|那儿|附近|学校|幼儿园|放学|上学|下课|单位|公司|家|"
+    r"所在|地方|一下|吧|呢")
+
+
+# 裸称谓 → 播报用的自然说法（「我还不知道**妈**平时在哪」读着别扭，真栈实测）
+_PERSON_DISPLAY = {"妈": "妈妈", "爸": "爸爸", "娃": "孩子", "小孩": "孩子",
+                   "父母": "爸妈"}
+
+# person-pickup 卡（2026-08-20）：**接送句形**——「接/送 + （我/你/他/她的）+ 人称」。
+# 判据取形态不取整句：复合请求（「接爸妈去吃饭」「带我去接孩子放学，顺便找家麦当劳」）
+# 的剩余内容必然非空，所以 `_person_destination` 那条「剥完还剩不剩」的判据对整句
+# 天然失效——但「接谁」这个**局部**形态一直都在。
+# ⚠ 刻意只认动词紧邻：「接下来去哪」「接机」不含人称词、「我接受」没有接送语义。
+_PICKUP_RE = re.compile(
+    r"[接送]\s*(?:一下)?\s*(?:[我你他她]的?)?\s*("
+    + "|".join(sorted(_PERSON_WORDS, key=len, reverse=True)) + r")")
+
+
+#: 接人目的地的就近合理性上限（km）。取值理由：接地卡 D2 的区县级判据是 150km，
+#: 那是「裸区县名的心智是本地」；接人比它更窄——**一趟接送不会跨省**。
+#: 100km 覆盖同城与相邻城市（深圳↔东莞/广州 ~70/120km 的量级），真实跨城接人
+#: 会被问一句而不是被拒绝。可经 env 调，但**默认值本身就是判据**，别当调参旋钮。
+_PICKUP_MAX_KM = float(os.getenv("PICKUP_MAX_KM", "100"))
+
+#: 「本地」半径与「没找到这个地点」的追问：定义在 `agents._sdk.location`（周边检索用同一个数、同一句），这里保留原名。
+_LOCAL_RADIUS_KM = LOCAL_RADIUS_KM
+# 具名目的地的周边搜索半径：城市级（高德上限 50 km）。缺省的 5 km 只够「附近的 X」。
+_CITY_RADIUS_M = 50_000
+# 带类目锚词的查询（「华润万家超市」「儿童医院」）就近搜索取的条数：供名字主干 + 类目双匹配扫描，返回前截回 limit。
+_ANCHOR_SCAN = 10
+_NOT_FOUND_FOLLOW_UP = NOT_FOUND_FOLLOW_UP
+
+
+def _grounded_in_raw(dest: str, raw_text: str) -> bool:
+    """这个目的地是不是**用户自己说出来的**（哪怕只沾了一小截）。
+
+    判据取「dest 的任意**两字连续片段**出现在原话里」。方向是刻意保守的：
+    只要沾上一点就算用户说的、**一个字不动**；只有一个字都不沾时才认为
+    planner 是从上下文里继承来的。误判成「用户说的」的代价是「和以前一样」，
+    误判成「planner 编的」的代价是**替用户改了目的地**——两侧不对称。
+
+    ⚠ 两字而不是整值相等：planner 会把「万象城」写成「深圳万象城」，
+    要求逐字相等会把它判成没根据（同 `find_by_title` 那条
+    「q 比库里标题长就必不匹配」的镜像形态）。
+    """
+    d, r = (dest or "").strip(), (raw_text or "")
+    if not d or not r:
+        return False
+    if d in r:
+        return True
+    return any(d[i:i + 2] in r for i in range(len(d) - 1))
+
+
+def _filled_by_ref(slot: str, meta) -> bool:
+    """这个槽是执行器拿前序步的结果填的（`_trusted_slot_refs`，执行器每次派发前重建）⇒ 不是规划器转述的原话。"""
+    try:
+        refs = json.loads((meta or {}).get("_trusted_slot_refs") or "{}")
+    except (TypeError, ValueError):
+        return False
+    return isinstance(refs, dict) and slot in refs
+
+
+def _pickup_person(raw_text: str) -> str:
+    """原话里的接送对象人称词；不是接送句返回空串。"""
+    m = _PICKUP_RE.search(raw_text or "")
+    return m.group(1) if m else ""
+
+# set_place 人称守卫（P4）：长词直接算 + 单字「妈/爸」只认「我妈/你爸」代词组合——
+# 裸单字会误伤「妈湾路」这类地名。
+_SET_PLACE_PERSON_RE = re.compile(
+    "|".join([re.escape(w) for w in _PERSON_WORDS if len(w) >= 2]
+             + [r"[我你他她][妈爸]"]))
+
+
+def _person_display(word: str) -> str:
+    return _PERSON_DISPLAY.get(word, word)
+
+
+def _person_destination(dest: str) -> str:
+    """目的地是否只是个人称（需走关系边解析）→ 返回人称词，否则空串。
+
+    **判据是「去掉人称词与填充词后还剩不剩实质内容」**：
+    - 「孩子」/「接孩子」/「孩子的学校」→ 剩空 → 触发解析
+    - 「孩子学校旁边的星巴克」→ 剩「旁边星巴克」→ **不触发**（用户已给具体地点，
+      改写它就是帮倒忙）
+    - 「XX小学」→ 无人称词 → 不触发
+    """
+    t = (dest or "").strip()
+    if not t:
+        return ""
+    m = _PERSON_RE.search(t)
+    if not m:
+        return ""
+    rest = _PERSON_FILLER_RE.sub("", _PERSON_RE.sub("", t)).strip("。，,. 、")
+    return m.group(0) if not rest else ""
+
+
+# "最近的/附近的X" 这类就近查询依赖当前位置；无定位时不应拿任意城市冒充"最近"。
+_PROXIMITY_RE = re.compile(r"最近|附近|周边|就近|离我")
+# 剥掉就近前缀，留类目关键词（"附近的粤菜馆"→"粤菜馆"）。否则高德按整句"附近的粤菜馆"
+# 找同名 POI 必然落空（"暂时无法确定"），或匹配到远处无关结果。
+_PROXIMITY_PREFIX_RE = re.compile(r"^(离我)?\s*(最近|附近|周边|就近)的?\s*")
+
+
+def _strip_proximity(dest: str) -> str:
+    stripped = _PROXIMITY_PREFIX_RE.sub("", dest or "").strip()
+    return stripped or dest
+
+
+# ── G1 时间约束（EVA 二轮批 B）：「五点前到」到达时限的确定性解析 ──────────
+# E1：时刻解析本体已下沉 `agents/_sdk/timewindow.py`（nearby 的用餐窗反推要用同一套
+# 消歧语义——判定抄两份正是 B1 那个 bug 的成因）。本模块只留**到达时限**这层语义门。
+_parse_arrive_by = parse_clock_time      # 名字保持（测试与调用点逐字不变）
+# 原话兜底门：时刻 + 「前/之前」或「N点(我)要/得/必须到」的到达措辞——
+# 只认到达时限句式，不把「三点半的会」这类顺带提到的时间当成时限。
+_ARRIVE_RAW_RE = re.compile(
+    r"(?:上午|早上|凌晨|中午|下午|傍晚|晚上)?\s*"
+    r"(?:\d{1,2}[:：]\d{2}|(?:十一|十二|\d{1,2}|[一两二三四五六七八九十])\s*点(?:半|\d{1,2}分)?)"
+    r"\s*(?:之前|以前|前|我?(?:要|得|必须)到)")
+
+
+# ── G11 路线策略：route_pref 槽/原话 → 高德 v3 driving strategy ────────────
+_PREF_JAM_RE = re.compile(r"避堵|躲避拥堵|避开拥堵|避免拥堵|不要?堵|别堵")
+_PREF_NO_HW_RE = re.compile(r"不走高速|不上高速|避开高速|少走高速|别走高速")
+_PREF_TOLL_RE = re.compile(r"少收费|避免收费|不走收费|躲避收费|省点?钱|免费路")
+_PREF_SCENIC_RE = re.compile(r"风景|景色|景观路")
+_PREF_EXPRESS_RE = re.compile(r"不走快速路")
+
+
+def _route_strategy(text: str) -> tuple[str, str]:
+    """路线偏好 →（高德 strategy 值, 已应用偏好的话术片段）。无偏好 → ("", "")。
+
+    「风景好的路」高德没有景观优先策略：降档为不走高速的大路并**如实说**（不假装有）。
+    """
+    t = text or ""
+    jam, no_hw = bool(_PREF_JAM_RE.search(t)), bool(_PREF_NO_HW_RE.search(t))
+    toll, scenic = bool(_PREF_TOLL_RE.search(t)), bool(_PREF_SCENIC_RE.search(t))
+    if scenic and not (jam or no_hw or toll):
+        return "6", "您想走风景好些的路——地图没有景观优先策略，已按不走高速的大路规划，沿途更从容。"
+    if no_hw and toll and jam:
+        return "9", "已按您的偏好避开高速、收费和拥堵。"
+    if no_hw and toll:
+        return "7", "已按您的偏好避开高速和收费路段。"
+    if toll and jam:
+        return "8", "已按您的偏好躲避收费和拥堵。"
+    if no_hw:
+        return "6", "已按您的偏好避开高速。"
+    if jam:
+        return "4", "已为您优先避开拥堵路段。"
+    if toll:
+        return "1", "已按费用优先规划（少走收费路）。"
+    if _PREF_EXPRESS_RE.search(t):
+        return "3", "已按您的偏好不走快速路。"
+    return "", ""
+
+
+# ── G8 增量改道：话术的确定性解析（planner 未填槽时兜底）─────────────────
+# 删：「咖啡不买了」「刚才那个途经点不去了」（A：目标在删除词前）/「不去肯德基了」
+# 「取消途经点」（B：目标在删除词后）。捕获后 strip 尾部助词；泛指词（途经点/那个…）
+# 由消费侧兑现成「删最近加入的一个」。
+_REROUTE_REMOVE_A_RE = re.compile(
+    r"([^，。,、\s]{1,12}?)(?:就?先?不去了|不买了|不要了|不吃了|不喝了)")
+_REROUTE_REMOVE_B_RE = re.compile(r"(?:取消|删掉|去掉|不去)\s*([^，。,、\s]{1,12})")
+_REROUTE_GENERIC_WP_RE = re.compile(r"途经点|停靠点|那个|那里|那儿|刚才")
+# 加：「先去加油站」「顺路再加个超市」。「先…」语义=插到途经点首位。
+_REROUTE_ADD_RE = re.compile(
+    r"(?:先去|先到|先买杯?|先加个?|顺路去|顺路买杯?|顺路加个?|顺道去|加个|加一个|"
+    r"再加个?|多加个?|顺便去|再去)\s*([^，。,、\s]{1,12})")
+# 换路（无明确偏好）：「换条路」「别走这条」。带偏好的（避堵/不走高速）走 _route_strategy。
+_REROUTE_CHANGE_ROUTE_RE = re.compile(r"换条|换一条|换个路线|别走这|重新规划路线|换路")
+# 改目的地：「改去COCO Park」「目的地换成宝安机场」。
+#: 段位词（`runtime.cntime.SEG_ALT` 唯一词表）与 24h 写法：出现即说明时刻不是「裸」的。
+_SEGMENT_WORD_RE = re.compile(SEG_ALT)
+_H24_RE = re.compile(r"(?:1[3-9]|2[0-3])\s*(?:点|时|[:：])")
+_REROUTE_DEST_RE = re.compile(
+    r"(?:目的地)?(?:改去|改到|改成|换成)去?\s*([^，。,、]{2,20})")
+#: 「改成 X」的捕获**开头就是时刻**（7点半 / 19:30 / 晚上八点 / 明天早上）⇒ 改的是时限不是地方。
+#: 与 `parse_clock_time` 并用：解析器认不出的形态（「7点半前到就行」带尾巴）由形态兜底。
+_CLOCK_LIKE_RE = re.compile(
+    r"^(?:今天|明天|后天|今晚|明早|明晚|早上|上午|中午|下午|晚上|傍晚|凌晨|夜里)?"
+    r"\s*(?:\d{1,2}|[一二两三四五六七八九十]+)\s*(?:点|时|:|：)")
+# 当前路线已经以接人地点为终点时，「接孩子后去万象城」不是加一个途经点：
+# 用户明确给出了先后关系，原终点应降为途经点，新地点升为终点。
+_REROUTE_AFTER_PICKUP_RE = re.compile(
+    r"(?:后|之后|以后|然后|再)\s*(?:再)?\s*(?:去|到|前往)\s*"
+    r"([^，。,、。！？!?]{2,20})")
+
+# 路线顺序提升只能由**明确正向**接送句触发。旧实现先找任意「接孩子」，再维护一个
+# 无限增长的否定词排除表；“没打算去接”“不是去接”每换一种说法就会漏一次。这里反过来
+# 做闭集：接送动词前的当前分句只能由正向主语/情态/方向词组成；任何未知极性都不提升。
+# 「不得不」是语义正向的双重否定，作为完整情态词列入正向语法。
+_POSITIVE_PICKUP_PREFIX_RE = re.compile(
+    r"^(?:(?:我们?|请|麻烦|帮我|带我|先|再|还|然后|接着|现在|待会儿|等会儿|"
+    r"必须|不得不|非得|得|要|需要|想|打算|准备|计划|决定|继续|照常|还是|可以|会|"
+    r"去|过去|前往))*$")
+
+
+def _explicit_positive_pickup_person(raw_text: str) -> str:
+    """Return the pickup person only when the local pickup clause is positive."""
+    text = str(raw_text or "")
+    match = _PICKUP_RE.search(text)
+    if not match:
+        return ""
+    prefix = re.split(r"[，,。；;！？!?]", text[:match.start()])[-1]
+    prefix = re.sub(r"\s+", "", prefix)
+    return match.group(1) if _POSITIVE_PICKUP_PREFIX_RE.fullmatch(prefix) else ""
+
+
+def _route_preference_only(text: str) -> bool:
+    """raw ``换成…`` 捕获的是路线策略时，不把它二次解释成目的地。"""
+    value = (text or "").strip()
+    if not value or not _route_strategy(value)[0]:
+        return False
+    return any(mark in value for mark in (
+        "路线", "避堵", "拥堵", "高速", "收费", "快速路", "风景好的路",
+    ))
+
+
+# ── 只说了从哪出发（评审三轮追加批 E，2026-09-23）───────────────────────────
+# 真栈 `c99a9a74` RS21「从深圳欢乐海岸出发，不走高速」三趟两趟被执行成导航：planner 只给 origin 时，目的地
+# 为空的原话兜底拿**整句**去搜，搜回起点本身（「从华侨城欢乐海岸导航到华侨城欢乐海岸」）；planner 编出
+# `destination=天安门` 时照单规划了 2390 km。这句话里的地点只有起点——目的地必须来自这句话或会话，否则问。
+#: 起点框架：「从 X 出发 / 动身 / 启程 / 开车」。只认出发义动词：「从北京到上海」的「到」是去向，去掉起点那截
+#: 之后它还在；「从滨海大道走」的「走」是途经不是起点，不收。起点里不许含去向字——否则
+#: 「从深圳市民中心到深圳北站开车大概多远」会把「深圳市民中心到深圳北站」整段吃成起点（第一版就这么红的）。
+_ORIGIN_FRAME_RE = re.compile(r"从\s*([^，,。！？!?\s去到往回]{1,20}?)\s*(?:出发|动身|启程|开车)")
+#: 去向表达：这句话自己说了要去哪——去 / 到 / 往 / 回 / 接 / 送 / 导航 / 指代。
+_DEST_EXPR_RE = re.compile(r"[去到往回接送]|导航|那里|那儿|那边|那家|这家")
+#: 起终点解析到同一处的距离（km）：从 X 导航到 X 永远不是用户要的。
+_SAME_PLACE_KM = 0.3
+
+
+def _origin_named(raw_text: str) -> tuple[str, str]:
+    """(原话去掉「从 X 出发」那一截, X)；原话没说从哪出发 ⇒ (原话, "")。"""
+    text = raw_text or ""
+    m = _ORIGIN_FRAME_RE.search(text)
+    if not m:
+        return text, ""
+    return text[:m.start()] + text[m.end():], m.group(1)
+
+
+def _resumed_spoken_origin(raw_text: str, meta) -> str:
+    """续接时起点槽空着 / 是占位：本轮回答、或这一步被规划时那句里「从 X 出发」的 X（先看本轮回答）；不是续接 ⇒ 空串。
+
+    2026-10-08 真栈：「从深南大道9028号出发要开多久」被规划成 `origin: 当前位置, destination: 深南大道9028号`，导航认出目的地其实是
+    起点、追问「您想算从深南大道9028号出发到哪里的路程？」，续接只覆盖目的地 ⇒ 起点还是占位，从当前位置算——追问里说定的起点丢了。
+    只在续接时看（`STEP_ORIGIN_META` 只随被续接的那一步下发）：新请求里起点空着照旧按当前位置，说了起点没说终点由
+    `_unspoken_destination` 追问。"""
+    planned = str((meta or {}).get(STEP_ORIGIN_META) or "")
+    if not planned:
+        return ""
+    for said in (raw_text or "", planned):
+        spoken = _origin_named(said)[1].strip()
+        if spoken and not is_place_placeholder(spoken):
+            return spoken
+    return ""
+
+
+def _without_route_prefs(text: str) -> str:
+    """去掉路线偏好短语（不走高速 / 避堵 / 少收费 / 不走快速路）——它们从来不是地名。"""
+    for pattern in (_PREF_NO_HW_RE, _PREF_JAM_RE, _PREF_TOLL_RE, _PREF_EXPRESS_RE):
+        text = pattern.sub("", text or "")
+    return text
+
+
+def _rating_policy(value, raw_text: str) -> tuple[float, bool]:
+    """Normalize planner rating slots and retain superlative ordering semantics."""
+    text = str(value or "").strip()
+    try:
+        rating_min = float(text) if text else 0.0
+    except (TypeError, ValueError):
+        rating_min = 0.0
+    prefer_highest = any(
+        marker in f"{text} {raw_text or ''}"
+        for marker in ("最高", "评分高", "高评分", "从高到低")
+    )
+    return rating_min, prefer_highest
+
+
+class NavigationAgent(BaseAgent):
+    def __init__(self):
+        super().__init__(_MANIFEST)
+        self.poi = build_poi_provider()
+
+    async def handle(self, intent, ctx, meta) -> AgentResult:
+        handlers = {
+            "navigation.search_poi": self._search_poi,
+            "navigation.navigate_to": self._navigate_to,
+            "navigation.estimate": self._estimate,
+            "navigation.reroute": self._reroute,
+            "navigation.cancel": self._cancel_route,
+            "navigation.reverse_geocode": self._reverse_geocode,
+            "navigation.poi_detail": self._poi_detail,
+            "navigation.set_place": self._set_place,
+            "navigation.locate": self._locate,
+            # 内部意图（批 7 ②）：**不进 manifest**——planner 看不见，只供 road-safety 的
+            # `safety.road_condition` 经 AgentClient 调用。进 manifest 就是在 planner 面前摆两个
+            # 等价工具让它掷硬币（本文件 search_poi vs nearby.search 那条老账）。
+            "navigation.route_traffic": self._route_traffic,
+        }
+        handler = handlers.get(intent.name)
+        if handler:
+            token = _LOOKUP.set(_LookupLog())
+            try:
+                return await handler(intent, ctx, meta)
+            finally:
+                _LOOKUP.reset(token)
+        return AgentResult(status=FAILED, speech="抱歉，这个导航请求我还不会处理。")
+
+    @staticmethod
+    def _lookup_mark() -> tuple[int, int]:
+        """本请求到目前为止的（成功, 报错）次数：解析第二个地点（起点）前记一下，出口只看这一段。"""
+        log = _LOOKUP.get()
+        return (log.ok, log.failed) if log else (0, 0)
+
+    @staticmethod
+    def _lookup_unavailable(mark: tuple[int, int] = (0, 0)) -> bool:
+        """从 `mark` 起这段地点检索一次都没成功、却有报错：没找到的原因是地图服务，不是这个地方（见 `_LookupLog`）。"""
+        log = _LOOKUP.get()
+        return bool(log) and log.failed > mark[1] and log.ok == mark[0]
+
+    @staticmethod
+    def _map_unavailable(what: str) -> AgentResult:
+        """地图服务报错时的如实话术：不说「没找到」、不追问城市——用户补了也一样查不到。
+        R9 契约：话术用 OK 返回（FAILED 会被聚合器吞成裸报错）；`search_poi` 的诚实降级与这里同一句。"""
+        return AgentResult(speech=f"地图服务暂时不可用，没查到「{what}」，请稍后再试。",
+                           follow_up="稍后再说一次就行")
+
+    async def _current_position(self, ctx, meta) -> GeoPoint | None:
+        """当前位置统一只取本轮已授权的浏览器 GPS——与天气、「我在哪」一致，避免三处定位打架。
+        PoC 没有真实车机 GPS（memory 的 vehicle.location 是 mock 上海），回退它会给出误导结果
+        且与天气不一致；故不再回退，无授权返回 None，由调用方诚实提示开启定位。"""
+        current = current_location_from_meta(meta)
+        if current:
+            return GeoPoint(lat=current.lat, lng=current.lng)
+        return None
+
+    @staticmethod
+    def _anchor_bare_hour(new_ts: int, old_ts: int, text: str) -> int:
+        """无段位的裸时刻就近旧时限：候选 = 新解 ± 12h，取离旧时限最近的那个。带段位词
+        （早上 / 晚上 / 下午…，词表 `runtime.cntime.SEG_ALT`）或 24h 写法的照原样。"""
+        if _SEGMENT_WORD_RE.search(text or "") or _H24_RE.search(text or ""):
+            return new_ts
+        candidates = (new_ts, new_ts - 12 * 3600, new_ts + 12 * 3600)
+        return min(candidates, key=lambda ts: abs(ts - old_ts))
+
+    @staticmethod
+    def _arrive_by_from(intent, raw_text: str) -> int | None:
+        """arrive_by 槽优先（planner 填的时间原话），原话「…前/我要到」句式确定性兜底。"""
+        slot = (intent.slots.get("arrive_by") or "").strip()
+        if slot:
+            ts = _parse_arrive_by(slot)
+            if ts:
+                return ts
+        m = _ARRIVE_RAW_RE.search(raw_text or "")
+        return _parse_arrive_by(m.group(0)) if m else None
+
+    @staticmethod
+    def _fmt_clock(ts) -> str:
+        """播给用户的时刻走业务时区（容器 TZ=UTC，裸 localtime 会整体偏 8 小时——
+        真栈实测「预计 05:17 到达，比您要求的 17:00 早约 703 分钟」）。"""
+        return fmt_clock(ts)
+
+    # 荒谬余量的闸门（C13-B，2026-08-28）：余量绝对值超过它就**不再播精确分钟数**。
+    # 6 小时不是统计出来的阈值，是「一次出行的时限不可能差这么多」这条常识
+    # ——超了就说明时刻解析多半选错了半天或日子，此时精确数字是有害的确定感。
+    _DEADLINE_ABSURD_MIN = 6 * 60
+
+    def _deadline_note(self, duration_min, arrive_by_ts) -> tuple[str, dict]:
+        """ETA vs 到达时限的判定（G1）→（话术片段, data/卡片附加字段）。任一缺失 → ("", {})。"""
+        if not (arrive_by_ts and duration_min):
+            return "", {}
+        now = int(time.time())
+        eta = now + int(float(duration_min) * 60)
+        margin = round((int(arrive_by_ts) - eta) / 60)
+        extra = {"eta_ts": eta, "arrive_by_ts": int(arrive_by_ts), "margin_min": margin}
+        clock, want = self._fmt_clock(eta), self._fmt_clock(arrive_by_ts)
+        # ① 时限本身已经过去（`parse_clock_time` 的「裸时刻双过时」解，C13-A）：
+        #    18:53 说「5点我要到学校」，正确的回答是「17 点已经过了」，
+        #    而不是把时限静默改到明天凌晨再算出一个精确余量。
+        if int(arrive_by_ts) <= now:
+            extra["deadline_elapsed"] = True
+            return (f"您说的{want}按今天算已经过了，照当前路线预计{clock}到达；"
+                    "要按明天算的话告诉我一声。", extra)
+        # ② 余量荒谬：把解析疑点交还用户，不把它包装成精确数字。真栈 family T8
+        #    播出过「比您要求的5:00早约593分钟」，聚合 LLM 当场在同一句里自我吐槽。
+        if abs(margin) > self._DEADLINE_ABSURD_MIN:
+            extra["deadline_uncertain"] = True
+            return (f"预计{clock}到达，和您说的{want}差了{abs(margin) // 60}小时以上"
+                    "——如果时间点不是这个，请再说一次。", extra)
+        if margin >= 5:
+            return f"预计{clock}到达，比您要求的{want}早约{margin}分钟。", extra
+        if margin >= 0:
+            return f"预计{clock}到达，刚好赶上您要求的{want}，别耽搁太久。", extra
+        return (f"照当前路线预计{clock}到达，比您要求的{want}晚约{-margin}分钟；"
+                "建议尽快出发，或说「帮我换避堵路线」。", extra)
+
+    @staticmethod
+    def _navigate_payload(destination: str, lat: float, lng: float, meta: dict | None,
+                          origin: "GeoPoint | None" = None) -> dict:
+        """构建导航动作；仅携带本轮已授权的精确起点。
+
+        `origin` 非空 = 用户**明说了出发地**（Q8 的 origin 槽），它优先于本轮 GPS：
+        「从深圳欢乐海岸出发去世界之窗」要按欢乐海岸算路，而不是按车现在在哪。
+        """
+        payload = {"destination": destination, "lat": lat, "lng": lng}
+        start = origin or current_location_from_meta(meta)
+        if start:
+            payload.update({"origin_lat": start.lat, "origin_lng": start.lng})
+        return payload
+
+    # ── 起终点解析（Q8：manifest 新增 origin 槽）────────────────────────
+    @staticmethod
+    def _origin_text(intent, meta=None) -> str:
+        """起点槽的原话；规划器写的「当前位置 / 这里」这类占位就是没给起点（判据 `runtime.slots`），按当前位置算。
+        用户一个字都没说过的起点也不算（2026-10-08 真栈：「去深南大道9028号要开多久」规划器填了 origin「北京」，估出 2164 公里）——
+        与认目的地同一份 `_grounded_in_raw`（两字片段沾上就算，规划器把「欢乐海岸」写成「深圳欢乐海岸」照样认）。
+        「说过」看两句：本轮原话（被追问后补上的起点在里面），和续接时引擎随 meta 下发的、这一步被规划时那句（`STEP_ORIGIN_META`）——
+        被续接的那一步读到的原话是本轮回答，「从欢乐海岸出发」→ 问去哪 →「世界之窗」只看本轮会把起点丢掉。
+        前序步结果填出的起点（`_trusted_slot_refs`）是系统给的，不查。"""
+        text = (intent.slots.get("origin") or "").strip()
+        if not text or is_place_placeholder(text):
+            return _resumed_spoken_origin(intent.raw_text, meta)
+        said = [t for t in ((intent.raw_text or "").strip(), str((meta or {}).get(STEP_ORIGIN_META) or "").strip()) if t]
+        if said and not _filled_by_ref("origin", meta) and not any(_grounded_in_raw(text, t) for t in said):
+            logger.info("origin slot not in the words, ignored: %r (raw=%r)", text, said[0][:40])
+            return ""
+        return text
+
+    async def _resolve_point(self, text: str, ctx, meta) -> tuple[str, GeoPoint | None]:
+        """地点原话 → (显示名, 坐标)。空文本 → ("", None)。
+
+        **解析不出坐标时返回 (原话, None)，绝不悄悄回落当前位置**——那正是 SL4
+        要修的形态：用户明说了出发地，系统却拿当前位置去算（探针四轮 12/13 红）。
+        """
+        name, point, _ = await self._resolve_point_checked(text, ctx, meta, check_namesake=False)
+        return name, point
+
+    async def _resolve_point_checked(self, text: str, ctx, meta, *, check_namesake: bool = True):
+        """同 `_resolve_point`，第三项是借名歧义：近处只是借了名、本地半径外另有本体 ⇒ (近处, 外地, 当前位置)，否则 None。
+
+        近处第一名连名字都对不上、外地有对得上的本体 ⇒ 直接用外地本体（不拿一个对不上的近处结果来问）。
+        """
+        t = (text or "").strip()
+        if not t:
+            return "", None, None
+        key, label = _match_place_alias(t)
+        if key:
+            stored = await self._get_place(ctx, key)
+            if stored and stored.get("lat") is not None:
+                return (stored.get("name") or label,
+                        GeoPoint(lat=float(stored["lat"]), lng=float(stored["lng"])), None)
+            return label, None, None
+        near = await self._current_position(ctx, meta)
+        # 与导航同用缺省的 3 条：只取第一条，但锚词双匹配要在候选里扫——只取 1 条时「东莞松山湖」全国第一是「松山湖风景区」
+        # （名字带后缀、校验够不着），能对上的「松山湖」排第二、取不到，只能靠模型猜名（2026-10-05 A/B，几遍之间结果不同）
+        _, items = await self._find_destination(t, meta, near=near)
+        if items and items[0].lat is not None:
+            top, ambiguity = items[0], None
+            far = await self._far_namesake(t, top, near, meta) if check_namesake else None
+            if far is not None:
+                if self._dest_matches(t, top.name, top.city):
+                    ambiguity = (top, far, near)
+                else:
+                    top = far
+            return top.name, GeoPoint(lat=float(top.lat), lng=float(top.lng)), ambiguity
+        return t, None, None
+
+    async def _estimate(self, intent, ctx, meta) -> AgentResult:
+        """只算不导：两点间的里程/时长/预计到达时刻。**本方法永不产出 navigate 动作。**
+
+        Q8「能力缺席 → 就近误执行」的头一条（I-016）。判据写在 manifest 的描述里：
+        用户要的是**数**还是**行程**。这里出的卡带 `estimate: true`，HMI 据此把标题
+        从「规划路线」换成「距离估算」——**卡片类型必须与本轮真实动作一致**
+        （同 I-022 那族）。
+        """
+        # 借名歧义的续接：「第一个」/ 点选的名字 ⇒ 用户选中的那个具体地点（`agents._sdk.dest_choice`）
+        dest_text = (intent.slots.get("destination") or "").strip()
+        choice = await resolve_choice(ctx, NAVIGATION_DEST_CHOICES, dest_text)
+        if choice:
+            dest_text = choice["name"]
+        raw_text = (intent.raw_text or "").strip()
+        if not dest_text:
+            return AgentResult(status=NEED_SLOT, speech="您想算到哪里的路程？",
+                               follow_up="说个目的地，比如「到深圳北站多远」",
+                               missing_slots=["destination"])
+        # 批 E：与 navigate_to 同一份判据——只说了从哪出发，目的地不许是 planner 编的
+        origin_only = self._unspoken_destination(dest_text, raw_text, meta)
+        if origin_only:
+            return self._ask_destination(origin_only, estimate=True)
+        if choice and choice.get("lat") is not None:
+            dest_name, namesake = choice["name"], None
+            dest_pt = GeoPoint(lat=float(choice["lat"]), lng=float(choice["lng"]))
+        else:
+            dest_name, dest_pt, namesake = await self._resolve_point_checked(dest_text, ctx, meta)
+        if namesake is not None:
+            return await self._ask_namesake(ctx, dest_text, *namesake, estimate=True)
+        if dest_pt is None:
+            if self._lookup_unavailable():
+                return self._map_unavailable(dest_text)
+            return AgentResult(
+                speech=f"我没找到「{dest_name or dest_text}」这个地方，换个说法再试试？")
+
+        origin_text = self._origin_text(intent, meta)
+        if origin_text:
+            mark = self._lookup_mark()
+            origin_name, origin_pt = await self._resolve_point(origin_text, ctx, meta)
+            if origin_pt is None:
+                if self._lookup_unavailable(mark):
+                    return self._map_unavailable(origin_text)
+                return AgentResult(
+                    speech=f"我没找到起点「{origin_name or origin_text}」，换个说法再试试？")
+        else:
+            origin_name, origin_pt = "当前位置", await self._current_position(ctx, meta)
+            if origin_pt is None:
+                # 诚实降级：没有起点就没有路程，别拿一个假起点算出一个像模像样的数。
+                return AgentResult(
+                    status=NEED_SLOT,
+                    speech="我现在拿不到车辆的位置，你说一下从哪儿出发，我就能算。",
+                    follow_up="可以说「从深圳北站出发」", missing_slots=["origin"])
+
+        strategy, strategy_note = _route_strategy(
+            f"{intent.slots.get('route_pref') or ''} {raw_text}")
+        try:
+            # with_polyline：卡上带折线，Android 地图页画「查看路线」（2026-09-11）
+            route = await self.poi.get_route(origin_pt, dest_pt, meta=meta,
+                                             strategy=strategy, with_polyline=True)
+        except ProviderError as e:
+            logger.warning("estimate route failed（诚实降级，不猜数）: %s", e)
+            return AgentResult(speech="地图服务暂时不可用，这段路程算不出来，稍后再试。")
+        distance_km = route.get("distance_km") or 0
+        duration_min = route.get("duration_min") or 0
+        if not distance_km and not duration_min:
+            return AgentResult(
+                speech=f"没能算出{origin_name}到{dest_name}的路程，稍后再试。")
+
+        dur = self._fmt_dur(duration_min)
+        eta = int(time.time()) + int(float(duration_min) * 60)
+        speech = f"{strategy_note}从{origin_name}到{dest_name}全程约{distance_km}公里"
+        if dur:
+            speech += f"，开车约{dur}，现在出发预计{self._fmt_clock(eta)}到"
+        speech += "。"
+        # CA2-19 S4：出发前问「多远 / 多久」正是该提电量的时候——与导航同一个判断。只在从当前位置出发时说：
+        # 「从上海到杭州多远」里车现在的电量跟那段路无关
+        if not origin_text:
+            speech += self._range_advisory(distance_km, self._battery_reading(ctx, meta))
+        speech += "需要我导航过去吗？"
+        card = attach({"type": "route_plan", "estimate": True,
+                       "origin": origin_name, "destination": dest_name,
+                       "waypoints": [], "distance_km": distance_km,
+                       "duration_min": duration_min, "eta_ts": eta,
+                       **card_geometry(origin=origin_pt, destination=dest_pt,
+                                       path=route.get("path"))}, self.poi)
+        return AgentResult(speech=speech, ui_card=card,
+                           data={"origin": origin_name, "destination": dest_name,
+                                 "distance_km": distance_km,
+                                 "duration_min": duration_min, "eta_ts": eta})
+
+    # ── 批 7 ②：实时路况（内部意图，供 road-safety 调用）───────────────────────────
+    # 此前 `safety.road_condition` 拿「X 路况」当关键词搜 POI，空结果原样播「为您找到 0 个X 路况，
+    # 推荐前三个：。需要导航过去吗？」——名字存在能力不可达。高德的实时路况一直在响应里：
+    # 路线 `extensions=all` 逐段带 tmcs（畅通 / 缓行 / 拥堵 / 严重拥堵），路名另有态势接口。
+    # 三种入口：`road`（路名）/ `destination`（到某地沿途）/ 都没有 ⇒ 活动路线（meta.focus_active_route）。
+    # **永不产出 navigate 动作**；数据缺席一律诚实说「拿不到」，不编。
+
+    @staticmethod
+    def _traffic_summary(traffic: dict | None) -> str:
+        """各状态公里数 → 一句沿途概况；`None` ⇒ 空串（调用方另说「拿不到」）。"""
+        if not isinstance(traffic, dict):
+            return ""
+        def _km(key):
+            try:
+                return round(float(traffic.get(key) or 0), 1)
+            except (TypeError, ValueError):
+                return 0.0
+        slow, congested, blocked = _km("slow_km"), _km("congested_km"), _km("blocked_km")
+        parts = []
+        if slow >= 0.1:
+            parts.append(f"缓行约{slow}公里")
+        if congested >= 0.1:
+            parts.append(f"拥堵约{congested}公里")
+        if blocked >= 0.1:
+            parts.append(f"严重拥堵约{blocked}公里")
+        if not parts:
+            return "沿途基本畅通"
+        return "沿途" + "、".join(parts) + ("，其余畅通" if _km("expedite_km") >= 0.1 else "")
+
+    async def _route_traffic(self, intent, ctx, meta) -> AgentResult:
+        road = (intent.slots.get("road") or "").strip()
+        if road:
+            return await self._road_name_traffic(road, ctx, meta)
+
+        dest_text = (intent.slots.get("destination") or "").strip()
+        waypoints: list[GeoPoint] = []
+        if dest_text:
+            dest_name, dest_pt = await self._resolve_point(dest_text, ctx, meta)
+            if dest_pt is None:
+                if self._lookup_unavailable():
+                    return self._map_unavailable(dest_text)
+                return AgentResult(
+                    speech=f"我没找到「{dest_name or dest_text}」这个地方，换个说法再试试？",
+                    data={"traffic_lookup": "destination_unresolved"})
+        else:
+            active = self._active_route_from(meta)
+            if not active:
+                # 没有目的地也没有正在导航的路线：让调用方去问「哪条路线」（它有自己的槽名）
+                return AgentResult(status=NEED_SLOT, speech="您想查询哪条路线的路况？",
+                                   follow_up="说个目的地或路名", missing_slots=["destination"])
+            dest_name = active["destination"]
+            dest_pt = GeoPoint(lat=active["lat"], lng=active["lng"])
+            waypoints = [GeoPoint(lat=w["lat"], lng=w["lng"]) for w in active.get("waypoints") or []]
+
+        origin_text = self._origin_text(intent, meta)
+        if origin_text:
+            mark = self._lookup_mark()
+            origin_name, origin_pt = await self._resolve_point(origin_text, ctx, meta)
+            if origin_pt is None:
+                if self._lookup_unavailable(mark):
+                    return self._map_unavailable(origin_text)
+                return AgentResult(
+                    speech=f"我没找到起点「{origin_name or origin_text}」，换个说法再试试？",
+                    data={"traffic_lookup": "origin_unresolved"})
+        else:
+            origin_name, origin_pt = "当前位置", await self._current_position(ctx, meta)
+            if origin_pt is None:
+                # 诚实降级：没有起点就没有这条路，别拿一个假起点算出一份像模像样的路况。
+                return AgentResult(
+                    speech=f"我现在拿不到车辆的位置，算不出到{dest_name}这一路的路况；"
+                           f"你说一下从哪儿出发，我就能查。",
+                    data={"traffic_lookup": "no_position"})
+        try:
+            route = await self.poi.get_route(origin_pt, dest_pt, meta=meta, with_polyline=True,
+                                             waypoints=waypoints or None)
+        except ProviderError as e:
+            logger.warning("route traffic failed（诚实降级，不猜）: %s", e)
+            return AgentResult(speech=f"地图服务暂时不可用，查不到到{dest_name}的路况，稍后再试。",
+                               data={"traffic_lookup": "provider_error"})
+        distance_km = route.get("distance_km") or 0
+        duration_min = route.get("duration_min") or 0
+        traffic = route.get("traffic") if isinstance(route.get("traffic"), dict) else None
+        head = f"从{origin_name}到{dest_name}全程约{distance_km}公里"
+        dur = self._fmt_dur(duration_min)
+        if dur:
+            head += f"、预计{dur}"
+        summary = self._traffic_summary(traffic)
+        speech = f"{head}，{summary}。" if summary else f"{head}；实时拥堵数据这会儿拿不到。"
+        card = attach({"type": "route_plan", "estimate": True,
+                       "origin": origin_name, "destination": dest_name, "waypoints": [],
+                       "distance_km": distance_km, "duration_min": duration_min,
+                       **({"traffic": traffic} if traffic else {}),
+                       **card_geometry(origin=origin_pt, destination=dest_pt,
+                                       path=route.get("path"))}, self.poi)
+        return AgentResult(speech=speech, ui_card=card,
+                           data={"origin": origin_name, "destination": dest_name,
+                                 "distance_km": distance_km, "duration_min": duration_min,
+                                 "traffic": traffic or {},
+                                 "traffic_source": "route_tmcs" if traffic else "",
+                                 "traffic_lookup": "route"})
+
+    async def _road_name_traffic(self, road: str, ctx, meta) -> AgentResult:
+        """按路名查态势：城市取当前位置的逆地理编码——**城市名优先**，adcode 只兜底。
+
+        真栈 RS12 第一趟（`3f9b18e4`）：高德 `/v3/traffic/status/road` 对 `city=440305` / `440300` 一律
+        `UNKNOWN_ERROR 20003`，只认「深圳市」这样的名称（文档写两者皆可，实测不是）。没有位置就说没法定城市，不猜。
+        """
+        here = await self._current_position(ctx, meta)
+        if here is None:
+            return AgentResult(
+                speech=f"我现在拿不到车辆的位置，没法确定是哪个城市的{road}。",
+                data={"traffic_lookup": "no_position", "road": road})
+        try:
+            regeo = await self.poi.reverse_geocode(here.lng, here.lat, meta=meta)
+            city = (getattr(regeo, "city", "") or getattr(regeo, "adcode", "") or "").strip()
+            if not city:
+                raise ProviderError("reverse geocode gave no city")
+            status = await self.poi.road_traffic(road, city, meta=meta)
+        except ProviderError as e:
+            logger.warning("road traffic failed（诚实降级，不猜）: %s", e)
+            return AgentResult(speech=f"暂时查不到{road}的实时路况。",
+                               data={"traffic_lookup": "provider_error", "road": road})
+        description = (status.get("description") or "").strip()
+        speech = f"{status.get('name') or road}目前{description}" if description else f"{road}的路况已查到"
+        pct = []
+        for key, label in (("expedite_pct", "畅通"), ("congested_pct", "拥堵"), ("blocked_pct", "严重拥堵")):
+            try:
+                value = float(status.get(key) or 0)
+            except (TypeError, ValueError):
+                value = 0.0
+            if value >= 1:
+                pct.append(f"{label}路段约占{value:g}%")
+        if pct:
+            speech += "，" + "、".join(pct)
+        return AgentResult(speech=speech + "。",
+                           data={**status, "traffic_source": "road_status",
+                                 "traffic_lookup": "road"})
+
+    async def _search_poi(self, intent, ctx, meta) -> AgentResult:
+        # 规划偶尔把自家 navigate_to 的 `destination` 写到这一步上（真栈 `dabc2e2d` RS39 1/6：「导航去云岚国际中心」⇒
+        # `navigation.search_poi {destination: 云岚国际中心}`）——那就是用户说出的地方，按它搜。规划器那层刻意不把这种混槽
+        # 归位成 navigate_to（F-1 ④：归位永不朝写操作推）；这里仍是 search_poi，动作方向不变。
+        keyword = (intent.slots.get("keyword") or intent.slots.get("category")
+                   or intent.slots.get("destination"))
+        if not keyword:
+            # 必须声明缺的是哪个槽：不声明时补槽答案写不进任何槽，重跑还是这一问（同一真栈那一趟答「深圳湾公园」原样再问）
+            return AgentResult(status=NEED_SLOT, speech="您想找什么类型的地点呢？",
+                               follow_up="请提供搜索关键词，如『充电站』『川菜馆』", missing_slots=["keyword"])
+
+        raw_text = (intent.raw_text or "").strip()
+        # 设施类目搜索（充电站/加油站/停车场…）按本步关键词如实搜附近，不得被整句多意图
+        # 原文的地标解析劫持，也不自动导航到首个结果——否则多意图“导航去X + 找充电桩”里
+        # 找充电桩的子步会被整句改写成导航到 X（双 navigate、卡片串味）。
+        is_category = self._is_category_search(keyword, intent.slots.get("category") or "")
+        # 「导航去 + 具名地点」被规划成 search_poi：不在这里按距离取第一个直导，交给导航到目的地按同一套解析
+        # （本地综合排序、借名判断、跨城反问都只在 `_find_destination` 里有一份）。2026-10-07 云端容器内直调：
+        # 这里把「深圳北站」导到站旁的「北站中心公园」、把「东方明珠」导到龙岗的住宅小区「东方·明珠城」，
+        # 导航到目的地则解析到车站本体、对东方明珠反问上海那座塔还是附近的小区。
+        # 视觉地标描述（「像贝壳那样的地方」）仍走下面按原话找候选的那一路：规划器可能把描述误抽成别的关键词。
+        if (self._is_navigation_phrase(raw_text) and not is_category
+                and not self._is_visual_landmark_description(raw_text)):
+            return self._named_destination_handoff(keyword, raw_text)
+
+        # 按引用取车辆当前位置（隐私最小化：只取需要的 scope）
+        near = await self._current_position(ctx, meta)
+        rating_min, prefer_highest = _rating_policy(
+            intent.slots.get("rating_min"),
+            raw_text,
+        )
+        # 真实 provider 运行期失败 → 诚实降级说拿不到（架构 §9.5 铁律③）：绝不改供 mock
+        # 假 POI（可能被用户导航过去）。R9 契约：话术用 OK 返回（FAILED 会被聚合器吞成裸报错）。
+        try:
+            results = await self.poi.search(keyword, near=near, rating_min=rating_min, meta=meta)
+        except ProviderError as e:
+            logger.warning("poi search failed（诚实降级，无 mock 回退）: %s", e)
+            return self._map_unavailable(keyword)
+        resolved_keyword = keyword
+
+        # Planner 有时会把“去深圳笋一样的建筑物”误抽成“笋岗”这类普通关键词。
+        # 视觉地标描述即使碰巧命中一个同名普通 POI，也要优先由地图验证语义候选；
+        # 候选名已含城市/正式名称，不能受车辆当前城市的周边检索范围限制。
+        is_visual_landmark = (not is_category) and self._is_visual_landmark_description(raw_text)
+        if raw_text and not is_category and (not results or is_visual_landmark):
+            for candidate in await self._landmark_candidates(raw_text):
+                try:
+                    candidate_results = await self.poi.search(
+                        candidate,
+                        near=None if is_visual_landmark else near,
+                        rating_min=rating_min,
+                        meta=meta,
+                    )
+                except ProviderError as e:
+                    logger.warning("semantic POI candidate search failed: %s", e)
+                    continue
+                # 同 _find_destination：拒绝高德对非官方名返回的邻近无关 POI
+                if candidate_results and name_matches(candidate, candidate_results[0].name):
+                    resolved_keyword, results = candidate, candidate_results
+                    break
+
+        if not results:
+            # 修前零结果照样套列表模板：「为您找到 0 个云岚国际中心，推荐前三个：。需要导航过去吗？」+「可以说『导航去第一个』」
+            if is_category:
+                return AgentResult(speech=f"附近暂时没找到{keyword}，换个类型或换个地方试试？")
+            return self._search_not_found(keyword, raw_text)
+
+        if prefer_highest:
+            results = sorted(results, key=lambda item: item.rating or 0, reverse=True)
+
+        items = [{"id": r.id, "name": r.name, "rating": r.rating,
+                  "distance_km": r.distance_km, "address": r.address,
+                  "lat": r.lat, "lng": r.lng} for r in results]
+        card = attach({"type": "poi_list", "keyword": resolved_keyword, "items": items},
+                      self.poi)
+
+        # 原话以地点类型词结尾（「人民广场」）、前五个结果的名字都对不上原话 ⇒ 附近没有用户说的那个地方（本地目的地排序 §17：深圳搜
+        # 「人民广场」回的是宝安人民医院、南山区人民检察院停车场、关口村人民医院住宅楼、常兴时代广场……修前照样说「为您找到 4 个人民广场」，
+        # 下游导航接过第一项就去了医院）。名字对不对得上用导航的同一份严格判据 `_dest_matches`——只看类型词在不在不够：「常兴时代广场」
+        # 也是广场，但不是人民广场。如实说没找到、列出名字相近的；结果不进 `data.items`，下游按槽位引用取不到它，导航会追问去哪。
+        kind = next((w for w in self._PLACE_TYPE_SUFFIXES
+                     if resolved_keyword == keyword and not is_category and not is_visual_landmark
+                     and keyword.endswith(w) and len(keyword) > len(w)), "")
+        if kind and not any(self._dest_matches(keyword, r.name, getattr(r, "city", "") or "") for r in results[:5]):
+            similar = "、".join(r.name for r in results[:3])
+            return AgentResult(speech=f"附近没找到「{keyword}」，名字相近的有：{similar}。",
+                               ui_card=card, data={"similar": items}, follow_up=_NOT_FOUND_FOLLOW_UP)
+
+        if results and not is_category and self._is_navigation_phrase(raw_text):
+            first = results[0]
+            # 与 `_find_destination` 兜底同一道闸：名字对不上（地标候选只有宽松匹配的也算对不上）、又在本地半径之外的第一个结果
+            # 不许自动导过去——规划把「导航去X」落成 search_poi 时，这里就是北京那一跳的第二个入口
+            # 地标解析的候选只在原话是地标描述、或候选与关键词沾边时才算用户说的那个地方（`a7e664f3` 真栈：「第二家」→「东方之门」）
+            grounded = (is_visual_landmark or resolved_keyword == keyword
+                        or name_matches(keyword, resolved_keyword))
+            verified = grounded and self._dest_matches(resolved_keyword, first.name)
+            # 名字对不上的第一个结果不由这里直接导过去（本地半径内也不行），交给导航到目的地按同一套解析：本地综合排序、
+            # 强校验、跨城判断都走过，没有更好的才退回弱匹配——那条兜底在 `_find_destination` 里只有一份。这里是按距离取
+            # 第一个：「导航去深圳北站」被规划成 search_poi 时，排第一的是站旁的「北站中心公园」（2026-10-07 真栈）。
+            if not verified:
+                logger.info("search_poi: unverified first result, handing over to navigate_to: %s → %s",
+                            keyword, first.name)
+                return self._search_not_found(keyword, raw_text, unverified=first.name)
+            # G6 轨迹写入也要挂这条自动导航路径——真栈「圆圆的湖→滴水湖」走的
+            # 正是这里，漏挂则「上次去过的那个湖」无数据可召回（挂点枚举教训）。
+            await self._remember_visited(ctx, first.name, first.lat, first.lng)
+            return self._stamp_route_session(AgentResult(
+                speech=f"识别到您说的是{first.name}（{first.address}）。已为您规划路线。",
+                ui_card=card, data={"items": items},
+            ).action("navigate", self._navigate_payload(
+                first.name, first.lat, first.lng, meta)),
+                first.name, first.lat, first.lng)
+
+        names = "、".join(r.name for r in results[:3])
+        return AgentResult(
+            speech=f"为您找到 {len(results)} 个{resolved_keyword}，推荐前三个：{names}。需要导航过去吗？",
+            ui_card=card,
+            data={"items": items},  # F3：结构化结果供编排 slot_refs 取值（如 s1.data.items.0.id）
+            follow_up="可以说『导航去第一个』",
+        )
+
+    #: 原话问的是路程 / 时间（「去KFC要开多久」「到深圳北站多远」）：要的是估算，不是动身（`_handoff_intent`）。
+    #: 2026-10-10 冻结 P2：「去7-11要开多久」被规划成地点搜索，按导航词改派导航到目的地，问句闸拦下改派、闲聊答了一句空话。
+    _ESTIMATE_ASK_RE = re.compile(r"多久|多远|多长时间|几点(?:能)?到|多少(?:公里|分钟|小时)")
+
+    @classmethod
+    def _handoff_intent(cls, raw_text: str) -> str:
+        """带导航词的原话交给谁：问路程 / 时间的交估算（只读），其余交导航到目的地。"""
+        return "navigation.estimate" if cls._ESTIMATE_ASK_RE.search(raw_text or "") else "navigation.navigate_to"
+
+    @classmethod
+    def _named_destination_handoff(cls, keyword: str, raw_text: str = "") -> AgentResult:
+        """「导航去 + 具名地点」落成 search_poi ⇒ 改派 `navigation.navigate_to`（目的地 = 关键词）；
+        「去 X 要开多久」问的是估算 ⇒ 改派 `navigation.estimate`（`_handoff_intent`）。
+
+        与 `_search_not_found` 同一个改派方向：挂起（同名两处的反问、找不到时追问城市）落在承接方身上，
+        下一句「第一个」「上海的」续接的也是它。D0 与多步执行都会消费改派、这句话术被替换；T2 循环不消费，
+        那条路上用户至少知道怎么说。"""
+        return AgentResult(
+            speech=f"要去「{keyword}」的话，说「导航去{keyword}」我来确认目的地。",
+            data={"_escalate": {"intent": cls._handoff_intent(raw_text),
+                               "slots": {"destination": keyword},
+                               "reason": "search_named_destination"}})
+
+    @classmethod
+    def _search_not_found(cls, keyword: str, raw_text: str, unverified: str = "") -> AgentResult:
+        """「没找到 X」。原话带导航词（用户要去一个地方，规划却落成了 search_poi）⇒ 改派 `navigation.navigate_to`：
+        「没找到 → 追问目的地 → 补上就导航」是它那条路，挂起落在它身上，下一句补上的地名续接的也是它。
+        `f535c654` 真栈 RS39：这里只回一句话、没有挂起，用户接着说「深圳湾公园」成了全新的裸地名，被澄清成
+        「你希望我怎么处理深圳湾公园？」。不在这里自己挂补槽：续接轮的 search_poi 读的是本轮原话（槽答案「深圳湾公园」，
+        没有导航词），补上了也只会列结果、不导航。
+        话术照留：T2 循环不消费改派，那条路上至少还有一句实话；final 里的话术不算「流出过」，不挡 D0 改派。
+        只是搜（不带导航词）⇒ 说没找到即可。
+
+        unverified：搜到了、但第一个结果名字对不上（同一个出口改派，话术如实说搜到的是什么）。"""
+        speech = (f"搜到的第一个是「{unverified}」，和「{keyword}」对不上，没有直接导过去。" if unverified
+                  else f"没找到「{keyword}」。")
+        result = AgentResult(speech=speech, follow_up=_NOT_FOUND_FOLLOW_UP)
+        if cls._is_navigation_phrase(raw_text):
+            result.data = {"_escalate": {"intent": cls._handoff_intent(raw_text),
+                                         "slots": {"destination": keyword},
+                                         "reason": "search_not_found"}}
+        return result
+
+    @staticmethod
+    def _is_navigation_phrase(text: str) -> bool:
+        return (text or "").strip().startswith(("导航", "去", "到", "带我去"))
+
+    #: 地点类型词：原话以它结尾、而搜到的名字里都没有它 ⇒ 搜到的是别的种类的地方（`_search_poi`）。
+    #: 每加一项要有真栈红例：「广场」——深圳搜「人民广场」回的是人民医院 / 检察院（本地目的地排序 §17，2026-10-10）。
+    _PLACE_TYPE_SUFFIXES = ("广场",)
+
+    # 设施类目关键词：这类搜索按本步关键词如实搜附近，不走整句地标解析、不自动导航
+    _CATEGORY_MARKERS = (
+        "充电", "快充", "慢充", "超充",
+        "加油", "加气", "加氢",
+        "停车", "车位",
+        "超市", "便利店",
+        "厕所", "卫生间", "洗手间", "公厕",
+        "服务区", "药店", "医院", "银行", "atm",
+    )
+
+    @classmethod
+    def _is_visual_landmark_description(cls, text: str) -> bool:
+        """带明显视觉/地标描述的导航请求（含动词前缀）→ 语义候选优先。"""
+        normalized = (text or "").strip()
+        if not cls._is_navigation_phrase(normalized):
+            return False
+        return is_landmark_description(normalized)
+
+    @classmethod
+    def _is_category_search(cls, keyword: str, category_slot: str = "") -> bool:
+        """本步是否为设施类目搜索（充电站/加油站/停车场…）。"""
+        if (category_slot or "").strip():
+            return True
+        k = (keyword or "").strip().lower()
+        return any(marker in k for marker in cls._CATEGORY_MARKERS)
+
+    # 顺路停靠类目（吃饭/咖啡…）→ 高德搜索关键词
+    _STOP_CATEGORY_KEYWORDS = {
+        "吃饭": "餐厅", "餐厅": "餐厅", "饭店": "餐厅", "美食": "餐厅", "吃的": "餐厅",
+        "咖啡": "咖啡", "奶茶": "奶茶饮品", "加油": "加油站",
+        "厕所": "公共厕所", "卫生间": "公共厕所", "超市": "超市", "便利店": "便利店",
+    }
+    # raw_text 里的途经点兜底解析（planner 未填 waypoint 槽位时）。
+    # G9：捕获组允许 、/和/与/及 连写多个途经点（「途经肯德基和星巴克」），消费侧拆分保序。
+    _WAYPOINT_RE = re.compile(
+        r"(?:途经|途径|经过|顺路去|顺道去|路过)\s*"
+        r"([^，。,、\s]+(?:[、和与及][^，。,、\s]+)*)")
+    # raw_text 里的"顺路停靠"兜底识别（planner 未填 stop_category，或误拆出 food 步时）
+    _STOP_RAW_RE = re.compile(
+        r"(?:附近|周边|顺路|顺道|沿途|中途|途中|路上|那边|那儿|路过)[^，。,、]{0,8}?"
+        r"(餐厅|饭店|吃饭|吃的|美食|川菜|火锅|咖啡|奶茶|小吃|加油|充电)")
+
+    @classmethod
+    def _stop_keyword(cls, category: str) -> str:
+        c = (category or "").strip()
+        for k, v in cls._STOP_CATEGORY_KEYWORDS.items():
+            if k in c:
+                return v
+        return c
+
+    def _unspoken_destination(self, dest: str, raw_text: str, meta) -> str:
+        """原话只说了从哪出发、目的地既不来自这句话也不来自会话 ⇒ 返回起点原话（调用方据此追问）；否则空串。
+
+        三条同时成立才算：① 去掉「从 X 出发」那截之后没有去向表达；② 目的地（可以为空）不沾那截之外的原话；
+        ③ 目的地不是会话里已确立的——引擎按 location scope 下发的焦点目的地 / 活动路线终点（LLM 与客户端都写不到
+        step.meta）。「上一轮算过到世界之窗多远，这一轮『那就从欢乐海岸出发吧』」由 ③ 放行。
+        """
+        rest, origin = _origin_named(raw_text)
+        if not origin or _DEST_EXPR_RE.search(rest):
+            return ""
+        d = (dest or "").strip()
+        if d and _grounded_in_raw(d, rest):
+            return ""
+        route = self._active_route_from(meta) or {}
+        known = [str((meta or {}).get("focus_destination") or "").strip(),
+                 str(route.get("destination") or "").strip()]
+        if d and any(k and _grounded_in_raw(d, k) for k in known):
+            return ""
+        return origin
+
+    @staticmethod
+    def _ask_destination(origin: str, *, estimate: bool = False,
+                         same_place: bool = False) -> AgentResult:
+        """追问去哪。`missing_slots=["destination"]` 不能省：续接时引擎只覆盖列出的槽，
+        否则 planner 编的目的地还留在槽里，用户答完照样导航过去。"""
+        if same_place:
+            speech = f"起点和终点都在{origin}这一带。您要从{origin}出发去哪里？"
+        elif estimate:
+            speech = f"您想算从{origin}出发到哪里的路程？"
+        else:
+            speech = f"您要从{origin}出发去哪里？"
+        return AgentResult(status=NEED_SLOT, speech=speech,
+                           follow_up="说个目的地，比如「去世界之窗」",
+                           missing_slots=["destination"])
+
+    @staticmethod
+    def _raw_destination(raw: str, *, governed: bool) -> str:
+        """目的地槽为空时，原话里哪一段能当目的地（评审四轮待办，2026-09-25）。
+
+        兜底本来只为「整句就是一个地点描述」的单步请求设计（「导航到上海那个像船一样的建筑」）。多分句计划里这一步的目的地
+        本该引用上一步的结果，上一步没产出时槽是空的，修前把整句原话当地名去搜、再原样念回来——「暂时无法确定「先帮我查一下
+        墨汐国际中心在哪，导航过去」对应的具体地点」（真栈 `ee94c595` RS41）、「暂时无法确定「东部华侨城，沿途帮我找个充电站」…」
+        （collector 历史）。只剩一个分句 ⇒ 它；多个分句 ⇒ 原话以导航动词起头才取动词管的第一句，否则不取（交给「您要去哪里？」）。"""
+        clauses = split_clauses(raw)
+        if len(clauses) <= 1:
+            return raw
+        return clauses[0] if governed else ""
+
+    async def _navigate_to(self, intent, ctx, meta) -> AgentResult:
+        dest = intent.slots.get("destination", "").strip()
+        # 借名歧义的续接：「第一个」/ 点选的名字 ⇒ 用户选中的那个具体地点（`agents._sdk.dest_choice`），不再重新搜
+        choice = await resolve_choice(ctx, NAVIGATION_DEST_CHOICES, dest)
+        chosen = None
+        if choice:
+            dest = choice["name"]
+            if choice.get("lat") is not None:
+                chosen = POI(id="dest_choice", name=choice["name"], address=choice.get("address", ""),
+                             lat=float(choice["lat"]), lng=float(choice["lng"]))
+        raw_text = (intent.raw_text or "").strip()
+        # 批 E：只说了从哪出发 ⇒ 目的地必须来自这句话或会话（planner 编的、原话兜底搜回起点的都不算）
+        origin_only = self._unspoken_destination(dest, raw_text, meta)
+        if origin_only:
+            return self._ask_destination(origin_only)
+        if not dest:
+            # 槽位为空时，尝试用 raw_text 做模糊搜索（处理"导航到上海那个像船一样的建筑"）。
+            # 批 E：先去掉「从 X 出发」与路线偏好——起点和「不走高速」都不是目的地（修前「不走高速」被拿去搜地名）。
+            raw = _without_route_prefs(_origin_named(raw_text)[0]).strip("，。, 、")
+            governed = False
+            for prefix in ("导航到", "导航去", "导航", "带我去", "去", "到"):
+                if raw.startswith(prefix):
+                    raw = raw[len(prefix):].strip()
+                    governed = True
+                    break
+            raw = self._WAYPOINT_RE.sub("", raw).strip("，。, 、")  # 去掉"途经X"尾巴，不污染目的地
+            dest = self._raw_destination(raw, governed=governed)
+        if not dest:
+            return AgentResult(status=NEED_SLOT, speech="您要去哪里？", follow_up="请告诉我目的地",
+                               missing_slots=["destination"])
+
+        # G1/G11：到达时限（「五点前到」）与路线偏好（「不走高速/避堵」）——slot 优先、
+        # 原话确定性兜底；解析结果贯穿本次导航的全部路径（普通/顺路停靠/途经点/常用地点）。
+        arrive_by_ts = self._arrive_by_from(intent, raw_text)
+        strategy, strategy_note = _route_strategy(
+            f"{intent.slots.get('route_pref') or ''} {raw_text}")
+        if not strategy:
+            # G6 消费环：本次没说偏好 → 查记忆里的路线偏好（「以后都不走高速」说过
+            # 一次就一直生效）。route.* 谓词此前全仓零消费方，这里是它的第一个出口。
+            strategy, strategy_note = await self._route_pref_from_memory(ctx)
+
+        # planner 臆断修正：见 _correct_planner_landmark（把 planner 错猜的具体楼名换回真地标官方名）。
+        dest = await self._correct_planner_landmark(dest, raw_text, meta)
+
+        # M2 记忆图谱 P1：人称目的地一跳解析（「去接孩子放学」→ 孩子=小雨 → 小雨在 XX 小学）。
+        # 这是母提案 §1.2-E2 的 Eva 例子，也是关系边唯一非做不可的消费面。
+        person_word = _person_destination(dest) or _person_destination(raw_text)
+        # PU6（QA 长会话 `538335f` family T54，2026-08-30）：**长会话后段，
+        # planner 把 `destination` 填成了上一次接送的地点。**
+        # 逐字实录——同一条会话里 T9「接女儿放学，路上买杯咖啡。」导到
+        # 「深圳市南山实验教育集团明远学校」（对），T54 同一句导到
+        # 「**深圳湾万象城桔子水晶酒店**」（T3/T48「去接老婆」的地点）。
+        # 干净会话 3/3 全对 ⇒ 是**跨轮污染**，不是解析能力问题。
+        #
+        # 上面那两档都够不着它：`_person_destination(dest)` 看到的是一个真地名、
+        # `_person_destination(raw_text)` 对复合句**天然失效**（本文件 :76 注释）。
+        # 而 `_pickup_person` 这条**局部形态**判据一直都在，只是此前只在下面的
+        # 常用地点别名分支里被用。
+        #
+        # 判据是既有那条的直接应用——**planner 改写是不可信指代通道，只信 raw**：
+        # 只有当 planner 填的目的地**与用户这句话一个字都不沾**时才让人称赢。
+        # ⚠ 误伤面就是 PU7 那条反向对照「接孩子后去万象城」：`万象城` 明明白白在
+        # 原话里 ⇒ 判为「用户自己说的」⇒ 一个字不动。**这条护栏比修法本身重要**：
+        # 没有它，这个修法会把「给了具体地点的接送句」全部改写成那个人的常去地，
+        # 正是卡 §4.3 要防的东西。
+        if not person_word and not _match_place_alias(dest)[0]:
+            # ⚠ **常用地点别名让路给下面那条既有分支**（第二版补，测试当场按住）：
+            # `destination=学校` 且用户配过「学校」时，裁定是**用它当地址簿**，
+            # 不许被人称解析顶掉。那一段自己已经带了同形态的 pickup 兜底
+            # （「接不着地点时回退人称」），本闸挤进去只会写第二份。
+            pickup = _pickup_person(str(raw_text or ""))
+            if pickup and dest and not _grounded_in_raw(dest, str(raw_text or "")):
+                # ⚠ **只有真的知道更好的答案时才改写**（第一版没有这一条，
+                # 当场撞红三条既有反向对照）：planner 为接送句填一个**具体校名**
+                # 是它的正常职责（「带我去接孩子放学」→ `destination=南山实验小学`），
+                # 那个名字同样不在原话里。**「不在原话里」只说明它是推断的，
+                # 不说明它是错的。** 分界是：这个人的地点我们查得到吗？
+                # 查不到就一个字不动（既有的「诚实追问，绝不猜」那条不受影响）。
+                hit = await ctx.resolve_person_place(pickup)
+                better = (hit or {}).get("place") if isinstance(hit, dict) else ""
+                if isinstance(better, str) and better and better != dest:
+                    logger.info(
+                        "pickup destination %r is not grounded in the utterance; "
+                        "using the person's own place %r instead", dest, better)
+                    dest = better
+        if person_word:
+            hit = await ctx.resolve_person_place(person_word)
+            if hit and hit.get("place"):
+                logger.info("person destination resolved: %s → %s(%s)",
+                            person_word, hit["place"], hit.get("person", ""))
+                dest = hit["place"]
+            else:
+                # **诚实追问，绝不猜**：不知道「孩子」是谁/在哪时，导航到错地方比问一句更糟。
+                return self._ask_person_place(person_word)
+
+        # 常用地点（家/公司/学校）：命中别名先走画像，未设置则二次交互让用户设置。
+        place_key, place_label = _match_place_alias(dest)
+        if place_key and not (intent.slots.get("place_address") or "").strip():
+            # person-pickup（2026-08-20）：**「接女儿放学」不是在问「学校」这个常用地点。**
+            # planner 把它压成 `destination=学校` 时，别名分支会抢在人称之前命中，
+            # 于是真栈答「您还没有设置「学校」的位置，请告诉我学校的地址」——而库里
+            # `女儿--place_of-->深圳市南山实验小学` 明明在（PU6 5 次取样稳定占 2 次）。
+            # 与下面那条 raw 兜底同一形态：**接不着地点时回退人称**，只是这里的
+            # 「接不着」是「这个常用地点没设过」。查得到才改写，查不到一个字不动
+            # ——「导航去学校」（原话无接送人称）照旧走设置引导。
+            pickup = _pickup_person(raw_text)
+            if pickup and not await self._get_place(ctx, place_key):
+                hit = await ctx.resolve_person_place(pickup)
+                if hit and hit.get("place"):
+                    logger.info("pickup beats place alias: %s(%s) → %s",
+                                pickup, place_label, hit["place"])
+                    dest, place_key = hit["place"], ""
+        if place_key:
+            place_address = (intent.slots.get("place_address") or "").strip()
+            if place_address:
+                # 二次交互续接：用户给了地址 → 设为该常用地点并直接导航过去。
+                return await self._set_place_and_go(
+                    place_key, place_label, place_address, ctx, meta, navigate=True)
+            stored = await self._get_place(ctx, place_key)
+            if stored:
+                # "导航回家，途中找个咖啡店"：常用地点同样支持途经点/顺路停靠，别丢这层意图。
+                stored_poi = POI(
+                    id=f"place_{place_key}", name=stored.get("name") or place_label,
+                    address=stored.get("address") or "",
+                    lat=stored.get("lat"), lng=stored.get("lng"))
+                items = [stored]
+                waypoint = (intent.slots.get("waypoint") or "").strip()
+                if not waypoint:
+                    m = self._WAYPOINT_RE.search(raw_text)
+                    if m:
+                        waypoint = m.group(1).strip()
+                if waypoint:
+                    return await self._navigate_via_waypoint(
+                        stored_poi, place_label, waypoint, items, meta,
+                        arrive_by_ts=arrive_by_ts, strategy=strategy,
+                        strategy_note=strategy_note, ctx=ctx)
+                stop_category = (intent.slots.get("stop_category") or "").strip()
+                if not stop_category:
+                    m = self._STOP_RAW_RE.search(raw_text)
+                    if m:
+                        stop_category = m.group(1)
+                if stop_category:
+                    return await self._navigate_with_stop_choice(
+                        stored_poi, place_label, stop_category, items, meta,
+                        arrive_by_ts=arrive_by_ts, strategy=strategy,
+                        strategy_note=strategy_note)
+                return await self._navigate_to_stored(
+                    place_label, stored, meta, ctx=ctx, arrive_by_ts=arrive_by_ts,
+                    strategy=strategy, strategy_note=strategy_note)
+            example = "深圳科技园" if place_key == "company" else "上海长宁区某某小区"
+            return AgentResult(
+                status=NEED_SLOT,
+                speech=f"您还没有设置「{place_label}」的位置，请告诉我{place_label}的地址。",
+                follow_up=f"比如说『{example}』，我记住后直接带您过去。",
+                missing_slots=["place_address"],
+            )
+
+        # 带当前位置就近解析目的地（"最近的/附近的粤菜馆"按距离排序）；无定位则 near=None。
+        near = await self._current_position(ctx, meta)
+        # 就近查询("最近的/附近的X")：X 是【目的地类目】——无定位→诚实提示开启定位（不拿任意城市
+        # 冒充"最近"）；有定位→剥掉就近前缀按当前位置周边搜。只看 dest——「东方之门，附近找吃饭」
+        # 里的"附近"指目的地周边停靠(顺路用餐流程)，dest 是"东方之门"，不该误触。
+        is_proximity = bool(_PROXIMITY_RE.search(dest))
+        if is_proximity:
+            if near is None:
+                return AgentResult(
+                    speech="找最近的地点要先知道您在哪。请在设置里开启定位授权，我就按当前位置帮您就近找。",
+                    follow_up="开启定位后再说一次『最近的…』")
+            dest = _strip_proximity(dest)  # "附近的粤菜馆" → "粤菜馆"，按当前位置周边搜
+        # "换一批"翻页：HMI 在续问时带上 meta.poi_page，取下一页不同候选。
+        try:
+            page = max(1, int((meta or {}).get("poi_page", 1)))
+        except (TypeError, ValueError):
+            page = 1
+        # D4（接地卡 2026-08-14）：历史指代（「上次去过的那个湖」）→ episodic 轨迹
+        # 坐标直取，不重搜。planner 召回把 dest 填对了名（滴水湖），重搜却把最后
+        # 一跳交回就近偏置（真栈接到雅悦酒店）——去过的地方坐标本来就在轨迹里。
+        visited = None
+        history_ref = bool(not is_proximity and self._HISTORY_REF_RE.search(raw_text))
+        if history_ref:
+            visited = await self._visited_coords_from_memory(ctx, dest)
+        # 历史指代 + **描述性** dest（「看夜景的那个地方」——planner 没解出名，原话
+        # 整句进了槽，2026-08-15 真栈实测）且轨迹名匹配不上 → 把最近去过的地方列成
+        # 候选让用户挑。确定性消费 episodic、零猜测：比「暂时无法确定」多给一步，
+        # 又不替用户拍板（D4「描述性 dest 不做语义猜」纪律不破——挑的人是用户）。
+        # 「上次去的星巴克」这类真专名不命中描述判定，照常走搜索。
+        if visited is None and history_ref and self._DESCRIPTIVE_DEST_RE.search(dest):
+            recent = await self._recent_visited_places(ctx)
+            if recent:
+                items = [{"id": f"episodic_{i}", "name": p["name"],
+                          "address": "您去过的地方", "lat": p["lat"], "lng": p["lng"]}
+                         for i, p in enumerate(recent)]
+                names = "、".join(p["name"] for p in recent[:5])
+                return AgentResult(
+                    speech=f"您最近去过这些地方：{names}。您说的是哪一个？"
+                           "说『第几个』即可。",
+                    ui_card=attach({"type": "poi_list", "keyword": "最近去过",
+                                    "items": items}, self.poi),
+                    data={"items": items},
+                    follow_up="说『第一个』『第二个』选择目的地")
+        if chosen is not None:
+            resolved_name, results = chosen.name, [chosen]
+        elif visited:
+            resolved_name = visited[0]
+            results = [POI(id="episodic_place", name=visited[0],
+                           address="您去过的地方", lat=visited[1], lng=visited[2])]
+        else:
+            # strict=False：就近类目（「最近的粤菜馆」）的结果店名天然不含类目词，
+            # 不做 R1 强校验（否则每次类目导航都白跑一轮去偏置重搜 + 地标 LLM）。
+            resolved_name, results = await self._find_destination(
+                dest, meta, near=near, limit=5 if is_proximity else 3, page=page,
+                strict=not is_proximity)
+        if not results and self._lookup_unavailable():
+            return self._map_unavailable(dest)
+        if not results and not is_proximity:
+            # person-pickup 卡（2026-08-20）：**接不到地点时再回退人称**。
+            # 上面那道 `_person_destination` 的判据是「剥完人称还剩不剩实质内容」
+            # ——对**槽值**是对的，套到**整句原话**上天然失效，因为复合请求必然有
+            # 剩余内容（「接爸妈去吃饭」剩「吃饭」、「带我去接孩子放学，顺便找家
+            # 麦当劳」剩一大段）。于是 raw 兜底那一路对多目标句形恒不触发。
+            # 落点选在这里而不是放宽上面的判据（卡 §5 明写不许动它）：只有走到
+            # 「这个目的地我接不着」才回退，**给了具体地点的复合句一个字都不受影响**。
+            pickup = _pickup_person(raw_text)
+            if pickup:
+                hit = await ctx.resolve_person_place(pickup)
+                if hit and hit.get("place"):
+                    logger.info("pickup fallback resolved: %s → %s(%s)",
+                                pickup, hit["place"], hit.get("person", ""))
+                    dest = hit["place"]
+                    resolved_name, results = await self._find_destination(
+                        dest, meta, near=near, limit=3, page=page)
+                if not results:
+                    # 查不到就给**教学问**（与「去接我爸」逐字同一句），
+                    # 不是「暂时无法确定「接爸妈去吃饭」对应的具体地点」——
+                    # 后者把整句原话当成了地名回读给用户。
+                    return self._ask_person_place(pickup)
+        if not results:
+            if is_proximity:
+                if page > 1:  # "换一批"翻到底了
+                    return AgentResult(
+                        speech=f"附近没有更多{dest}了，从前面给您的几家里挑一个吧。")
+                return AgentResult(speech=f"附近暂时没找到{dest}，换个类型试试？")
+            return AgentResult(
+                status=NEED_SLOT,
+                speech=f"暂时无法确定「{dest}」对应的具体地点。",
+                follow_up=_NOT_FOUND_FOLLOW_UP,
+                missing_slots=["destination"],
+            )
+
+        # 接送句的**就近合理性**（person-pickup 卡 §3-B 的收窄版，2026-08-20）。
+        # 「接人」天然是本地差事：接到一个几百公里外的同名 POI，几乎一定是接错了，
+        # 而代价是**一声不吭地开出去**。这道闸不重搜、不改写，只是**问一句**。
+        #
+        # 为什么单独要它——上游那两道（校园类目锚词 / 一跳解析）都是**判据面**的修法，
+        # 各自只覆盖自己那条路：真栈 PU5 七次取样里仍有一次导到 1582km 外的济南同名校，
+        # 而**全部容器日志里「济南」零命中**（planner 那一轮下发的是「深圳南山实验小学」，
+        # 直连高德复测该词只返回深圳的学校）⇒ 那一跳的来源至今没查清。
+        # **来源查不清不等于不能防**：这条判据不依赖它从哪来，只问「接人接到这么远合理吗」。
+        # ⚠ 只对**接送句**生效：「导航去上海外滩」原话没有接送人称，一个字不受影响。
+        pickup_word = _pickup_person(raw_text)
+        if pickup_word and near is not None and not is_proximity:
+            far = results[0]
+            if far.lat and far.lng and self._rough_km(
+                    near.lat, near.lng, far.lat, far.lng) > _PICKUP_MAX_KM:
+                km = round(self._rough_km(near.lat, near.lng, far.lat, far.lng))
+                who = _person_display(pickup_word)
+                logger.info("pickup destination implausibly far: %s → %s (%dkm)",
+                            pickup_word, far.name, km)
+                # 教的说法必须真的有人接：修前写的是「确实要去就说「就去这个」」，全仓没有任何一处消费这句话——续接会把
+                # 「就去这个」当成目的地去搜（评审四轮待办，2026-09-25）。「导航去<名字>」这一句原话里没有接送人称，
+                # 续接时这道闸不再拦，名字又对得上 ⇒ 直接导过去。
+                return AgentResult(
+                    status=NEED_SLOT,
+                    speech=f"我找到的「{far.name}」离这儿约 {km} 公里，"
+                           f"接{who}要去这么远吗？",
+                    follow_up="要是就在附近，说个区域或更完整的名字我再找一次；"
+                              f"确实要去，就说「导航去{far.name}」。",
+                    missing_slots=["destination"])
+
+        # 近处第一名只是借名（或名字都对不上）、本地半径外另有名字对得上的本体（2026-10-04 真栈：「南京南站」→本地
+        # 「南京南站南广场」、「黄鹤楼」→「小黄鹤楼餐馆」）：借名 ⇒ 两个都列出来让用户选；对不上 ⇒ 直接用外地本体。
+        if not is_proximity and not visited and not pickup_word and chosen is None:
+            far = await self._far_namesake(dest, results[0], near, meta)
+            if far is not None:
+                if self._dest_matches(dest, results[0].name, results[0].city):
+                    return await self._ask_namesake(ctx, dest, results[0], far, near)
+                results = [far]
+
+        first = results[0]
+        items = [{"id": r.id, "name": r.name, "rating": r.rating,
+                  "distance_km": r.distance_km, "address": r.address,
+                  "lat": r.lat, "lng": r.lng} for r in results]
+
+        # 类目目的地（"最近的/附近的粤菜馆"）：附近这几家是【可选目的地】，不是顺路途经点。
+        # 列出来让用户选哪家作目的地（plain poi_list，无 purpose → HMI「第N个」改写成
+        # 「导航去{名称}」直接设为目的地），不走顺路停靠/途经点流程（那是"导航去X，途中找Y"语义）。
+        if is_proximity:
+            names = "、".join(r.name for r in results[:3])
+            more = f" 等{len(results)}家" if len(results) > 3 else ""
+            return AgentResult(
+                speech=f"附近为您找到这些{dest}：{names}{more}。想去哪一家？说『第几个』即可。",
+                ui_card=attach({"type": "poi_list", "keyword": dest, "items": items},
+                               self.poi),
+                data={"items": items},
+                follow_up="说『第一个』『第二个』选择目的地",
+            )
+
+        # 轮2：已选途经点（slot 或 raw_text 的"途经X"）→ 解析坐标并入 navigate
+        waypoint = (intent.slots.get("waypoint") or "").strip()
+        if not waypoint:
+            m = self._WAYPOINT_RE.search(raw_text)
+            if m:
+                waypoint = m.group(1).strip()
+        if waypoint:
+            return await self._navigate_via_waypoint(
+                first, resolved_name, waypoint, items, meta,
+                arrive_by_ts=arrive_by_ts, strategy=strategy,
+                strategy_note=strategy_note, ctx=ctx)
+
+        # 轮1：顺路停靠类目（吃饭/咖啡…）→ 导航到目的地 + 给候选让用户二次选择。
+        # planner 未填 stop_category 槽位时，从 raw_text"附近/顺路…餐厅/吃饭"兜底识别——
+        # 即便 planner 误把找餐厅拆成 nearby.search，导航侧也能自己产出真实餐厅
+        # 途经点候选（聚合器优先 waypoint_choice 卡）。
+        stop_category = (intent.slots.get("stop_category") or "").strip()
+        if not stop_category:
+            m = self._STOP_RAW_RE.search(raw_text)
+            if m:
+                stop_category = m.group(1)
+        if stop_category:
+            return await self._navigate_with_stop_choice(
+                first, resolved_name, stop_category, items, meta,
+                arrive_by_ts=arrive_by_ts, strategy=strategy, strategy_note=strategy_note)
+
+        # 普通导航：出路线规划卡（起点 → 目的地，起终点 + best-effort 距离/时长）
+        prefix = (f"识别到您说的是{first.name}。" if resolved_name != dest else "")
+        # Q8 origin 槽：用户明说「从X出发」时按 X 算路。解析不出就**诚实说一句**，
+        # 不静默回落当前位置（SL4 要修的就是那个静默）。占位与原话里没有的起点不算（`_origin_text`）
+        origin_text = self._origin_text(intent, meta)
+        origin_pair = None
+        if origin_text:
+            mark = self._lookup_mark()
+            o_name, o_pt = await self._resolve_point(origin_text, ctx, meta)
+            if o_pt is None:
+                if self._lookup_unavailable(mark):
+                    return self._map_unavailable(origin_text)
+                return AgentResult(
+                    status=NEED_SLOT,
+                    speech=f"我没找到您说的起点「{o_name or origin_text}」。",
+                    follow_up="换个说法告诉我出发地，或者直接说「从当前位置出发」。",
+                    missing_slots=["origin"])
+            # 批 E：起终点解析到同一处（修前「从华侨城欢乐海岸导航到华侨城欢乐海岸」）——从 X 导航到 X 永远不是用户要的。
+            if (first.lat is not None and first.lng is not None and self._rough_km(
+                    o_pt.lat, o_pt.lng, float(first.lat), float(first.lng)) < _SAME_PLACE_KM):
+                return self._ask_destination(o_name, same_place=True)
+            origin_pair = (o_name, o_pt)
+        return await self._route_plan_to(
+            first.name, first.address, first.lat, first.lng, meta,
+            resolved_prefix=prefix, ctx=ctx, arrive_by_ts=arrive_by_ts,
+            strategy=strategy, strategy_note=strategy_note, origin=origin_pair)
+
+    # ── 常用地点（家/公司/学校）──────────────────────────────
+    async def _get_places(self, ctx) -> dict:
+        """从用户画像读常用地点 map。失败/未设置返回空 dict。"""
+        try:
+            vals = await ctx.fetch("profile.places")
+        except Exception as e:  # 画像不可用不应阻断导航
+            logger.warning("fetch profile.places failed: %s", e)
+            return {}
+        raw = vals.get("profile.places")
+        if not raw:
+            return {}
+        if isinstance(raw, dict):
+            return raw
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+
+    async def _get_place(self, ctx, place_key: str) -> dict | None:
+        place = (await self._get_places(ctx)).get(place_key)
+        return place if isinstance(place, dict) and place.get("lat") is not None else None
+
+    async def _navigate_to_stored(self, label: str, stored: dict, meta,
+                                  ctx=None, arrive_by_ts=None, strategy: str = "",
+                                  strategy_note: str = "") -> AgentResult:
+        """已设置的常用地点 → 直接导航（出路线规划卡 起点→终点）。"""
+        name = stored.get("name") or label
+        addr = stored.get("address") or name
+        return await self._route_plan_to(
+            name, addr, stored.get("lat"), stored.get("lng"), meta,
+            resolved_prefix=f"正在前往{label}：", ctx=ctx, arrive_by_ts=arrive_by_ts,
+            strategy=strategy, strategy_note=strategy_note)
+
+    async def _set_place_and_go(self, place_key: str, label: str, address: str,
+                                ctx, meta, navigate: bool) -> AgentResult:
+        """地理编码地址 → 存为常用地点（best-effort）→ 按需导航。"""
+        near = await self._current_position(ctx, meta)
+        _resolved, results = await self._find_destination(address, meta, near=near)
+        if not results:
+            return AgentResult(
+                status=NEED_SLOT,
+                speech=f"没找到「{address}」，请补充城市/区域或换个说法。",
+                follow_up=f"再说一次{label}的地址即可",
+                missing_slots=["place_address" if navigate else "address"],
+            )
+        first = results[0]
+        record = {"name": first.name, "address": first.address,
+                  "lat": first.lat, "lng": first.lng}
+        places = await self._get_places(ctx)
+        places[place_key] = record
+        try:
+            await ctx.save_profile("places", places)  # 存画像失败不挡导航
+        except Exception as e:
+            logger.warning("save_profile places failed: %s", e)
+        if navigate:
+            return self._stamp_route_session(AgentResult(
+                speech=f"已把{label}设为{first.name}，正在为您导航过去。",
+                ui_card=attach({"type": "poi_list", "keyword": label, "items": [record]},
+                               self.poi),
+                data={"place": label, "item": record},
+            ).action("navigate", self._navigate_payload(
+                first.name, first.lat, first.lng, meta)),
+                first.name, first.lat, first.lng)
+        return AgentResult(
+            speech=f"已把{label}设为{first.name}（{first.address}）。"
+                   f"以后说『导航去{label}』就能直接出发。",
+            data={"place": label, "item": record},
+        )
+
+    async def _set_place(self, intent, ctx, meta) -> AgentResult:
+        """显式设置常用地点：『把家设成XX』『我家在XX』『设置公司地址为XX』。不导航。
+
+        P4 守卫（2026-08-15 真栈恶性实测）：「我老婆平时在深圳湾万象城上班」被 planner
+        语义映射成 set_place(公司=万象城)——**把用户自己的常用地点改写成了家人的位置**。
+        家人位置陈述是记忆抽取/关系图谱的输入，不是设置本人常用地点：原话含人称词时
+        只口头记下（真正的存储由抽取管线做），**绝不写画像**。
+        """
+        raw = getattr(intent, "raw_text", "") or ""
+        person_word = _SET_PLACE_PERSON_RE.search(raw)
+        if person_word:
+            token = person_word.group(0)
+            who = _person_display(token[1:] if len(token) == 2
+                                  and token[0] in "我你他她" else token)
+            return AgentResult(
+                speech=f"好的，记下了——您{who}的位置我记在TA名下，"
+                       f"以后说「去接{who}」我就知道去哪了。",
+                follow_up="您自己的常用地点才用「把家/公司设成XX」设置")
+        place_key, label = _match_place_alias(intent.slots.get("place", ""))
+        address = (intent.slots.get("address") or "").strip()
+        if not place_key or not address:
+            pk, lb, addr = self._parse_set_place(getattr(intent, "raw_text", "") or "")
+            place_key, label = (place_key or pk), (label or lb)
+            address = address or addr
+        if not place_key:
+            # 声明缺 `place`：续接轮原话只有「家」，`_parse_set_place` 解析不出来，不声明就只会原样再问
+            return AgentResult(
+                status=NEED_SLOT, speech="您想设置哪个常用地点？比如家或公司。",
+                follow_up="可以说『把家设成XX地址』", missing_slots=["place"])
+        if not address:
+            return AgentResult(
+                status=NEED_SLOT, speech=f"请告诉我{label}的具体地址。",
+                missing_slots=["address"])
+        return await self._set_place_and_go(
+            place_key, label, address, ctx, meta, navigate=False)
+
+    @staticmethod
+    def _parse_set_place(raw: str) -> tuple[str | None, str, str]:
+        """从原话兜底解析『把X设成Y/X在Y/X地址是Y』。返回 (key, 标签, 地址)。"""
+        t = (raw or "").strip()
+        m = re.search(
+            r"(?:把|将)?\s*(家|我家|公司|单位|学校)(?:的)?(?:位置|地址)?\s*"
+            r"(?:设成|设为|设置成|设置为|改成|改为|定为|定在)\s*(.+)", t)
+        if not m:
+            m = re.search(
+                r"(我家|家|公司|单位|学校)(?:的)?(?:位置|地址)?\s*(?:在|是|为)\s*(.+)", t)
+        if m:
+            pk, lb = _match_place_alias(m.group(1))
+            return pk, lb, m.group(2).strip(" 。，,.")
+        return None, "", ""
+
+    # 记忆路线偏好 → 话术（memory 来源要说清是「记住的」，不是本轮说的）
+    _MEM_PREF_NOTES = {
+        "6": "记得您平时不走高速，已按此规划。",
+        "4": "记得您习惯避开拥堵，已按此规划。",
+        "1": "记得您偏好少走收费路，已按此规划。",
+    }
+
+    # D4：历史指代词形——与 orchestrator/cloud/context.py::_EPISODIC_REF_RE 同一组
+    # （planner 靠它放开 episodic 召回；端云各自部署，无法共享常量，改一处要对齐另一处）。
+    _HISTORY_REF_RE = re.compile(r"上次|上回|那次|上一次|之前去过?的?|前几天去")
+    # 描述性目的地（「那个地方」「去过的」）：没有可搜的专名——历史指代下轨迹名
+    # 匹配不上时，拿它去 _find_destination 只会搜出垃圾。与「上次去的星巴克」区分：
+    # 星巴克是真专名，轨迹没有也该正常搜。
+    _DESCRIPTIVE_DEST_RE = re.compile(r"那个|那里|那儿|地方|去过的")
+
+    async def _visited_coords_from_memory(self, ctx, dest: str) -> tuple[str, float, float] | None:
+        """episodic 轨迹坐标直取（D4）：「召回对了最后一跳歪」的根治。
+
+        名字对齐（_dest_matches 同款包含式）才直用——描述性 dest（planner 没解出名）
+        不做语义猜：接错比重搜更糟。坐标从 memory 确定性直取、不经 LLM 转手
+        （防模型编坐标——last_places 不进 prompt 的同款纪律）。查不到/失败回 None
+        走正常解析，绝不阻塞导航。search_poi 自动导航分支刻意未挂：历史指代经
+        planner episodic 召回都走 navigate_to（视觉地标才走 search_poi）。"""
+        if ctx is None or not dest:
+            return None
+        try:
+            mems = await ctx.recall(dest, scopes=["episodic.place"],
+                                    kinds=["episodic"], top_k=5)
+        except Exception as e:
+            logger.debug("visited coords recall skipped: %s", e)
+            return None
+        for m in mems or []:
+            try:
+                v = json.loads(m.get("value_json") or "{}")
+            except (TypeError, ValueError):
+                continue
+            name = str(v.get("name") or "")
+            lat, lng = v.get("lat"), v.get("lng")
+            if name and lat is not None and lng is not None \
+                    and self._dest_matches(dest, name):
+                try:
+                    return name, float(lat), float(lng)
+                except (TypeError, ValueError):
+                    continue
+        return None
+
+    async def _recent_visited_places(self, ctx) -> list[dict]:
+        """最近去过的地方（episodic 轨迹，按名去重，最多 5 个）。失败返回空。"""
+        if ctx is None:
+            return []
+        try:
+            mems = await ctx.recall("去过的地方", scopes=["episodic.place"],
+                                    kinds=["episodic"], top_k=10)
+        except Exception as e:
+            logger.debug("recent visited recall skipped: %s", e)
+            return []
+        out, seen = [], set()
+        for m in mems or []:
+            try:
+                v = json.loads(m.get("value_json") or "{}")
+            except (TypeError, ValueError):
+                continue
+            name = str(v.get("name") or "").strip()
+            lat, lng = v.get("lat"), v.get("lng")
+            if not name or name in seen or lat is None or lng is None:
+                continue
+            try:
+                out.append({"name": name, "lat": float(lat), "lng": float(lng)})
+            except (TypeError, ValueError):
+                continue
+            seen.add(name)
+            if len(out) >= 5:
+                break
+        return out
+
+    async def _route_pref_from_memory(self, ctx) -> tuple[str, str]:
+        """路线偏好记忆 → 高德 strategy（G6：route.* 谓词的确定性消费出口）。
+
+        谓词前缀精确读取；**刻意不按 polarity 过滤**——route.* 族的方向已编码在
+        谓词名里（avoid_highway 本来就是「不喜欢高速」），抽取端把「不要走高速」
+        标成 dislike 是合理语义，按极性排除会把偏好挡在门外（2026-08-14 真栈
+        实锤：B2 种下的 route.avoid_highway 带 polarity=dislike，首版过滤直接漏掉）。
+        召回失败/无记忆一律回默认，绝不阻塞导航。
+        """
+        if ctx is None:
+            return "", ""
+        try:
+            mems = await ctx.recall("路线偏好", predicate_prefix="route.", top_k=3)
+        except Exception:
+            return "", ""
+        active = list(mems or [])
+        if not active:
+            return "", ""
+        strategy, note = _route_strategy(" ".join(str(m.get("text") or "") for m in active))
+        if not strategy:
+            # 谓词级兜底：text 措辞不含关键词，但谓词本身就是声明
+            preds = " ".join(str(m.get("predicate") or "") for m in active)
+            strategy = ("6" if "route.avoid_highway" in preds
+                        else "4" if "route.avoid_congestion" in preds
+                        else "1" if "route.avoid_toll" in preds else "")
+        if not strategy:
+            return "", ""
+        return strategy, self._MEM_PREF_NOTES.get(
+            strategy, note or "已按您记住的路线偏好规划。")
+
+    @staticmethod
+    def _route_midpoint(route) -> GeoPoint | None:
+        """路线几何里程 45% 处的采样点（G2 沿途搜索锚点）。几何缺失/短途返回 None。"""
+        points = (route or {}).get("points") or []
+        total = float((route or {}).get("distance_km") or 0)
+        if not points or total < 2:
+            return None
+        target = total * 0.45
+        for p in points:
+            try:
+                if float(p.get("cum_km", 0)) >= target:
+                    return GeoPoint(lat=float(p["lat"]), lng=float(p["lng"]))
+            except (TypeError, ValueError, KeyError):
+                continue
+        return None
+
+    async def _navigate_with_stop_choice(self, dest_poi, resolved_name, stop_category,
+                                         items, meta, *, arrive_by_ts=None,
+                                         strategy: str = "",
+                                         strategy_note: str = "") -> AgentResult:
+        """轮1：导航到目的地，并给"顺路停靠"类目候选让用户二次选择途经点（不自动选）。
+
+        G2（EVA 二轮）：候选搜索锚点从「目的地附近」改为**真沿途**——起点→目的地路线
+        几何的 45% 里程采样点。拿不到路线几何/沿途空结果回落目的地附近，并在话术里
+        如实说是哪种（不把目的地附近说成「顺路」）。
+        G1：带 arrive_by 时报直达 ETA 判定，并给前 2 个候选算「顺道去这家」的到校时刻。
+        """
+        keyword = self._stop_keyword(stop_category)
+        current = current_location_from_meta(meta)
+        dest_pt = GeoPoint(lat=dest_poi.lat, lng=dest_poi.lng)
+        base_route = None
+        if current is not None:
+            try:
+                base_route = await self.poi.get_route(
+                    GeoPoint(lat=current.lat, lng=current.lng), dest_pt,
+                    meta=meta, with_polyline=True, strategy=strategy)
+            except Exception as e:
+                logger.debug("stop-choice base route unavailable: %s", e)
+        mid = self._route_midpoint(base_route)
+        where = "沿途" if mid is not None else "目的地附近"
+        try:
+            stops = await self.poi.search(keyword, near=(mid or dest_pt), limit=5, meta=meta)
+        except ProviderError as e:
+            logger.warning("stop category search failed: %s", e)
+            stops = []
+        if not stops and mid is not None:
+            # 沿途采样点没搜到 → 回落目的地附近再试一次（原行为）
+            where = "目的地附近"
+            try:
+                stops = await self.poi.search(keyword, near=dest_pt, limit=5, meta=meta)
+            except ProviderError:
+                stops = []
+        payload = self._navigate_payload(dest_poi.name, dest_poi.lat, dest_poi.lng, meta)
+        deadline_note, extra = self._deadline_note(
+            (base_route or {}).get("duration_min"), arrive_by_ts)
+        if not stops:
+            return self._stamp_route_session(AgentResult(
+                speech=f"{strategy_note}已为您导航到{dest_poi.name}。{deadline_note}"
+                       f"沿途和目的地附近暂未找到{keyword}。",
+                ui_card=attach({"type": "poi_list", "keyword": resolved_name,
+                                "items": items}, self.poi),
+                data={"items": items, **extra},
+            ).action("navigate", payload),
+                dest_poi.name, dest_poi.lat, dest_poi.lng,
+                strategy=strategy, arrive_by_ts=arrive_by_ts)
+        choice_items = [{"id": s.id, "name": s.name, "rating": s.rating,
+                         "distance_km": s.distance_km, "address": s.address,
+                         "lat": s.lat, "lng": s.lng} for s in stops]
+        # G1：到达时限在场时，给前 2 个候选算「顺道去这家」的实际到达时刻（best-effort）
+        eta_hint = ""
+        if arrive_by_ts and current is not None:
+            hints = []
+            for it_c in choice_items[:2]:
+                try:
+                    wr = await self.poi.get_route(
+                        GeoPoint(lat=current.lat, lng=current.lng), dest_pt, meta=meta,
+                        waypoints=[GeoPoint(lat=it_c["lat"], lng=it_c["lng"])],
+                        strategy=strategy)
+                except Exception as e:
+                    logger.debug("stop-choice candidate route unavailable: %s", e)
+                    continue
+                dur = wr.get("duration_min")
+                if not dur:
+                    continue
+                eta_c = int(time.time()) + int(float(dur) * 60)
+                late = round((eta_c - int(arrive_by_ts)) / 60)
+                it_c["eta"] = self._fmt_clock(eta_c)
+                it_c["late_min"] = max(0, late)
+                hints.append(f"顺道{it_c['name']}约{it_c['eta']}到"
+                             + (f"（晚{late}分钟）" if late > 0 else "（不迟到）"))
+            if hints:
+                eta_hint = "；".join(hints) + "。"
+        names = "、".join(s.name for s in stops[:3])
+        # purpose=waypoint_choice 让 HMI 把"第N个"回填为途经点（派发"导航去X途经Y"），而非发起新导航
+        return self._stamp_route_session(AgentResult(
+            speech=f"{strategy_note}已为您规划到{dest_poi.name}的路线。{deadline_note}"
+                   f"{where}的{keyword}有：{names}。{eta_hint}"
+                   f"想顺道去哪家？说『第几个』即可，不去也可以直接出发。",
+            ui_card=attach({"type": "poi_list", "purpose": "waypoint_choice",
+                            "display_priority": 1,
+                            "title": f"顺路{keyword} · 选择途经点",
+                            "destination": dest_poi.name, "items": choice_items},
+                           self.poi),
+            data={"destination": dest_poi.name, "stops": choice_items, **extra},
+        ).action("navigate", payload),
+            dest_poi.name, dest_poi.lat, dest_poi.lng,
+            strategy=strategy, arrive_by_ts=arrive_by_ts)
+
+    @staticmethod
+    def _fmt_dur(minutes) -> str:
+        m = int(minutes or 0)
+        if m <= 0:
+            return ""
+        h, mm = divmod(m, 60)
+        return (f"{h}小时" if h else "") + (f"{mm}分钟" if mm else "")
+
+    async def _resolve_waypoint_token(self, w: str, ctx, near, meta
+                                      ) -> "tuple[POI | None, AgentResult | None]":
+        """P1（EVA 遗留卡）：单个途经点 token 三级解析——与目的地侧同款权威序。
+
+        ① 人称词（孩子/老婆…）→ 关系图谱一跳；命中得地点名再 POI 搜索取坐标；
+           **未命中 → 诚实教学问**（导航到随机学校比问一句更糟——真栈 B4 实测
+           「先送孩子去学校」搜出「博明程国际教育」）。
+        ② 常用地点别名（家/公司/学校）→ 画像 profile.places；未设置 → 引导先设置。
+        ③ 其余照旧 POI 搜索（近目的地）。
+        返回 (POI, None)=解析成功 / (None, AgentResult)=需要用户补信息（整轮中止）/
+        (None, None)=搜不到（调用方记 missing 如实说跳过）。"""
+        person_word = _person_destination(w)
+        if person_word and ctx is not None:
+            hit = await ctx.resolve_person_place(person_word)
+            if hit and hit.get("place"):
+                try:
+                    r = await self.poi.search(hit["place"], near=near, limit=1,
+                                              meta=meta)
+                except ProviderError:
+                    r = []
+                if r:
+                    return r[0], None
+                return None, None          # 图谱有名但地图接不到 → 如实跳过
+            who = _person_display(person_word)
+            return None, AgentResult(
+                status=NEED_SLOT,
+                speech=f"我还不知道你{who}平时在哪，你说个地方我就记住了。",
+                follow_up=f"可以说「我{who}在XX上班」或「我{who}在XX小学上学」",
+                missing_slots=["waypoint"])
+        place_key, place_label = _match_place_alias(w)
+        if place_key and ctx is not None:
+            stored = await self._get_place(ctx, place_key)
+            if stored and stored.get("lat") is not None:
+                return POI(id=f"place_{place_key}",
+                           name=stored.get("name") or place_label,
+                           address=stored.get("address") or "",
+                           lat=stored.get("lat"), lng=stored.get("lng")), None
+            return None, AgentResult(
+                status=NEED_SLOT,
+                speech=f"您还没有设置「{place_label}」的位置。"
+                       f"先说「把{place_label}设成XX地址」，我记住后再帮您把它设为途经点。",
+                follow_up=f"例如「把{place_label}设成深圳市南山实验小学」",
+                missing_slots=["waypoint"])
+        try:
+            r = await self.poi.search(w, near=near, limit=1, meta=meta)
+        except ProviderError as e:
+            logger.warning("waypoint resolve failed: %s", e)
+            r = []
+        return (r[0] if r else None), None
+
+    async def _navigate_via_waypoint(self, dest_poi, resolved_name, waypoint,
+                                     items, meta, *, arrive_by_ts=None,
+                                     strategy: str = "",
+                                     strategy_note: str = "", ctx=None) -> AgentResult:
+        """轮2：所选停靠点 near 目的地解析坐标→并入途经点，并出路线规划卡（出发地→途经点→目的地）。
+
+        G9（EVA 二轮）：waypoint 支持 、/和/与/及 连写多个（「途经肯德基和星巴克」），
+        逐个解析**保用户口述序**并入路线；解析不出的如实说跳过。
+        G1：带 arrive_by 时做时限判定；能算出直达路线时量化绕行代价（多绕约 N 分钟），
+        迟到而直达能赶上时给出量化替代（不做自动取舍，选择权在用户）。
+        P1：token 先过人称/常用地点两级（`_resolve_waypoint_token`），
+        「先送孩子去学校再去公司」的「学校」不再搜出随机学校。
+        """
+        near = GeoPoint(lat=dest_poi.lat, lng=dest_poi.lng)
+        wanted = [w.strip(" 、，,。") for w in re.split(r"[、和与及,，]", waypoint or "")
+                  if w.strip(" 、，,。")][:6]
+        resolved, missing = [], []
+        for w in wanted:
+            poi_hit, ask = await self._resolve_waypoint_token(w, ctx, near, meta)
+            if ask is not None:
+                return ask
+            (resolved.append(poi_hit) if poi_hit else missing.append(w))
+        payload = self._navigate_payload(dest_poi.name, dest_poi.lat, dest_poi.lng, meta)
+        if not resolved:
+            return self._stamp_route_session(AgentResult(
+                speech=f"没找到「{'、'.join(missing) or waypoint}」，已先为您导航到{dest_poi.name}。",
+                ui_card=attach({"type": "poi_list", "keyword": resolved_name,
+                                "items": items}, self.poi),
+                data={"items": items},
+            ).action("navigate", payload),
+                dest_poi.name, dest_poi.lat, dest_poi.lng,
+                strategy=strategy, arrive_by_ts=arrive_by_ts)
+
+        payload["waypoints"] = [{"name": w.name, "address": w.address,
+                                 "lat": w.lat, "lng": w.lng} for w in resolved]
+        # 全程距离/时长（best-effort）：出发地→途经点→目的地；直达对照供绕行量化
+        distance_km = duration_min = 0
+        detour_min = None
+        direct_dur = None
+        route_path = None
+        current = current_location_from_meta(meta)
+        cur_pt = GeoPoint(lat=current.lat, lng=current.lng) if current else None
+        if current:
+            try:
+                # with_polyline：卡上带折线，Android 地图页画「查看路线」（2026-09-11）
+                route = await self.poi.get_route(
+                    cur_pt, GeoPoint(lat=dest_poi.lat, lng=dest_poi.lng),
+                    meta=meta, strategy=strategy, with_polyline=True,
+                    waypoints=[GeoPoint(lat=w.lat, lng=w.lng) for w in resolved])
+                distance_km = route.get("distance_km") or 0
+                duration_min = route.get("duration_min") or 0
+                route_path = route.get("path")
+            except Exception as e:                       # best-effort：算不出就只给时间线
+                logger.debug("route plan distance unavailable: %s", e)
+            if duration_min:
+                try:
+                    direct = await self.poi.get_route(
+                        cur_pt, GeoPoint(lat=dest_poi.lat, lng=dest_poi.lng),
+                        meta=meta, strategy=strategy)
+                    direct_dur = direct.get("duration_min") or None
+                    if direct_dur:
+                        detour_min = max(0, round(float(duration_min) - float(direct_dur)))
+                except Exception as e:
+                    logger.debug("direct route for detour compare unavailable: %s", e)
+        wp_names = "、".join(w.name for w in resolved)
+        head = (f"{strategy_note}已把{wp_names}设为途经点，为您规划好路线："
+                f"当前位置 → {wp_names} → {dest_poi.name}")
+        if distance_km:
+            dur = self._fmt_dur(duration_min)
+            head += f"，全程约{distance_km}公里" + (f"、约{dur}" if dur else "")
+            if detour_min:
+                head += f"（比直达多绕约{detour_min}分钟）"
+        if missing:
+            head += f"；「{'、'.join(missing)}」没找到，已跳过"
+        deadline_note, extra = self._deadline_note(duration_min, arrive_by_ts)
+        tail = deadline_note
+        if extra.get("margin_min", 0) < 0 and direct_dur:
+            direct_eta = int(time.time()) + int(float(direct_dur) * 60)
+            if direct_eta <= int(arrive_by_ts):
+                # 话术只许诺今天走得通的路：「直接导航去X」=新一轮直达导航（现有链路）；
+                # G8 已落地：增量改道（navigation.reroute）可引导——「途经点不去了」
+                # 会在保留目的地与时限的前提下改直达，比引导用户发起全新导航干净。
+                tail += (f"若不带途经点直达，预计{self._fmt_clock(direct_eta)}可准时到；"
+                         "要改直达就说「途经点不去了」。")
+        # 几何字段（起终点坐标 / 途经点坐标 / 折线）与 waypoints 一起由 card_geometry 出：
+        # 途经点仍是 name/address，多带 lat/lng（HMI 只读前两个键，向后兼容）
+        card = attach({"type": "route_plan", "origin": "当前位置",
+                       "destination": dest_poi.name,
+                       "distance_km": distance_km, "duration_min": duration_min,
+                       **extra,
+                       **card_geometry(origin=cur_pt, destination=dest_poi,
+                                       waypoints=resolved, path=route_path)}, self.poi)
+        return self._stamp_route_session(AgentResult(
+            speech=head + "。" + tail, ui_card=card,
+            data={"waypoints": payload["waypoints"], **extra},
+        ).action("navigate", payload),
+            dest_poi.name, dest_poi.lat, dest_poi.lng,
+            waypoints=payload["waypoints"], strategy=strategy,
+            arrive_by_ts=arrive_by_ts)
+
+    async def _route_plan_to(self, name: str, address: str, lat, lng, meta,
+                             *, resolved_prefix: str = "", ctx=None,
+                             arrive_by_ts=None, strategy: str = "",
+                             strategy_note: str = "",
+                             origin: "tuple[str, GeoPoint] | None" = None) -> AgentResult:
+        """导航到具体目的地：出路线规划卡（起点 → 目的地，best-effort 距离/时长）+ navigate。
+        与顺路途经点的 route_plan 卡同一范式，让用户直观看到"已规划好路线（起点→终点）"。
+
+        `origin`（Q8 的 origin 槽解析结果）非空时**它就是起点**：算路、卡片、动作载荷
+        三处一起换掉。⚠ **覆盖面写在这里**：接了 origin 的是这条普通导航路径、
+        `_estimate` 与 `_reroute`（后者 2026-08-28 随 C8 补上，契约同批加了 origin 槽）；
+        顺路停靠 / 途经点 / 常用地点三条仍按当前位置起算（行为与那批之前逐字一致）。
+        它们要接的时候在这三处各传一次即可——**不覆盖的部分要写下来，不要让读的人
+        以为全都接上了**。
+        """
+        origin_label = origin[0] if origin else "当前位置"
+        payload = self._navigate_payload(name, lat, lng, meta,
+                                         origin[1] if origin else None)
+        distance_km = duration_min = 0
+        route_path = None
+        current = origin[1] if origin else current_location_from_meta(meta)
+        if current:
+            try:
+                # with_polyline：卡上带折线，Android 地图页画「查看路线」（2026-09-11）
+                route = await self.poi.get_route(
+                    GeoPoint(lat=current.lat, lng=current.lng),
+                    GeoPoint(lat=lat, lng=lng), meta=meta, strategy=strategy,
+                    with_polyline=True)
+                distance_km = route.get("distance_km") or 0
+                duration_min = route.get("duration_min") or 0
+                route_path = route.get("path")
+            except Exception as e:                       # best-effort：算不出就只给起终点
+                logger.debug("route plan distance unavailable: %s", e)
+        origin_note = f"从{origin_label}" if origin else ""
+        speech = f"{resolved_prefix}{strategy_note}{origin_note}为您导航到{name}（{address}）。"
+        if distance_km:
+            dur = self._fmt_dur(duration_min)
+            speech += f"全程约{distance_km}公里" + (f"、约{dur}" if dur else "") + "，已规划好路线。"
+        else:
+            speech += "已规划好路线。"
+        # G1：到达时限判定（「五点前到」）——ETA 与时限的确定性比对 + 量化话术
+        deadline_note, deadline_extra = self._deadline_note(duration_min, arrive_by_ts)
+        speech += deadline_note
+        # 车辆接地 advisory（旅程 B3-2）：续航覆盖不了本程（含 15% 保留余量，与 charging
+        # 同款判定）→ 主动提示补能。只加话术不加动作（advisory 不发车控/不改路线），
+        # 用户接一句「沿途帮我找充电站」即进 charging 流程。电量是编排下发的车况读数（连同来源，
+        # CA2-19 S1；S4 起导航声明 vehicle_state，线上才真拿得到）；拿不到就不提示。
+        speech += self._range_advisory(distance_km, self._battery_reading(ctx, meta))
+        # R7（旅程 A2-4/B5-1⑥）：REMINDABLE_ACTIVE「即插」契约兑现——写 ETA 事件，
+        # 「到之前一刻钟提醒我打电话」由 reminder 消费（事件时刻-提前量），不再反问时间。
+        # best-effort：无 ctx/无时长/写失败都不影响导航本体。
+        if ctx is not None and duration_min:
+            try:
+                now_ts = int(time.time())
+                dur_s = int(float(duration_min) * 60)
+                remindable = [{"title": f"到达{name}", "fire_at": now_ts + dur_s}]
+                # G1 出发提醒反向环：有到达时限时补「出发前往X」事件，
+                # fire_at=必须出发的时刻（时限-路程）。reminder 的默认提前量（10 分钟）
+                # 会让「到时候提醒我出发」在该出发前 10 分钟响——正好是提前量语义。
+                if arrive_by_ts:
+                    depart_ts = int(arrive_by_ts) - dur_s
+                    if depart_ts > now_ts + 60:
+                        remindable.insert(0, {"title": f"出发前往{name}",
+                                              "fire_at": depart_ts})
+                await ctx.save_shared_state(REMINDABLE_ACTIVE, {
+                    "source": "navigation", "label": f"前往{name}",
+                    "ts": now_ts, "items": remindable})
+            except Exception as e:
+                logger.debug("navigation remindable save skipped: %s", e)
+        # G6 历史轨迹：导航成功落一条轻量情景记忆（「上次去的那个地方」的数据源）
+        await self._remember_visited(ctx, name, lat, lng)
+        card = attach({"type": "route_plan", "origin": origin_label, "destination": name,
+                       "waypoints": [], "distance_km": distance_km,
+                       "duration_min": duration_min, **deadline_extra,
+                       **card_geometry(origin=current, destination={"lat": lat, "lng": lng},
+                                       path=route_path)}, self.poi)
+        return self._stamp_route_session(AgentResult(
+            speech=speech, ui_card=card,
+            data={"destination": name, "lat": lat, "lng": lng, **deadline_extra},
+        ).action("navigate", payload),
+            name, lat, lng, strategy=strategy, arrive_by_ts=arrive_by_ts)
+
+    # ── G8 路线会话与增量改道 ────────────────────────────────────
+    # 过龄阈值取一次驾驶会话的量级（默认 2h）：与门店锚定的 15min 语义不同，路线会话
+    # 跟着「这趟在开」的时长走。PoC 无真实驾驶时长分母，先取不打扰的宽值。
+    _ROUTE_SESSION_MAX_AGE_S = int(os.getenv("ROUTE_SESSION_MAX_AGE_S", "7200"))
+
+    @staticmethod
+    def _stamp_route_session(result: AgentResult, destination: str, lat, lng, *,
+                             waypoints: list | None = None, strategy: str = "",
+                             arrive_by_ts=None) -> AgentResult:
+        """把本次导航的结构化路线写进结果保留键 `_route_session`（conventions §9.1）。
+
+        engine 的 extract_focus 通用消费它落 focus.active_route，下一轮「途经点不去了」
+        才有对象可指。**挂点必须枚举全部执行路径**（本仓第三次应验的教训）：每个发出
+        navigate action 的 return 都要盖章，漏一处那条路径的导航就无法被增量修改。
+        """
+        try:
+            lat_f, lng_f = float(lat), float(lng)
+        except (TypeError, ValueError):
+            return result
+        session = {
+            "destination": str(destination or ""), "lat": lat_f, "lng": lng_f,
+            "waypoints": [{"name": str(w.get("name")), "lat": w.get("lat"),
+                           "lng": w.get("lng")} for w in (waypoints or [])
+                          if isinstance(w, dict) and w.get("name")],
+            "strategy": str(strategy or ""), "ts": int(time.time())}
+        if arrive_by_ts:
+            session["arrive_by_ts"] = int(arrive_by_ts)
+        if result.data is None:
+            result.data = {}
+        result.data["_route_session"] = session
+        return result
+
+    @classmethod
+    def _active_route_from(cls, meta) -> dict | None:
+        """从 meta.focus_active_route（engine 按 location scope 注入的服务端事实，
+        LLM 与客户端都写不到）读活动路线。无/损坏/过龄 → None。坐标逐项校验，
+        非法途经点直接丢——防御防到真正被拿去规划的那个值。"""
+        raw = (meta or {}).get("focus_active_route", "")
+        if not raw:
+            return None
+        try:
+            d = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(d, dict) or not str(d.get("destination") or "").strip():
+            return None
+        try:
+            lat, lng = float(d.get("lat")), float(d.get("lng"))
+        except (TypeError, ValueError):
+            return None
+        if not (-90 <= lat <= 90 and -180 <= lng <= 180):
+            return None
+        try:
+            ts = int(d.get("ts") or 0)
+        except (TypeError, ValueError):
+            ts = 0
+        if ts <= 0 or time.time() - ts > cls._ROUTE_SESSION_MAX_AGE_S:
+            return None      # 过龄：别把上周那趟当成「当前正在导航」
+        waypoints = []
+        for w in (d.get("waypoints") or []):
+            if not isinstance(w, dict) or not str(w.get("name") or "").strip():
+                continue
+            try:
+                wlat, wlng = float(w.get("lat")), float(w.get("lng"))
+            except (TypeError, ValueError):
+                continue
+            if -90 <= wlat <= 90 and -180 <= wlng <= 180:
+                waypoints.append({"name": str(w["name"]), "lat": wlat, "lng": wlng})
+        out = {"destination": str(d["destination"]).strip(), "lat": lat, "lng": lng,
+               "waypoints": waypoints, "strategy": str(d.get("strategy") or "")}
+        try:
+            ab = int(d.get("arrive_by_ts") or 0)
+        except (TypeError, ValueError):
+            ab = 0
+        if ab > 0:
+            out["arrive_by_ts"] = ab
+        return out
+
+    @staticmethod
+    def _parse_reroute_remove(raw: str) -> str:
+        for pattern in (_REROUTE_REMOVE_A_RE, _REROUTE_REMOVE_B_RE):
+            m = pattern.search(raw or "")
+            if m:
+                return m.group(1).strip("的了 ")
+        return ""
+
+    @staticmethod
+    def _parse_reroute_add(raw: str) -> tuple[str, bool]:
+        """→ (目标词, 是否插首位)。「先去/先买」带先后语义 → 插到途经点首位。"""
+        m = _REROUTE_ADD_RE.search(raw or "")
+        if not m:
+            return "", False
+        return m.group(1).strip("个的杯 "), m.group(0).startswith("先")
+
+    @staticmethod
+    def _pop_waypoint(waypoints: list, word: str) -> str:
+        """按名双向包含匹配删除一个途经点，返回被删名；未命中返回 ''。"""
+        for i, w in enumerate(waypoints):
+            nm = str(w.get("name") or "")
+            if nm and (word in nm or nm in word):
+                waypoints.pop(i)
+                return nm
+        return ""
+
+    #: 换站时在原站附近取多少个候选（高德按距离排，原站自己通常排第一）
+    _SWAP_SCAN = 6
+
+    async def _swap_charger(self, waypoints: list, named: str, meta) -> tuple[str, str, bool]:
+        """把路线上的充电站换成原站附近的另一家（原位替换，`waypoints` 就地改）。
+
+        → (说给用户的那一句, 换上的站名；没换成为空, 要不要挂起追问换哪个)。在原站附近找，保持它在这趟路上的位置
+        （目的地附近的站仍在目的地附近，沿途补电点仍在原来那一段）；排除原站与路线上已有的点。路线上有几个充电站又没点名
+        换哪个 ⇒ 反问、挂起，不猜；点名可以是站名的一段，也可以是序号（续接轮「换第二个」，按路线上充电站的先后数）。
+        只有一个途经点但名字认不出是充电站 ⇒ 用原站附近的充电站搜索结果核实，核实不了就不换。
+        """
+        idx = [i for i, w in enumerate(waypoints) if is_charger_name(str(w.get("name") or ""))]
+        if len(idx) > 1 and named:
+            n = ordinal_in(named)
+            picked = ([idx[n - 1]] if 0 < n <= len(idx) else
+                      [i for i in idx if named in str(waypoints[i].get("name") or "")
+                       or str(waypoints[i].get("name") or "") in named])
+            idx = picked or idx
+        verify = not idx and len(waypoints) == 1
+        if verify:
+            idx = [0]
+        if not idx:
+            return "当前路线上没有途经的充电站，要加一个可以说「顺路加个充电站」。", "", False
+        if len(idx) > 1:
+            names = "、".join(str(waypoints[i].get("name") or "") for i in idx)
+            return f"路线上有{len(idx)}个充电站：{names}。您要换哪一个？说「换第二个」这样的序号就行。", "", True
+        i = idx[0]
+        old = waypoints[i]
+        old_name = str(old.get("name") or "")
+        try:
+            found = await self.poi.search("充电站", near=GeoPoint(lat=old["lat"], lng=old["lng"]),
+                                          limit=self._SWAP_SCAN, meta=meta)
+        except ProviderError as e:
+            logger.warning("swap charger search failed: %s", e)
+            return "充电站信息暂时拿不到，路线保持不变。", "", False
+
+        # 搜索结果是不是路线上的某个点：判据 `runtime.route_stops`（编排合并途经点、充电排除路线上的站同一份）
+        if verify and not any(same_stop(p, old) for p in found):
+            return "当前路线上没有途经的充电站，要加一个可以说「顺路加个充电站」。", "", False
+        pick = next((p for p in found if p.lat is not None and p.lng is not None
+                     and not on_route(p, waypoints)), None)
+        if pick is None:
+            return f"{old_name}附近暂时没找到别的充电站，路线保持不变。", "", False
+        waypoints[i] = {"name": pick.name, "lat": pick.lat, "lng": pick.lng}
+        km = self._rough_km(old["lat"], old["lng"], pick.lat, pick.lng)
+        return f"已把途经点{old_name}换成{pick.name}（离原来那个约{km:.1f}公里）", pick.name, False
+
+    async def _reroute(self, intent, ctx, meta) -> AgentResult:
+        """G8：增量调整当前活动路线（删/加途经点、换路线策略、改目的地、换起点）。
+
+        只动被点名的那一项，其余约束（目的地/时限/策略/其余途经点）保持并重出
+        G1 时限判定。产出仍是 navigate action（非危险动作，与 navigate_to 同级），
+        坐标全部来自 meta 注入的路线会话与本轮高德接地——不经 LLM 转手。
+
+        C8（2026-08-28，QA P1-08）：`origin` 是本条**新补的一维**。此前用户在导航中
+        说「从深圳欢乐海岸出发去世界之窗」，planner 选 reroute 没错——错的是这个
+        intent **少一维**：起点在算路、话术、卡片三处全是硬编码的「当前位置」。
+        补法与 `_route_plan_to` 同款（`origin` 非空时三处一起换），解析不出走
+        `_resolve_point` 的「绝不悄悄回落当前位置」语义诚实反问。
+        """
+        raw_text = (intent.raw_text or "").strip()
+        session = self._active_route_from(meta)
+        if not session:
+            return AgentResult(
+                speech="当前没有正在进行的导航。直接说「导航去某地」，我就为您规划路线。",
+                follow_up="例如『导航去万象天地，顺路买杯咖啡』")
+
+        # ⓪ 换起点（C8）：**先于所有改动判**——解析不出要诚实反问，不能在改完
+        #    目的地/途经点之后才发现起点没着落。占位与原话里没有的起点不算（`_origin_text`）
+        origin_text = self._origin_text(intent, meta)
+        origin_pair = None
+        if origin_text:
+            o_name, o_pt = await self._resolve_point(origin_text, ctx, meta)
+            if o_pt is None:
+                if self._lookup_unavailable():
+                    return self._map_unavailable(origin_text)
+                return AgentResult(
+                    status=NEED_SLOT,
+                    speech=f"我没找到您说的起点「{o_name or origin_text}」，"
+                           "换个说法再试试？",
+                    follow_up="可以说「从深圳北站出发」",
+                    missing_slots=["origin"])
+            origin_pair = (o_name, o_pt)
+
+        orig_dest = session["destination"]
+        dest_name, dest_lat, dest_lng = orig_dest, session["lat"], session["lng"]
+        waypoints = list(session.get("waypoints") or [])
+        strategy = str(session.get("strategy") or "")
+        arrive_by_ts = session.get("arrive_by_ts")
+        new_arrive = self._arrive_by_from(intent, raw_text)
+        if new_arrive and arrive_by_ts:
+            # 裸时刻（「7点半」没有段位）按「未来最近一次」消歧在凌晨会落到 07:30；
+            # 改口时旧时限就是段位的证据——同一个晚上的 19:00 改成 19:30，不是明早。
+            # 只在原话 / 槽值都没带段位词时就近旧时限取 ±12h 那一侧。
+            new_arrive = self._anchor_bare_hour(
+                new_arrive, int(arrive_by_ts),
+                f"{intent.slots.get('arrive_by') or ''} {raw_text}")
+        notes: list[str] = []
+        changed = False
+        if new_arrive and int(new_arrive) != int(arrive_by_ts or 0):
+            # 本轮新说了时限则覆盖；「别迟到」保持原值。**改时限本身就是一次改动**
+            # （真栈 TF1，2026-09-20）：「改成7点半前到就行」此前把新时限记下了却落到
+            # 「您想怎么调整当前路线？」——用户改的那一项恰恰不在「改动」清单里。
+            arrive_by_ts = new_arrive
+            notes.append(f"到达时限改为{self._fmt_clock(new_arrive)}")
+            changed = True
+
+        # ① 改目的地（slot 优先，raw 兜底）：新目的地走 _find_destination 全套接地
+        #    （R1 强校验/类目锚词/行政级判定全部生效），途经点保留。
+        mentioned_pickup_word = _pickup_person(raw_text)
+        after_pickup = _REROUTE_AFTER_PICKUP_RE.search(raw_text) \
+            if mentioned_pickup_word else None
+        pickup_word = _explicit_positive_pickup_person(raw_text)
+        promote_current_to_waypoint = bool(after_pickup and pickup_word)
+        # 原话里的「接人后去 X」比模型填到 destination/add_waypoint 哪一格更权威。
+        # MiniMax 真栈曾把 X 填进 add_waypoint，导致路线顺序被完整反转。
+        new_dest = after_pickup.group(1).strip(" 。，,的") if after_pickup \
+            else (intent.slots.get("destination") or "").strip()
+        if not new_dest:
+            m = _REROUTE_DEST_RE.search(raw_text)
+            if m:
+                new_dest = m.group(1).strip(" 。，,的")
+                if not raw_text.startswith("目的地") and _route_preference_only(new_dest):
+                    new_dest = ""
+                # 「改成7点半前到就行」的捕获是一个**时刻**，不是地名（真栈 TF1 第 2 次取样：
+                # 它被拿去搜 POI，答「目的地已改为东方之门(地铁站)」——用户只改了时限）。
+                # 判据复用 `parse_clock_time`（唯一实现）：能解成时刻的捕获不当目的地。
+                elif not raw_text.startswith("目的地") and (
+                        _parse_arrive_by(new_dest) is not None
+                        or _CLOCK_LIKE_RE.match(new_dest)):
+                    new_dest = ""
+        if new_dest and not self._dest_matches(new_dest, orig_dest):
+            near = await self._current_position(ctx, meta)
+            _resolved, results = await self._find_destination(new_dest, meta, near=near)
+            if results:
+                first = results[0]
+                dest_name, dest_lat, dest_lng = first.name, first.lat, first.lng
+                notes.append(f"目的地已改为{first.name}")
+                if promote_current_to_waypoint and not any(
+                        self._dest_matches(orig_dest, str(w.get("name") or ""))
+                        for w in waypoints):
+                    waypoints.append({"name": orig_dest,
+                                      "lat": session["lat"], "lng": session["lng"]})
+                    notes.append(
+                        f"先到{orig_dest}接{_person_display(pickup_word)}")
+                changed = True
+            else:
+                return AgentResult(
+                    status=NEED_SLOT,
+                    speech=f"暂时没找到「{new_dest}」，目的地保持{orig_dest}不变。"
+                           "请补充城市或换个说法。",
+                    missing_slots=["destination"])
+
+        # ①½ 换充电站（CA2-19）：「换一个充电站」= 路线上那个充电站换成原站附近的另一家，原位替换，
+        #    其余约束不动。换不成（路线上没有 / 有几个又没点名 / 附近没别的）⇒ 如实说、不动路线、不发导航。
+        swapped = ""
+        # 续接「换哪一个」时下发的原话是本轮回答（「换第二个」），换站说法认不出；这一步被规划时那句「换一个充电站」由引擎
+        # 恢复挂起时随 meta 下发（`STEP_ORIGIN_META`）。新请求里光说「第二个」没有它，不当换站
+        planned = str((meta or {}).get(STEP_ORIGIN_META) or "")
+        if asks_to_swap_charger(raw_text) or asks_to_swap_charger(planned):
+            note, swapped, ask = await self._swap_charger(
+                waypoints, (intent.slots.get("remove_waypoint") or "").strip(), meta)
+            if ask:
+                # 几个充电站又没点名换哪个：挂起追问，下一句「换第二个」续接这一步（`remove_waypoint` 声明了序号槽形）。
+                # 不给 follow_up：手机端会把它整句做成 chip 原样发出，两个选项塞不进一句
+                return AgentResult(status=NEED_SLOT, speech=note, missing_slots=["remove_waypoint"])
+            if not swapped:
+                return AgentResult(speech=note, follow_up="也可以说「顺路加个充电站」或「换条路」")
+            notes.append(note)
+            changed = True
+
+        # ② 删途经点：按名包含匹配；泛指（「那个途经点」）或单途经点时删最近加入的。
+        remove_word = (intent.slots.get("remove_waypoint") or "").strip() \
+            or self._parse_reroute_remove(raw_text)
+        if swapped and (is_charger_name(remove_word) or _REROUTE_GENERIC_WP_RE.search(remove_word)
+                        or ordinal_in(remove_word)):
+            remove_word = ""      # 被换掉的那个已经换完；泛指词 / 续接轮的序号再删一次会把刚换上的站删掉
+        if remove_word and not self._dest_matches(remove_word, orig_dest):
+            removed = self._pop_waypoint(waypoints, remove_word)
+            if not removed and waypoints and (
+                    _REROUTE_GENERIC_WP_RE.search(remove_word)
+                    or len(waypoints) == 1):
+                removed = waypoints.pop(-1).get("name", "")
+            if removed:
+                notes.append(f"已去掉途经点{removed}")
+                changed = True
+            elif waypoints:
+                notes.append(f"途经点里没找到「{remove_word}」，路线保持不变")
+            else:
+                notes.append("当前路线没有途经点")
+        elif remove_word and not new_dest:
+            # 点名不去的是目的地本身且没给新目的地：终止导航归 HMI/端侧，引导改道
+            return AgentResult(
+                speech=f"您是想不去{orig_dest}了吗？想改去别的地方，"
+                       "直接说「导航去某地」或「目的地改成某地」就行。",
+                follow_up="也可以说『取消途经点某某』只调整顺路安排")
+
+        # ③ 加途经点：类目词映射后就近解析（当前位置优先，其次目的地）。
+        add_word, prepend = "", False
+        slot_add = (intent.slots.get("add_waypoint") or "").strip()
+        if slot_add:
+            add_word, prepend = slot_add, ("先" in raw_text[:raw_text.find(slot_add) + 1]
+                                           if slot_add in raw_text else False)
+        else:
+            add_word, prepend = self._parse_reroute_add(raw_text)
+        if swapped and is_charger_name(add_word):
+            add_word = ""         # 换站已经把新站放进路线，不在当前位置附近再加一个
+        if (add_word and add_word not in (remove_word or "")
+                and not self._dest_matches(add_word, dest_name)):
+            keyword = self._stop_keyword(add_word)
+            # 起点被显式换掉时，顺路点也该按**新起点**找——「当前位置」这时候
+            # 不再是这趟路的起点（C8）。
+            current = origin_pair[1] if origin_pair else current_location_from_meta(meta)
+            near = (GeoPoint(lat=current.lat, lng=current.lng) if current
+                    else GeoPoint(lat=dest_lat, lng=dest_lng))
+            # 点名的就是路线上已有的那一个（充电步推荐的站被模型接成 add_waypoint）⇒ 如实说，不搜、不换成别处
+            want = plain_name(add_word)
+            already = next((w for w in waypoints if plain_name(w.get("name")) == want), None)
+            found = []
+            if already is None:
+                try:
+                    # 多取几个：类目词（「充电站」）跳过路线上已有的点（2026-10-10 真栈 swap2：同一个充电站被加了两遍）
+                    found = await self.poi.search(keyword, near=near, limit=self._SWAP_SCAN, meta=meta)
+                except ProviderError as e:
+                    logger.warning("reroute add-waypoint search failed: %s", e)
+            exact = next((p for p in found if plain_name(p.name) == want), None)
+            if exact is not None and on_route(exact, waypoints):
+                already = next(w for w in waypoints if same_stop(exact, w))
+            pick = None if already is not None else (
+                exact or next((p for p in found if not on_route(p, waypoints)), None))
+            if pick is not None:
+                wp = {"name": pick.name, "lat": pick.lat, "lng": pick.lng}
+                if prepend:
+                    waypoints.insert(0, wp)
+                else:
+                    waypoints.insert(self._cheapest_slot(waypoints, wp, current, (dest_lat, dest_lng)), wp)
+                notes.append(f"已顺路加上{pick.name}")
+                changed = True
+            elif already is not None:
+                notes.append(f"{already.get('name')}已经在路线上了")
+            elif found:
+                notes.append(f"附近的{add_word}都已经在路线上了")
+            else:
+                notes.append(f"附近暂时没找到{add_word}")
+
+        # ④ 换路线：带偏好走 _route_strategy；裸「换条路」在避堵/不走高速间轮换。
+        pref_strategy, pref_note = _route_strategy(
+            f"{intent.slots.get('route_pref') or ''} {raw_text}")
+        if pref_strategy:
+            strategy, note = pref_strategy, pref_note.rstrip("。")
+            notes.append(note)
+            changed = True
+        elif _REROUTE_CHANGE_ROUTE_RE.search(raw_text):
+            strategy = "4" if strategy != "4" else "6"
+            notes.append("已按避开拥堵重新规划" if strategy == "4"
+                         else "已按不走高速重新规划")
+            changed = True
+
+        if origin_pair:
+            notes.append(f"起点改为{origin_pair[0]}")
+            changed = True
+
+        if not changed and not notes:
+            return AgentResult(
+                speech="您想怎么调整当前路线？可以说「某某不去了」「顺路加个加油站」"
+                       "「换条避堵的路」或「目的地改成某地」。",
+                follow_up="告诉我要调整哪一项即可")
+
+        # ⑤ 重算路线（起点 →（途经点）→ 目的地）+ G1 时限判定 + 写回会话。
+        #    起点：用户明说的 origin 优先于本轮 GPS（C8，同 `_navigate_payload` 的口径）。
+        origin_label = origin_pair[0] if origin_pair else "当前位置"
+        payload = self._navigate_payload(dest_name, dest_lat, dest_lng, meta,
+                                         origin_pair[1] if origin_pair else None)
+        if waypoints:
+            payload["waypoints"] = [dict(w) for w in waypoints]
+        distance_km = duration_min = 0
+        current = origin_pair[1] if origin_pair else current_location_from_meta(meta)
+        if current:
+            try:
+                route = await self.poi.get_route(
+                    GeoPoint(lat=current.lat, lng=current.lng),
+                    GeoPoint(lat=dest_lat, lng=dest_lng), meta=meta,
+                    strategy=strategy,
+                    waypoints=[GeoPoint(lat=w["lat"], lng=w["lng"])
+                               for w in waypoints] or None)
+                distance_km = route.get("distance_km") or 0
+                duration_min = route.get("duration_min") or 0
+            except Exception as e:       # best-effort：算不出只报调整结果
+                logger.debug("reroute route recalc unavailable: %s", e)
+        deadline_note, extra = self._deadline_note(duration_min, arrive_by_ts)
+        wp_names = "、".join(str(w["name"]) for w in waypoints)
+        head = "；".join(notes) + f"。当前路线：{origin_label} → " \
+            + (f"{wp_names} → " if wp_names else "") + dest_name
+        if distance_km:
+            dur = self._fmt_dur(duration_min)
+            head += f"，全程约{distance_km}公里" + (f"、约{dur}" if dur else "")
+        card = attach({"type": "route_plan", "origin": origin_label,
+                       "destination": dest_name,
+                       "waypoints": [{"name": w["name"], "address": ""}
+                                     for w in waypoints],
+                       "distance_km": distance_km, "duration_min": duration_min,
+                       **extra}, self.poi)
+        result = AgentResult(
+            speech=head + "。" + deadline_note, ui_card=card,
+            data={"destination": dest_name, "lat": dest_lat, "lng": dest_lng,
+                  "waypoints": [dict(w) for w in waypoints], **extra},
+        ).action("navigate", payload)
+        return self._stamp_route_session(
+            result, dest_name, dest_lat, dest_lng, waypoints=waypoints,
+            strategy=strategy, arrive_by_ts=arrive_by_ts)
+
+    @classmethod
+    def _cheapest_slot(cls, waypoints: list, wp: dict, start, dest) -> int:
+        """没说先后的新途经点插在哪：全程（直线近似）多绕得最少的位置（2026-10-10 真栈 swap2）。
+
+        修前一律排到最后：路线上已有目的地旁的充电站，再加一个起点旁的站，就成了「先去目的地旁、绕回起点、再去目的地」，
+        全程 21.6 公里绕成 52.5 公里。起点或坐标缺失 ⇒ 照旧排到最后。同样多绕时取靠后的位置（与修前一致）。
+        """
+        try:
+            here = (float(start.lat), float(start.lng)) if start else None
+            stops = [(float(w["lat"]), float(w["lng"])) for w in waypoints]
+            new = (float(wp["lat"]), float(wp["lng"]))
+            end = (float(dest[0]), float(dest[1]))
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return len(waypoints)
+        if here is None:
+            return len(waypoints)
+        points = [here, *stops, end]
+
+        def km(a, b):
+            return cls._rough_km(a[0], a[1], b[0], b[1])
+
+        costs = [km(points[i], new) + km(new, points[i + 1]) - km(points[i], points[i + 1])
+                 for i in range(len(points) - 1)]
+        best = min(costs)
+        return max(i for i, cost in enumerate(costs) if cost <= best + 1e-9)
+
+    async def _remember_visited(self, ctx, name, lat, lng) -> None:
+        """导航成功落一条轻量情景轨迹（G6「上次去的那个地方」数据源）。best-effort。
+
+        挂点必须枚举全部执行路径（本仓第三次应验）：批 C 首版只挂 _route_plan_to，
+        而 search_poi 的「带我去X」自动导航分支绕过它——真栈「圆圆的湖→滴水湖」
+        走的正是那条路径，轨迹整条漏写。
+        """
+        if ctx is None or not name:
+            return
+        try:
+            await ctx.remember(
+                f"{time.strftime('%Y-%m-%d')} 导航去过{name}",
+                kind="episodic", scope="episodic.place",
+                provenance="agent_inferred", confidence=0.9,
+                privacy_level="sensitive",
+                value={"name": name, "lat": lat, "lng": lng, "ts": int(time.time())})
+        except Exception as e:
+            logger.debug("navigation episodic save skipped: %s", e)
+
+    @staticmethod
+    def _battery_reading(ctx, meta) -> Reading:
+        """当前电量读数（连同来源）；裸 `vehicle_battery` 只是测试 / 旧通道兜底，读不到 ⇒ value None。"""
+        reading = (ctx.vehicle_reading("battery")
+                   if ctx is not None and hasattr(ctx, "vehicle_reading") else Reading("battery"))
+        if reading.known:
+            return reading
+        raw = str((meta or {}).get("vehicle_battery", "") or "").strip()
+        return Reading("battery", raw) if raw else reading
+
+    @staticmethod
+    def _range_advisory(distance_km, battery: Reading) -> str:
+        """里程 vs 电量续航的补能提示；不适用 / 读不到电量返回空串。0% 是合法读数（照样提醒）。"""
+        pct = battery.percent() if isinstance(battery, Reading) else None
+        try:
+            dist = float(distance_km or 0)
+        except (TypeError, ValueError):
+            return ""
+        if pct is None or dist <= 0:
+            return ""
+        full_range = float(os.getenv("CHARGING_FULL_RANGE_KM", "500") or 500)
+        usable = pct / 100.0 * full_range
+        if dist <= usable * 0.85:
+            return ""
+        return (f"提醒一下：当前电量约{pct}%{battery.spoken_note()}（估算续航约{round(usable)}公里），"
+                f"本程约{round(dist)}公里，建议途中补能，可以说「沿途帮我找充电站」。")
+
+    @staticmethod
+    def _dest_matches(query: str, poi_name: str, city: str = "") -> bool:
+        """目的地名与 POI 名强校验（R1，包含式）。
+
+        `landmark.name_matches` 的「2 字公共子串」对**用户直报的目的地名**太松——
+        「广州塔」和「广州仄仄科技有限公司」共享「广州」也算匹配，带 near 偏置的
+        关键词搜索会让就近弱匹配顶掉真地标（旅程 B3-2/A2-4/B1-2 三例同族）。
+        归一（去括号注记/空白/连接符）后原话含在地点名里才算；反方向（地点名比原话短）只认原话以它打头
+        （「南京南站高铁站」之于「南京南站」），或原话 = 这个地点所在城市 + 它的名字（「上海外滩」之于上海的「外滩」，
+        `city` 是该地点的城市）。地点名只是原话的尾巴不算——「火车站」之于「厦门火车站」缺的正是最有区分度的「厦门」
+        （2026-10-04 A/B：近处搜索半径放大到城市级后，深圳一个就叫「火车站」的点顶掉了厦门站）。
+        原话里有口头叫法表里的说法（`_SPOKEN_ALIASES`：「7-11」之于「7-ELEVEn」、「北大」之于「北京大学」）时，换成高德门店名里的写法、
+        两边不分大小写再比一遍。一般的拉丁字母照旧分大小写——A/B（2026-10-08）：不分大小写时「Subway」配上北京的「赛百味 SUBWAY(东方广场店)」
+        （1942 km）、「Lawson」配上 18 km 外的「LAWSON罗森」；此前名字对不上，兜底取的是最近的门店。"""
+        a, b = NavigationAgent._place_key(query), NavigationAgent._place_key(poi_name)
+        if not (a and b):
+            return False
+        c = NavigationAgent._place_key(city)
+        if NavigationAgent._names_match(a, b, c):
+            return True
+        aliased = NavigationAgent._aliased(a.casefold())
+        return bool(aliased) and NavigationAgent._names_match(aliased, b.casefold(), c)
+
+    @staticmethod
+    def _names_match(a: str, b: str, c: str) -> bool:
+        """`_dest_matches` 的本体：`a` 原话、`b` 地点名、`c` 地点所在城市，都已归一。"""
+        if a in b or a.startswith(b):
+            return True
+        if c and a.endswith(b) and a[:len(a) - len(b)] in (c, c.rstrip("市")):
+            return True
+        # 原话 = 这个地点所在城市 + 核心名、核心名含在它的全称里（「上海第六人民医院」之于上海的「上海交通大学医学院附属
+        # 第六人民医院」，「上海华山医院」之于「复旦大学附属华山医院」）：官方全称常在中间夹着「XX大学附属」，俗称是
+        # 「城市 + 后半截」。核心名至少 4 个字（「中医院」这样的太泛），城市必须是这个地点自己的城市（2026-10-07 云端直调）。
+        # 全称在城市与核心名之间夹着区县（「深圳市南山区人民医院」）的是区里的同名机构，不是原话点的这座城市的那一家
+        # （A/B：「深圳人民医院」曾因此从深圳市人民医院 19 km 落到南山区人民医院 2 km）。
+        for prefix in (c, c.rstrip("市")):
+            if not (prefix and a.startswith(prefix) and len(a) - len(prefix) >= 4):
+                continue
+            at = b.find(a[len(prefix):])
+            if at < 0:
+                continue
+            infix = b[:at]
+            for head in (c, c.rstrip("市")):
+                if head and infix.startswith(head):
+                    infix = infix[len(head):]
+                    break
+            if not infix.endswith(("区", "县", "市", "镇", "乡", "街道")):
+                return True
+        return False
+
+    @staticmethod
+    def _place_key(name: str) -> str:
+        """地名归一：去括号注记、空白与连接符（「南山书城(深圳湾店)」⇒「南山书城」）。"""
+        s = re.sub(r"[（(].*?[)）]", "", name or "")
+        return re.sub(r"[\s·,，\-—]", "", s)
+
+    #: 口头叫法 → 高德 POI 名里的写法（都是 `_place_key` 归一、casefold 之后的形式）。
+    #: 2026-10-08 云端直调（深圳南山）：这些说法名字校验对不上本地门店——「7-11」「711」「KFC」被全国重搜接到北京一个就叫这个名字的点
+    #: （1925–1944 km），「七十一便利店」「中石化加油站」「苹果店」靠兜底才落对，「北大医院」落到眼科门诊。每加一行都要有真栈红例背书；
+    #: 高德自己翻得出本地门店的英文品牌（Starbucks、Pizza Hut、Tesla…）不列。两个字的中文简称只认打头（「北大」不能配「河北大学」）。
+    _SPOKEN_ALIASES = (
+        ("7eleven", ("711", "七十一", "seveneleven")),
+        ("肯德基", ("kfc",)),
+        ("中国石化", ("中石化",)),
+        ("中国石油", ("中石油",)),
+        ("中国海油", ("中海油",)),
+        ("北京大学", ("北大",)),
+        ("apple", ("苹果",)),
+    )
+
+    @staticmethod
+    def _aliased(key: str) -> str:
+        """归一、casefold 后的原话里有表里的说法（口头叫法或高德写法本身）⇒ 口头叫法换成高德写法后的形式
+        （「711便利店」⇒「7eleven便利店」、「7eleven便利店」原样）；都没有 ⇒ ""，不做不分大小写的比较。"""
+        hit = False
+        for canonical, aliases in NavigationAgent._SPOKEN_ALIASES:
+            hit = hit or canonical in key
+            for alias in aliases:
+                if len(alias) <= 2 and not alias.isascii():
+                    if key.startswith(alias):
+                        key, hit = canonical + key[len(alias):], True
+                elif alias in key:
+                    key, hit = key.replace(alias, canonical), True
+        return key if hit else ""
+
+    @classmethod
+    def _bare_name(cls, poi) -> str:
+        """POI 归一名再去掉所在城市前缀（「深圳欢乐谷」「北京市欢乐谷」⇒「欢乐谷」）：城市名打头的是这座城的那一个。"""
+        key = cls._place_key(poi.name)
+        city = cls._place_key(getattr(poi, "city", "") or "")
+        for prefix in (city, city.rstrip("市")):
+            if prefix and key.startswith(prefix) and len(key) > len(prefix):
+                return key[len(prefix):]
+        return key
+
+    async def _far_namesake(self, description: str, top, near, meta):
+        """近处这个地点只是借了名（或名字都对不上）、本地半径外另有名字对得上的本体 ⇒ 那个本体；否则 None。
+
+        设计见 docs/design/2026-10-04-destination-borrowed-name.md。类目（加油站 / 充电站…）不问：遍地都是，没有本体；
+        近处完全同名（归一后相等，或去掉城市前缀后相等：「深圳欢乐谷」）且就在城市级搜索半径内的不问，也不多一次调用；
+        城市搜索才找到的远一点的同名（「深圳鼓浪屿」58 km）仍要看外地有没有本体（厦门鼓浪屿）。近处本身已在本地半径外的不问。
+        外地本体要以原话打头（「东方明珠广播电视塔」「北京欢乐谷」）——只在中间含着原话的（「颐和园-东门检票处」之于「东门」）不算。
+        """
+        q = self._place_key(description)
+        if (near is None or top is None or not q or not (top.lat and top.lng)
+                or self._is_category_search(description)
+                or self._beyond_local_radius(top, near) is not None
+                or (q in (self._place_key(top.name), self._bare_name(top))
+                    and self._rough_km(near.lat, near.lng, top.lat, top.lng) * 1000 <= _CITY_RADIUS_M)
+                or self._alias_names_top(q, top)):
+            return None
+        try:
+            wide = await self.poi.search(description, near=None, limit=5, meta=meta)
+        except ProviderError as e:
+            logger.warning("namesake POI search failed: %s", e)
+            _note_lookup(False)
+            return None
+        _note_lookup(True)
+        # 类目锚词在场时外地候选也要过类目复核（「南山实验小学」的济南同名 POI 是科教文化场所，R1 二期刻意不认它）
+        anchor = self._category_anchor(description)
+        return next((r for r in wide
+                     if (self._place_key(r.name).startswith(q) or self._bare_name(r).startswith(q))
+                     and self._beyond_local_radius(r, near) is not None
+                     and (not anchor or self._category_ok(r, anchor[1]))), None)
+
+    @classmethod
+    def _alias_names_top(cls, q: str, top) -> bool:
+        """原话是口头叫法表里的品牌说法、近处结果也经这张表对上（「KFC」之于「肯德基(科苑店)」）：近处那家就是用户要的，
+        连锁门店没有外地本体，不去全国找同名（2026-10-10 冻结 P2：新 key 下全国重搜接到北京一个就叫「KFC」的点，反问北京还是附近）。"""
+        aliased = cls._aliased(q.casefold())
+        if not aliased:
+            return False
+        return cls._names_match(aliased, cls._place_key(top.name).casefold(),
+                                cls._place_key(getattr(top, "city", "") or ""))
+
+    async def _ask_namesake(self, ctx, description: str, local, far, near, *,
+                            estimate: bool = False) -> AgentResult:
+        """借名歧义：外地本体在前（带城市名，选中后重新解析不会再撞同一个歧义）、近处借名在后，挂起等用户选。"""
+        city = (far.city or "").rstrip("市")
+        far_name = far.name if not city or city in far.name else f"{city}{far.name}"
+        far_km = self._beyond_local_radius(far, near)
+        local_km = round(self._rough_km(near.lat, near.lng, local.lat, local.lng), 1)
+        items = [{"id": far.id, "name": far_name, "address": far.address,
+                  "lat": far.lat, "lng": far.lng, "distance_km": far_km},
+                 {"id": local.id, "name": local.name, "address": local.address,
+                  "lat": local.lat, "lng": local.lng, "distance_km": local_km}]
+        await save_choices(ctx, NAVIGATION_DEST_CHOICES, items)
+        ask = "算到哪一个" if estimate else "去哪一个"
+        return AgentResult(
+            status=NEED_SLOT, missing_slots=["destination"],
+            speech=(f"「{description}」我找到两处：{far_name}（约{far_km}公里），"
+                    f"和附近的{local.name}（约{local_km}公里）。您要{ask}？说『第一个』或『第二个』就行。"),
+            # purpose=dest_choice：HMI 把「第N个」回填为目的地槽位续接，而不是另起一次导航
+            ui_card=attach({"type": "poi_list", "purpose": "dest_choice", "display_priority": 1,
+                            "title": f"{description} · 选择目的地", "items": items}, self.poi),
+            follow_up="选择具体目的地")
+
+    # R1 二期（接地卡 2026-08-14）：类目锚词 → 期望高德 type 关键词族。
+    # 包含式校验的隐含假设「名字包含 ⇒ 是本体」被真栈证伪——酒店/停车场/餐馆借地标
+    # 之名命名（「如家…虹桥机场…停车场」「千岛湖·山野菜」），在就近距离序里天然顶掉
+    # 本体。query 以锚词结尾时，top1 还必须过类目复核，失配走去偏置重搜救济。
+    # 每加一行都要有真栈红例背书（机场=虹桥/浦东，湖=滴水湖/西湖/千岛湖/东湖，
+    # 滩=外滩），别让它长成第二个 fast_intent（B4 纪律）。
+    _DEST_CATEGORY_ANCHORS = (
+        ("机场", ("机场",)),
+        ("湖", ("风景名胜", "自然地名", "热点地名")),
+        # 「海滩 / 沙滩」排在「滩」前（取首个命中的后缀）：只剥「滩」时「小梅沙海滩」的主干是「小梅沙海」，配不上本体
+        # 「小梅沙沙滩」，倒成了「小梅沙海洋世界」的前缀（2026-10-05 A/B）。剥两个字后主干是「小梅沙」。
+        ("海滩", ("风景名胜", "自然地名", "热点地名")),
+        ("沙滩", ("风景名胜", "自然地名", "热点地名")),
+        ("滩", ("风景名胜", "自然地名", "热点地名")),
+        # 校园族（person-pickup 卡，2026-08-20）。**它与「虹桥机场」逐字同构**：
+        # 记忆里的「南山实验小学」与官方名「深圳市南山实验教育集团鼎太小学」
+        # 隔着「教育集团」不构成连续包含 ⇒ 严格校验拒了 4km 外的正主 ⇒ 掉进
+        # 去偏置全国重搜 ⇒ 捞回**1579km 外**逐字同名的「济南市南山实验小学」。
+        # 真栈取证（2026-08-20 直连高德）：同一个词带 near 搜出来的五条全是深圳的学校，
+        # 济南那条**只在 near=None 时出现**——所以「接孩子接到济南」不是高德乱返回，
+        # 是**我们自己那条全国重搜**捞上来的。
+        # 顺序：具体级在前（`_category_anchor` 取首个命中）。
+        ("小学", ("学校", "小学")),
+        ("中学", ("学校", "中学")),
+        ("幼儿园", ("学校", "幼儿园")),
+        ("学校", ("学校",)),
+        # 类目族（2026-10-04）：「华润万家超市」「儿童医院」「协和医院」。名字常过不了包含式（「华润万家标超南区」「协和深圳医院」），
+        # 主干（「华润万家」「协和」）+ 高德类目复核能接住近处那家；类目复核把眼镜店、诊所、停车场挡在「XX医院」外。
+        # 期望族取自真栈近处候选的类目串：超市连锁里天虹记在「商场」，医院全族带「医院」（卫生院、诊所不带）。
+        ("医院", ("医院",)),
+        ("超市", ("超级市场", "超市", "商场")),
+        ("便利店", ("便利店",)),
+        ("药店", ("药房", "医药")),
+        ("药房", ("药房", "医药")),
+        ("银行", ("银行",)),
+        ("加油站", ("加油站",)),
+        ("充电站", ("充电",)),
+        ("超充", ("充电",)),
+        ("停车场", ("停车场",)),
+    )
+
+    @classmethod
+    def _category_anchor(cls, query: str) -> tuple[str, tuple[str, ...]] | None:
+        """query 以类目锚词结尾 → (锚词, 期望类目关键词族)；否则 None。
+        要求严格长于锚词：纯类目词（「机场」=就近语义）维持现状距离序。"""
+        q = (query or "").strip()
+        for suffix, expect in cls._DEST_CATEGORY_ANCHORS:
+            if q.endswith(suffix) and len(q) > len(suffix):
+                return suffix, expect
+        return None
+
+    @staticmethod
+    def _category_ok(poi: POI, expect: tuple[str, ...]) -> bool:
+        return any(k in (poi.category or "") for k in expect)
+
+    @classmethod
+    def _grounds_to(cls, description: str, poi: POI, suffix: str,
+                    expect: tuple[str, ...]) -> bool:
+        """锚词在场时的双匹配判据：类目命中期望族，且名字过严格包含**或**主干包含。
+
+        主干级是给官方名的：「虹桥机场」与「上海虹桥国际机场」因中间的「国际」不构成
+        连续包含，严格校验够不着本体——剥掉锚词后的专名主干（「虹桥」）配上类目复核，
+        名字校验管专名、类目校验管类目。主干 ≥2 字才启用（「外滩」1 字主干太弱，
+        它的本体名严格包含已够）。"""
+        if not cls._category_ok(poi, expect):
+            return False
+        if cls._dest_matches(description, poi.name, poi.city):
+            return True
+        stem = description.strip()[:-len(suffix)]
+        return len(stem) >= 2 and cls._dest_matches(stem, poi.name, poi.city)
+
+    #: 等距圆柱近似的两点距离——实现在 `agents._sdk.location`（周边检索判「本地」用同一份）
+    _rough_km = staticmethod(rough_km)
+
+    @classmethod
+    def _beyond_local_radius(cls, poi, near) -> int | None:
+        """`poi` 在本地半径之外 ⇒ 直线公里数（取整）；在半径内、或判不了（没定位 / 没坐标）⇒ None。"""
+        if near is None or poi is None or not (poi.lat and poi.lng):
+            return None
+        km = cls._rough_km(near.lat, near.lng, poi.lat, poi.lng)
+        return round(km) if km > _LOCAL_RADIUS_KM else None
+
+    @classmethod
+    def _local_only(cls, description: str, results: list, near) -> list:
+        """名字校验不过的弱匹配兜底：只在本地半径内才当目的地（话术报出实际名，用户可纠正）。
+
+        超出 ⇒ 空，调用方走「没找到」那条追问——导去另一座城的代价是一声不吭地出发，问一句便宜得多。
+        名字对得上的长途（「导航去上海外滩」）不经这里；没定位判不了远近 ⇒ 照旧。
+        """
+        far = cls._beyond_local_radius(results[0], near) if results else None
+        if far is None:
+            return results
+        logger.info("unverified destination beyond the local radius, not taken: %s → %s (%dkm)",
+                    description, results[0].name, far)
+        return []
+
+    #: 门牌地址：路名 + 门牌号（「科苑路15号」「深南大道9028号」）
+    _HOUSE_NUMBER_RE = re.compile(r"^(?P<road>.{2,}?(?:大道|路|街|道|巷))(?P<num>\d+号)$")
+
+    @classmethod
+    def _relates(cls, description: str, poi) -> bool:
+        """名字没核实的兜底结果和原话沾不沾边。2026-10-08 云端直调（深圳南山）走到兜底的 13 个中文 / 数字说法里 11 个落对、
+        靠的都是高德的相关度：简称、口头叫法、同音误识别、门牌地址；另 2 个毫不相干——「北大医院」→ 眼科门诊角膜塑形镜室、
+        「301医院」→ 医疗美容门诊部（15 个纯英文说法全部落对）。沾边认这几种（原话先去掉类目锚词与地点所在城市，口头叫法换成高德写法后再比一遍）：
+        - 打头两个字连着出现在地点名里：同音误识别（「欢乐古」之于「深圳欢乐谷」）、借了名的（「云岚国际中心」之于「云岚美容」）；
+        - 三个字以上的按顺序出现在地点名里、跨度不超过两倍：简称是全称的子序列（「中石化」之于「中国石化」、「南科大」之于
+          「南方科技大学」、「华为体验店」之于「华为授权体验店」）；
+        - 门牌地址的门牌号连着、路名按顺序出现在地点地址里（「科苑路15号」之于地址「科苑北路15号」的科兴科学园）；
+        - 地点名（去掉它自己的城市前缀）含在原话里：原话前面多了区县之类的限定（「上海长宁阳光小区」之于「阳光小区」）。
+        纯拉丁字母的说法由高德翻成本地门店（「Pizza Hut」→ 必胜客、「Tesla」→ 特斯拉），字面上判不了，照旧采信；
+        去完不足两个字的也照旧采信。"""
+        core = cls._place_key(description).casefold()
+        anchor = cls._category_anchor(description)
+        if anchor and core.endswith(anchor[0]) and len(core) > len(anchor[0]):
+            core = core[:-len(anchor[0])]
+        city = cls._place_key(getattr(poi, "city", "") or "")
+        for prefix in (city, city.rstrip("市")):
+            if prefix and core.startswith(prefix) and len(core) > len(prefix):
+                core = core[len(prefix):]
+                break
+        if len(core) < 2 or (core.isascii() and not core.isdigit()):
+            return True
+        name = cls._place_key(poi.name).casefold()
+        bare = cls._bare_name(poi).casefold()
+        for form in filter(None, dict.fromkeys((core, cls._aliased(core)))):
+            if form[:2] in name or (len(form) >= 3 and cls._in_order(form, name)):
+                return True
+            if len(bare) >= 2 and bare in form:
+                return True
+        m = cls._HOUSE_NUMBER_RE.match(core)
+        address = cls._place_key(getattr(poi, "address", "") or "")
+        return bool(m and m["num"] in address and cls._in_order(m["road"], address))
+
+    #: 地理编码里算「这个门牌」的级别（高德 level）；只到道路 / 区县的不算
+    _HOUSE_LEVELS = ("门址", "门牌号")
+
+    async def _house_address_point(self, address: str, near, meta) -> POI | None:
+        """门牌地址 → 当前城市里的门址坐标（城市取当前位置的逆地理编码）；拿不到、不在当前城市、只到道路级 ⇒ None，调用方照旧检索。"""
+        geocode = getattr(self.poi, "geocode_address", None)
+        reverse = getattr(self.poi, "reverse_geocode", None)
+        if geocode is None or reverse is None:
+            return None
+        try:
+            here = await reverse(near.lng, near.lat, meta=meta)
+            city = (getattr(here, "city", "") or "").strip()
+            hit = await geocode(address, city, meta=meta) if city else None
+        except ProviderError as e:
+            logger.warning("house address geocode failed: %s", e)
+            return None
+        if not hit or hit.get("level") not in self._HOUSE_LEVELS:
+            return None
+        got_city = str(hit.get("city") or "").strip()
+        if got_city and got_city.rstrip("市") != city.rstrip("市"):
+            return None
+        try:
+            lng_s, lat_s = str(hit.get("location") or "").split(",")[:2]
+            lat, lng = float(lat_s), float(lng_s)
+        except ValueError:
+            return None
+        return POI(id=f"addr_{address}", name=address, address=str(hit.get("formatted_address") or address),
+                   lat=lat, lng=lng, city=got_city or city)
+
+    @staticmethod
+    def _in_order(needle: str, hay: str) -> bool:
+        """`needle` 的字按顺序出现在 `hay` 里，跨度不超过它长度的两倍（「南科大」之于「南方科技大学」算；
+        「南山区科技园大厦」里的南…科…大隔得太开，不算）。"""
+        span = 2 * len(needle)
+        for start, ch in enumerate(hay):
+            if ch != needle[0]:
+                continue
+            i, pos = 1, start + 1
+            while i < len(needle) and pos < len(hay) and pos - start < span:
+                if hay[pos] == needle[i]:
+                    i += 1
+                pos += 1
+            if i == len(needle):
+                return True
+        return False
+
+    @staticmethod
+    def _ask_person_place(person_word: str) -> AgentResult:
+        """不知道这个人在哪 → **教学问**（诚实追问 + 告诉用户怎么把它教给系统）。
+
+        **两个调用点共用同一份**（槽值路径与原话接送兜底）：话术分叉出第二份的那天，
+        探针的分支签名判据（`follow_up_any`）就再也说不清自己验的是哪一条了。
+        """
+        who = _person_display(person_word)
+        return AgentResult(
+            status=NEED_SLOT,
+            speech=f"我还不知道你{who}平时在哪，你说个地方我就记住了。",
+            follow_up=f"可以说「我{who}在XX上班」或「我{who}在XX小学上学」，"
+                      "以后我就能直接带你去。",
+            missing_slots=["destination"])
+
+    async def _find_destination(self, description: str, meta, near=None,
+                                limit: int = 3, page: int = 1,
+                                strict: bool = True) -> tuple[str, list]:
+        """解析目的地 POI。
+
+        视觉地标描述（“像笋的建筑”）：高德直接搜常返回勉强的模糊匹配，必须先经 LLM
+        解析正式名称再由地图验证，避免被垃圾匹配抢占（否则导航到错误 POI）。
+        普通目的地：原话直搜优先（带当前位置 near，使“最近的/附近的粤菜馆”按距离就近），
+        top1 名字过 `_dest_matches` 强校验——不匹配先去偏置全国重搜（知名地标全国序第一），
+        再走地标解析；都验证不出保留原结果兜底（话术会报出实际名，用户可纠正，不无中生有）。
+        行政级目的地（「导航去惠州」）经 geocode level 判定，直接导航到行政中心，
+        不给就近弱匹配（0.3km 的「惠州出口」）机会。
+        limit：类目就近查询给更多候选（5）供用户选目的地；具体地点解析用默认（3）。
+        """
+        async def _direct(bias, n: int = 0, **kw) -> list:
+            try:
+                found = await self.poi.search(description, near=bias, limit=n or limit,
+                                              page=page, meta=meta, **kw)
+            except ProviderError as e:
+                logger.warning("destination POI search failed: %s", e)
+                _note_lookup(False)
+                return []
+            _note_lookup(True)
+            return found
+
+        async def _via_landmark(guess: bool = False) -> tuple[str, list]:
+            for candidate in await self._landmark_candidates(description):
+                # 先在城市范围里按名字找：「山姆会员店」→ 模型给「山姆会员商店」，全国第一是北京的店，城市里就有前海店
+                # （2026-10-04 A/B）。只认严格对上的——模糊相近的本地小点不算（「厦门站」不能落到本地的「厦门园(公交站)」）。
+                if near is not None:
+                    try:
+                        local = await self.poi.search(candidate, near=near, limit=limit, meta=meta,
+                                                      rank="weight", radius_m=_CITY_RADIUS_M)
+                    except ProviderError as e:
+                        logger.warning("landmark candidate local search failed: %s", e)
+                        _note_lookup(False)
+                        local = []
+                    else:
+                        _note_lookup(True)
+                    if (local and self._dest_matches(candidate, local[0].name, local[0].city)
+                            and self._beyond_local_radius(local[0], near) is None
+                            and self._keeps_dropped_head(description, candidate, local[0])):
+                        return candidate, local
+                try:
+                    results = await self.poi.search(candidate, limit=limit, meta=meta)
+                except ProviderError as e:
+                    logger.warning("landmark candidate POI search failed: %s", e)
+                    _note_lookup(False)
+                    continue
+                _note_lookup(True)
+                # 高德对非官方名会返回同位置的邻近无关 POI（搜“华润春笋大厦”→V东滨店）：
+                # 只接受 top 结果名与候选实质匹配的，否则换下一个候选（如官方名“中国华润大厦”）。
+                if results and name_matches(candidate, results[0].name):
+                    # 宽松匹配（2 字公共子串）只在本地半径内算验证通过；候选与结果严格包含的照旧跨城。`2f8f92be` 真栈：模型把
+                    # 「云岚国际中心」原样当候选，北京的「云岚之境美容美体中心」共享「云岚 / 中心」就被当成已验证，出发去 1940 km 外。
+                    # `guess`：原话不是地标描述、只是名字没对上才走到这里——候选和原话一个字都不沾，就是模型猜出来的名胜（`a7e664f3`
+                    # 真栈：「第二家」→ 苏州的「东方之门」1478 km，它就在解析提示的示例里），同样只在本地半径内采信
+                    grounded = not guess or name_matches(description, candidate)
+                    if ((grounded and self._dest_matches(candidate, results[0].name, results[0].city))
+                            or self._beyond_local_radius(results[0], near) is None):
+                        return candidate, results
+                    logger.info("loose landmark match beyond the local radius, not taken: %s → %s",
+                                candidate, results[0].name)
+            return "", []
+
+        if is_landmark_description(description):
+            name, results = await _via_landmark()
+            if results:
+                return name, results
+            # 地标候选验证不出来 → 退回原话直搜；这份结果没过任何名字校验 ⇒ 只在本地半径内才采信
+            results = self._local_only(description, await _direct(near), near)
+            return (description, results) if results else ("", [])
+
+        # R1：短名先过行政级判定（「惠州」「珠海」这类裸城市名不带 市/省 后缀，
+        # 关键词搜索会顶出就近弱匹配）。仅 strict 且 ≤4 字触发，控制额外 geocode 调用面。
+        geocode_level = getattr(self.poi, "geocode_level", None)
+        if strict and geocode_level and 2 <= len(description) <= 4:
+            try:
+                level, loc = await geocode_level(description, meta=meta)
+            except Exception as e:
+                logger.debug("geocode level probe failed: %s", e)
+                level, loc = "", ""
+            if level in ("国家", "省", "市", "区县") and loc and "," in loc:
+                try:
+                    lng_s, lat_s = loc.split(",")[:2]
+                    lat_f, lng_f = float(lat_s), float(lng_s)
+                except ValueError:
+                    lat_f = lng_f = None
+                # R1 二期（接地卡 2026-08-14）：区县级裸名多义面大——高德 geocode 的
+                # 全国唯一解会选错省的同名区划（实测「西湖」→台湾苗栗西湖乡、「金山」→
+                # 台湾新北金山区、「东湖」→南昌东湖区），而用户裸报区县名的心智是本地。
+                # 区县级仅在「有定位且 ≤150km」时可信，否则 fall through 到关键词搜索
+                # （类目锚词校验接手「西湖」这类景点同名）；市及以上唯一性好（佛山/惠州），
+                # 跨城导航合法，维持无条件直达。
+                trustworthy = level != "区县" or (
+                    lat_f is not None and near is not None
+                    and self._rough_km(near.lat, near.lng, lat_f, lng_f) <= _LOCAL_RADIUS_KM)
+                if lat_f is not None and trustworthy:
+                    admin_poi = POI(id=f"admin_{description}", name=description,
+                                    address=f"{description}（市区中心）",
+                                    lat=lat_f, lng=lng_f)
+                    return description, [admin_poi]
+
+        # 门牌地址（「深南大道9028号」「南山区科苑路15号」）：关键字检索按地点名找，接到的是附近名字沾边的点、模型猜的楼，或外地的
+        # 同名路（2026-10-08：「南海大道1088号」→ 海口的「南海大道」478 km，「深南大道9028号」→ 深圳湾体育中心）。高德地理编码对
+        # 门牌地址给出门址级坐标（深圳 12 个门牌地址全部命中、0.1–1 km）；只认当前城市里的门址，拿不到就照旧检索
+        if strict and near is not None and self._HOUSE_NUMBER_RE.match(self._place_key(description)):
+            point = await self._house_address_point(description, near, meta)
+            if point is not None:
+                return description, [point]
+
+        # 具名目的地（不是类目、不是「最近 / 附近」）：综合排序 + 城市级半径。缺省的周边搜索是 5 km、按距离排，5 km 内借了名的
+        # 店天然排第一、真身在 5 km 外根本不在候选里（2026-10-04 真栈：大梅沙→推拿店、蛇口港→公安局、东门→食堂）。
+        # 类目与就近查询要的正是最近的那个，保持按距离。设计：docs/design/2026-10-04-local-destination-ranking.md
+        named = strict and near is not None and not self._is_category_search(description)
+        anchor = self._category_anchor(description)
+        # 带类目锚词的类目查询（「华润万家超市」「儿童医院」）：同一次就近搜索多取几条供双匹配扫描——最近的分店 / 本城那家
+        # 常在前十却不在前三（2026-10-04 近处候选取证：深圳市儿童医院排第 8）。返回前截回 limit，卡片与话术形状不变；
+        # 只在第 1 页扫——「换一批」翻页时每页条数一变，偏移就错位
+        wide = strict and near is not None and not named and anchor is not None and page == 1
+        scan = await (_direct(near, rank="weight", radius_m=_CITY_RADIUS_M) if named
+                      else _direct(near, n=max(limit, _ANCHOR_SCAN)) if wide else _direct(near))
+        results = scan[:limit]
+        if results:
+            # 只有类目词的短查询（「超市」「便利店」「医院」）要的是最近的那一家，按距离排的近处结果就是答案——
+            # 名字里不一定带这个词（最近的便利店叫「7-ELEVEn」），拿名字去校验只会把人送到远处一个恰好叫「便利店」的点。
+            if not strict or self._bare_category(description):
+                return description, results
+            # R1 二期：包含式名字校验之上叠类目锚词复核——「名字包含 ⇒ 是本体」被
+            # 真栈证伪（「虹桥机场」→如家…停车场、「滴水湖」→雅悦酒店、「千岛湖」→
+            # 上海的千岛湖鱼头馆，均名字包含放行、距离序顶掉本体，且本体根本不在
+            # near 候选集里）。锚词失配视同校验失败，走同一条去偏置重搜救济。
+            top_named = self._dest_matches(description, results[0].name, results[0].city)
+            if top_named and (not anchor or self._category_ok(results[0], anchor[1])):
+                return description, results
+            if anchor:
+                # 先在候选集内找名字+类目双匹配（零 API）：「东湖」→#2 东湖绿地
+                # （风景名胜），比全国重搜接到 500km 外的武汉东湖更合就近意图。
+                # ⚠ **从 results[0] 开始扫，不是 results[1:]**（2026-08-20 修）：
+                # 上面那道 `top_named` 用的是**严格**包含，而这里的 `_grounds_to`
+                # 还认**主干**匹配——把 top1 排除掉，等于让排第一的候选受一条比
+                # 后面所有候选都严的判据，而它恰恰是就近序最靠前的那个。
+                # 「南山实验小学 → 鼎太小学」就断在这：正主是 results[0]，
+                # 严格包含够不着它，主干规则够得着，却轮不到它被试。
+                for r in scan:
+                    if self._grounds_to(description, r, *anchor):
+                        return description, ([r] + [x for x in scan if x is not r])[:limit]
+            # R1：就近弱匹配/借名 POI 顶上了 top1 → 先在本城按名字找（「会展中心」这类通名，全国第一在别的城市），
+            # 再去偏置全国重搜（真地标全国序靠前）。带类目词的查询（医院 / 银行 / 超市…）跨城只认原话点了那座城市的
+            # （2026-10-04：「儿童医院」全国第一是首都医科大学附属北京儿童医院，1942 km）；它们不走本城重搜——
+            # 按相关度排的本城结果会把连锁店带到远处的大店（A/B：华润万家超市 0.8 km → 9.1 km），近处扫描已经接住本城那家。
+            if near is not None:
+                city = self._nearest_city(results) if named else ""
+                for region in ((city, "") if city else ("",)):
+                    hit = self._named_hit(description, await (_direct(None, region=region) if region
+                                                              else _direct(None)), anchor)
+                    if hit and self._cross_city_ok(description, hit[0], near):
+                        return description, hit
+            name, lm = await _via_landmark(guess=True)
+            if lm and self._cross_city_ok(description, lm[0], near):
+                return name, lm
+            # 带类目词的查询到这里还没在本城按相关度找过：就近扫描是 5 km、按距离排，全国重搜第一在别的城市——「北大医院」的
+            # 北京大学深圳医院在 11 km 外，全国第一是北京大学第一医院（2026-10-08 云端直调）。最后在本城找一次，名字（含口头叫法）
+            # + 类目对得上才算。放在最后：近处扫描接得住的连锁店不受影响（按相关度排的本城结果会把人带到远处的大店）
+            if near is not None and not named:
+                city = self._nearest_city(results)
+                if city:
+                    hit = self._named_hit(description, await _direct(None, region=city), anchor)
+                    if hit and self._cross_city_ok(description, hit[0], near):
+                        return description, hit
+            # 兜底：名字没核实的近处结果。和原话毫不沾边的不当目的地（「北大医院」→ 眼科门诊角膜塑形镜室、「301医院」→ 医疗美容
+            # 门诊部）：外地另有以原话打头的本体就用它（调用方对沾边的近处结果也这么做），没有就当没找到，由调用方追问。
+            # 沾边的本地半径内报出实际名让用户纠正；之外的不采信（评审四轮真栈：导去 1940 km 外）
+            if not self._relates(description, results[0]):
+                far = await self._far_namesake(description, results[0], near, meta)
+                logger.info("unverified destination unrelated to the words, not taken: %s → %s%s", description,
+                            results[0].name, f" (far namesake: {far.name})" if far is not None else "")
+                return description, ([far] if far is not None else [])
+            return description, self._local_only(description, results, near)
+        return await _via_landmark(guess=True)
+
+    @classmethod
+    def _named_hit(cls, description: str, cands: list, anchor) -> list | None:
+        """重搜结果里名字对得上的 ⇒ 以它打头的列表；对不上 ⇒ None。
+        锚词在场时按名字+类目双匹配选（「滴水湖」全国序 #1 湖本体 #2 地铁站——只认 top1 会被同名亲戚卡住）；无锚词只看 top1。"""
+        if not cands:
+            return None
+        if anchor:
+            hit = next((r for r in cands if cls._grounds_to(description, r, *anchor)), None)
+            return [hit] + [x for x in cands if x is not hit] if hit else None
+        return cands if cls._dest_matches(description, cands[0].name, cands[0].city) else None
+
+    @classmethod
+    def _keeps_dropped_head(cls, description: str, candidate: str, poi) -> bool:
+        """模型候选正是原话去掉开头几个字（「上海外滩」→「外滩」）时，去掉的字要落在这个本地结果的城市或地址上。
+
+        模型给的是官方名，城市限定词常被去掉；拿去掉后的名字在本城找，接到的是只同名后半截的本地点
+        （2026-10-04 A/B：「上海外滩」→ 30 km 外的「外滩夜市」，几遍之间来回跳）。「深圳欢乐谷」→「欢乐谷」的「深圳」
+        落在本地结果的城市上，照常本城优先。候选不是原话的后半截（「山姆会员店」→「山姆会员商店」）不受此限。
+        不看名字：名字正是和候选对上的那一段，「橘子洲长沙小炒」名字里的「长沙」是菜系，不是它在长沙（A/B：「长沙橘子洲」）。"""
+        d, c = cls._place_key(description), cls._place_key(candidate)
+        if not c or d == c or not d.endswith(c):
+            return True
+        head = d[:-len(c)]
+        where = cls._place_key(f"{getattr(poi, 'city', '') or ''}{getattr(poi, 'address', '') or ''}")
+        return head in where
+
+    @classmethod
+    def _bare_category(cls, description: str) -> bool:
+        """只有类目词的短查询（归一后不超过 3 个字且带类目词：「超市」「便利店」「加油站」「医院」）。"""
+        return cls._is_category_search(description) and len(cls._place_key(description)) <= 3
+
+    @classmethod
+    def _cross_city_ok(cls, description: str, poi, near) -> bool:
+        """带类目词的查询（医院 / 银行 / 超市…）要的是这一类里近的那个：本地半径外的结果只有原话点了它所在城市才采信
+        （「北京儿童医院」去北京，「儿童医院」不去）。不带类目词的具名地点（黄鹤楼）不受此限。"""
+        if not cls._is_category_search(description) or cls._beyond_local_radius(poi, near) is None:
+            return True
+        city = cls._place_key(getattr(poi, "city", "") or "").rstrip("市")
+        return bool(city) and city in cls._place_key(description)
+
+    @staticmethod
+    def _nearest_city(results: list) -> str:
+        """周边结果里离得最近的那个所在的城市（高德 cityname）≈ 当前城市；拿不到 ⇒ ""。"""
+        located = [r for r in results if getattr(r, "city", "")]
+        return min(located, key=lambda r: r.distance_km or float("inf")).city if located else ""
+
+    async def _landmark_candidates(self, description: str) -> list[str]:
+        """把视觉化地标描述转换为少量地图可检索的正式 POI 候选（共享解析器，导航/充电共用）。"""
+        return await landmark_candidates(self.llm, description, logger=logger)
+
+    async def _correct_planner_landmark(self, dest: str, raw_text: str, meta) -> str:
+        """修正云端 Planner 对视觉地标的错误臆断。
+
+        Planner 的 LLM 有时会自作主张把视觉地标描述（"像笋的建筑"）直接解析成一个**具体楼名**
+        （实测把"深圳笋状地标"错猜成"京基100"）写进 destination 槽位，绕过本 Agent 带 name_matches
+        地图校验的专用地标解析器（它对整段凌乱原话仍能精准→中国华润大厦）。判据：原话是地标描述、
+        而 dest 已被解析成**不含造型词**的具体名。命中则用原话重解析 + 高德校验，用**官方名**覆盖臆断；
+        非该情形（普通导航/dest 本就是地标描述）零额外调用直接返回原 dest。"""
+        if not (raw_text and is_landmark_description(raw_text) and not is_landmark_description(dest)):
+            return dest
+        for cand in await self._landmark_candidates(raw_text):
+            try:
+                hits = await self.poi.search(cand, limit=1, meta=meta)
+            except ProviderError as e:
+                logger.warning("planner-landmark correction search failed: %s", e)
+                continue
+            if hits and name_matches(cand, hits[0].name):
+                logger.info("corrected planner dest %r -> landmark %r", dest, cand)
+                return cand
+        return dest
+
+    async def _cancel_route(self, intent, ctx, meta) -> AgentResult:
+        """终止当前导航（QA I-017）。
+
+        两件事都要做，少一件就是 I-017 的原样复现：
+        1. **说清楚**取消的是哪一趟（「已结束到X的导航」），不是一句裸「已取消」；
+        2. **把服务端的活动路线清掉**——保留键 `_route_session_end`（与
+           `_route_session` 同族，契约 §9.1）。不清的话 `focus.active_route` 还挂着，
+           下一句「换条路」会去改一条已经取消的路线，而屏幕上那张路线卡也再没有
+           任何东西说它作废了。
+
+        ⚠ 没有活动路线时**诚实说明**，不回落成「已为您取消」——那正是 I-017 里
+        用户看到「已取消」却什么都没变的来源。
+        """
+        active = self._active_route_from(meta)
+        if not active:
+            return AgentResult(
+                speech="当前没有正在进行的导航。",
+                data={"_route_session_end": True})
+        dest = active.get("destination") or "目的地"
+        card = attach({"type": "route_plan", "cancelled": True,
+                       "origin": "当前位置", "destination": dest,
+                       "waypoints": active.get("waypoints") or [],
+                       "distance_km": 0, "duration_min": 0}, self.poi)
+        return AgentResult(
+            speech=f"已结束到{dest}的导航。",
+            ui_card=card,
+            data={"_route_session_end": True, "destination": dest},
+        ).action("navigate_cancel", {"destination": dest})
+
+    async def _reverse_geocode(self, intent, ctx, meta) -> AgentResult:
+        """逆地理编码：坐标 → 地址。"""
+        lng_s = intent.slots.get("lng", "")
+        lat_s = intent.slots.get("lat", "")
+        if not lng_s or not lat_s:
+            # 尝试用车辆位置
+            current = await self._current_position(ctx, meta)
+            if current and current.lng and current.lat:
+                lng_s, lat_s = str(current.lng), str(current.lat)
+            elif current and current.address:
+                return AgentResult(speech=f"当前位置：{current.address}",
+                                   data={"address": current.address})
+            else:
+                return AgentResult(status=NEED_SLOT, speech="请提供坐标或位置信息。",
+                                   missing_slots=["lng", "lat"])
+        try:
+            lng, lat = float(lng_s), float(lat_s)
+        except ValueError:
+            return AgentResult(status=FAILED, speech="坐标格式不正确。")
+        try:
+            pt = await self.poi.reverse_geocode(lng, lat, meta=meta)
+        except ProviderError as e:
+            # §9.5 铁律③：不拿 mock 地址冒充真实位置，诚实说解析不了（OK 话术防聚合器吞）。
+            logger.warning("reverse_geocode failed（诚实降级，无 mock 回退）: %s", e)
+            return AgentResult(
+                speech="定位服务暂时不可用，这个位置的地址暂时解析不出来，请稍后再试。",
+                data={"lng": lng, "lat": lat})
+        speech = f"该位置位于{pt.address}。" if pt.address else "未能解析该位置的地址。"
+        return AgentResult(speech=speech,
+                           data={"address": pt.address, "lng": lng, "lat": lat})
+
+    async def _locate(self, intent, ctx, meta) -> AgentResult:
+        """『我在哪 / 我现在在哪里 / 当前位置』：逆地理编码当前已授权位置 → 当前地址。
+        与就近导航、天气统一只用浏览器 GPS；未授权时诚实提示开启定位，绝不回退编造 上海。"""
+        current = await self._current_position(ctx, meta)
+        if not current or current.lat is None or current.lng is None:
+            return AgentResult(
+                speech="还没获取到您的位置。在设置里开启定位授权后，我就能告诉您当前在哪，"
+                       "也能帮您找最近的地点、导航回家或去公司。",
+                follow_up="开启定位后再问我『我在哪』")
+        try:
+            pt = await self.poi.reverse_geocode(current.lng, current.lat, meta=meta)
+        except ProviderError as e:
+            # §9.5 铁律③：宁可说不知道，不拿 mock 地址回答「我在哪」。
+            logger.warning("locate reverse_geocode failed（诚实降级，无 mock 回退）: %s", e)
+            return AgentResult(
+                speech="定位服务暂时不可用，暂时说不准您在哪，请稍后再试。",
+                data={"lat": current.lat, "lng": current.lng})
+        addr = pt.address or "当前位置"
+        # 2026-09-17：坐标带年龄（agents/_sdk/location.py）。超过 STALE_LOCATION_S 的坐标不许当「此刻」念——
+        # 真机在家问「我在哪」答出公司地址，就是客户端把几小时前的缓存当成了现在；年龄不明（老客户端）按不旧。
+        age_s = location_age_s(meta)
+        if location_is_stale(meta):
+            mins = max(1, int(age_s // 60))
+            when = fmt_clock(current_location_from_meta(meta).at_ms // 1000)
+            return AgentResult(
+                speech=f"我最近一次拿到您的位置是{mins}分钟前（{when}），当时在{addr}。"
+                       f"现在还没拿到新的定位，可能是室内信号不好；到室外或过一会儿再问我一次。",
+                follow_up="换个位置再问我『我在哪』",
+                data={"address": pt.address, "lat": current.lat, "lng": current.lng,
+                      "location_age_s": round(age_s), "stale": True})
+        return AgentResult(
+            speech=f"您当前位于{addr}。",
+            data={"address": pt.address, "lat": current.lat, "lng": current.lng,
+                  **({"location_age_s": round(age_s)} if age_s is not None else {})})
+
+    async def _poi_detail(self, intent, ctx, meta) -> AgentResult:
+        """查询 POI 详情。"""
+        poi_id = (intent.slots.get("poi_id") or "").strip()
+        if not poi_id:
+            return AgentResult(status=NEED_SLOT, speech="请提供地点 ID。",
+                               missing_slots=["poi_id"])
+        try:
+            poi = await self.poi.poi_detail(poi_id, meta=meta)
+        except ProviderError as e:
+            # §9.5 铁律③：不出 mock 假详情卡（假地址/假评分会误导决策）。
+            logger.warning("poi_detail failed（诚实降级，无 mock 回退）: %s", e)
+            return AgentResult(speech="地图服务暂时不可用，这个地点的详情暂时拿不到，请稍后再试。")
+        speech = f"{poi.name}，地址：{poi.address}。"
+        if poi.rating:
+            speech += f"评分{poi.rating}。"
+        card = attach({"type": "poi_detail", "id": poi.id, "name": poi.name,
+                       "address": poi.address, "lat": poi.lat, "lng": poi.lng,
+                       "rating": poi.rating, "category": poi.category}, self.poi)
+        return AgentResult(speech=speech, ui_card=card, data={"poi": card})

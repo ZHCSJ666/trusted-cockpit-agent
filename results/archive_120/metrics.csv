@@ -1,0 +1,5 @@
+﻿name,provider,mode,total,passed,pass_rate,consistent_rate,avg_latency_ms,p95_latency_ms
+离线规则 · 简化对照,offline,baseline,360,258,0.7167,0.7167,0.3,0.5
+离线规则 · 可信执行,offline,guarded,360,360,1.0,1.0,0.2,0.5
+Kimi · 简化对照,kimi,baseline,360,234,0.65,0.5667,6585.3,14401.8
+Kimi · 可信执行,kimi,guarded,360,347,0.9639,0.9583,6585.2,14401.8

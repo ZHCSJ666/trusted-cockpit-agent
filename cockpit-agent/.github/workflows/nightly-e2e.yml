@@ -1,0 +1,109 @@
+name: Nightly E2E (manifest lane)
+
+# 选集、子用例参数、结果状态与退出码均由 test/e2e_manifest.yaml 和统一 Python runner 决定。
+# 本 job 只负责准备 disposable mock 栈、执行 nightly lane、留存 runner JSON 与 Compose 日志。
+
+on:
+  schedule:
+    - cron: "0 18 * * *"   # UTC 18:00（≈次日 02:00 CST）；可按需调整
+  workflow_dispatch: {}
+
+concurrency:
+  group: nightly-e2e
+  cancel-in-progress: true
+
+jobs:
+  nightly-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60   # 26 服务全新 build（无层缓存）+ 8 个 e2e 脚本；首次实跑后按需调整
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install host-side Python dependencies
+        # 复用 ci.yml 的聚合安装模式（D12，单一真相源）：websockets/grpcio/nats-py 等均来自
+        # 各服务 requirements.txt。本 job 不跑 pytest（8 个 e2e 脚本都是独立 asyncio 脚本），
+        # 不装 pytest/pytest-asyncio。
+        run: |
+          python -m pip install --upgrade pip
+          reqs=$(find . -name requirements.txt \
+                   -not -path './.worktrees/*' \
+                   -not -path './gen/*' \
+                   -not -path '*/node_modules/*' \
+                   -printf '-r %p ')
+          echo "aggregated requirements: $reqs"
+          pip install $reqs
+
+      - name: Set up buf
+        uses: bufbuild/buf-setup-action@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate gRPC code (buf)
+        # 必须先于 compose --build：Python 服务镜像 COPY gen/python（见 memory/Dockerfile、
+        # orchestrator/cloud/Dockerfile 头部注释）；e2e_memory.py 本身也在 host 侧直接
+        # import gen/python 生成的 memory_pb2*。
+        run: buf generate proto
+
+      - name: Prepare .env（不填 LLM_API_KEY/LLM_EMBED_API_KEY，全栈走 Mock）
+        run: cp .env.example .env
+
+      - name: Compose build + up（等容器级就绪）
+        run: docker compose -f compose.yaml up --build -d --wait --wait-timeout 300
+
+      - name: Poll observability-collector healthz（更深一层就绪信号）
+        # --wait 只保证「容器 running」+ redis/nats/postgres 三个 healthcheck 通过；
+        # 其余 ~23 个 app 服务无 healthcheck。collector /healthz 反映其 NATS 连通性，
+        # 是目前系统里仅有的两个真实健康端点之一（另一个 edge-gateway /healthz 是静态桩，
+        # 恒 ok，无参考价值）。这不是完美信号，残余风险见落地记录。
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8092/healthz >/dev/null 2>&1; then
+              echo "collector healthy after ${i}x5s"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::observability-collector 150s 内未就绪"
+          exit 1
+
+      - name: Nightly manifest lane（统一 runner 汇总全部结果）
+        run: |
+          set +e
+          set -o pipefail
+          python scripts/run_e2e.py --lane nightly --full --stale-policy warn \
+            | tee nightly-e2e-runner.log
+          runner_rc=${PIPESTATUS[0]}
+          tail -n 1 nightly-e2e-runner.log > nightly-e2e-summary.json
+          python -m json.tool nightly-e2e-summary.json >/dev/null
+          summary_rc=$?
+          set -e
+          if [ "$summary_rc" -ne 0 ]; then
+            echo "::error::nightly runner did not emit a valid final JSON summary"
+            exit "$summary_rc"
+          fi
+          exit "$runner_rc"
+
+      - name: Dump compose logs（无论成败都留证据）
+        if: always()
+        run: docker compose -f compose.yaml logs --no-color --timestamps > compose-logs.txt 2>&1
+
+      - name: Upload logs artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-e2e-logs-${{ github.run_id }}
+          path: |
+            nightly-e2e-summary.json
+            nightly-e2e-runner.log
+            compose-logs.txt
+          retention-days: 14
+
+      - name: Compose down
+        if: always()
+        run: docker compose -f compose.yaml down -v

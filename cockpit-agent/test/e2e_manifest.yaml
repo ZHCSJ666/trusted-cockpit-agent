@@ -1,0 +1,922 @@
+version: 1
+planned_paths:
+  - test/e2e_protocol_smoke.py
+canonical_inputs:
+  - compose.yaml
+  - go.mod
+  - go.sum
+  - deploy/**
+  - scripts/**
+  - test/e2e_manifest.yaml
+  - test/*.py
+  - test/**/*.py
+  - test/fixtures/**
+  - test/journeys/*.yaml
+  - test/journeys/**/*.yaml
+  - test/journeys/*.yml
+  - test/journeys/**/*.yml
+  - test/eval_corpus/manual_rag_retrieval.yaml
+  - agents/**
+  - orchestrator/**
+  - gateway/**
+  - llm-gateway/**
+  - memory/**
+  - proactive/**
+  - registry/**
+  - runtime/**
+  - observability/**
+  - security/**
+  - skills/**
+  - models/**
+  - payment-gateway/**
+  - proto/**
+  - hmi/**
+runner_dependencies:
+  - runtime/privacy_registry.py
+non_secret_config_keys:
+  - LLM_PROVIDER
+  - LLM_MODEL_PRIMARY
+  - MINIMAX_LLM_MODEL
+  - QWEN_MODEL_PRIMARY
+  - PLANNER_TOOLCALL
+  - SKILLS_MODE
+  - REQUIRE_REAL_PROVIDERS
+  - MEMORY_WEIGHTING
+  - S2S_PROVIDER
+  - S2S_MODEL
+  - VISION_PROVIDER
+  - VOICEPRINT_PROVIDER
+privacy:
+  owner_columns: [user_id, occupant_id]
+  personal_content_columns:
+    [user_text, speech, prompt_tail, content_head, msg, attrs, note, error]
+  sql_sources:
+    ["**/*.sql", "**/migrations/**/*.py", "**/pg_store.py", "**/db.py", "**/store.py"]
+  registry_symbol: PERSONAL_DATA_TARGETS
+  targets:
+    - id: memory_item
+      backend: postgres
+      adapter_key: memory
+      adapter: memory.store:MemoryStore
+      storage_variants: [memory_item, MemoryVectorStore._mem]
+      lifecycle: deletable
+      enforced_from: M-A
+      owner_fields: [user_id, occupant_id]
+      seed_case: gdpr_ma_memory_item_seed
+      count_probe: gdpr_ma_memory_item_count
+      read_probe: gdpr_ma_memory_item_read
+      delete_action: forget_user
+      verify_case: gdpr_ma_memory_item_verify
+      policy_flags: []
+
+    - id: memory_relation
+      backend: postgres
+      adapter_key: memory
+      adapter: memory.store:MemoryStore
+      storage_variants: [memory_relation, MemoryVectorStore._rel]
+      lifecycle: deletable
+      enforced_from: M-A
+      owner_fields: [user_id, occupant_id]
+      seed_case: gdpr_ma_memory_relation_seed
+      count_probe: gdpr_ma_memory_relation_count
+      read_probe: gdpr_ma_memory_relation_read
+      delete_action: forget_user
+      verify_case: gdpr_ma_memory_relation_verify
+      policy_flags: []
+
+    - id: voiceprint
+      backend: postgres
+      adapter_key: memory
+      adapter: memory.store:MemoryStore
+      storage_variants: [voiceprint, MemoryVectorStore._vp]
+      lifecycle: deletable
+      enforced_from: M-A
+      owner_fields: [user_id, occupant_id]
+      seed_case: gdpr_ma_voiceprint_seed
+      count_probe: gdpr_ma_voiceprint_count
+      read_probe: gdpr_ma_voiceprint_read
+      delete_action: forget_user
+      verify_case: gdpr_ma_voiceprint_verify
+      policy_flags: []
+
+    - id: profile_identity
+      backend: redis_or_memory
+      adapter_key: memory
+      adapter: memory.store:MemoryStore
+      storage_variants: [redis.profile.identity, MemoryStore._profiles.identity]
+      lifecycle: deletable
+      enforced_from: M-A
+      owner_fields: [user_id, occupant_id]
+      seed_case: gdpr_ma_profile_identity_seed
+      count_probe: gdpr_ma_profile_identity_count
+      read_probe: gdpr_ma_profile_identity_read
+      delete_action: forget_user
+      verify_case: gdpr_ma_profile_identity_verify
+      policy_flags: []
+
+    - id: session_history
+      backend: redis_or_memory
+      adapter_key: memory
+      adapter: memory.store:MemoryStore
+      storage_variants:
+        [redis.sess, redis.user_sessions, MemoryStore._mem, MemoryStore._mem_user_sessions]
+      lifecycle: deletable
+      enforced_from: M-A
+      owner_fields: [user_id, occupant_id]
+      seed_case: gdpr_ma_session_history_seed
+      count_probe: gdpr_ma_session_history_count
+      read_probe: gdpr_ma_session_history_read
+      delete_action: forget_user
+      verify_case: gdpr_ma_session_history_verify
+      policy_flags: []
+
+    - id: profile_places
+      backend: postgres_redis_or_memory
+      adapter_key: memory
+      adapter: memory.store:MemoryStore
+      storage_variants:
+        [memory_item_scope_profile_places, redis.profile.places, MemoryStore._profiles.places]
+      lifecycle: deletable
+      enforced_from: M-B
+      owner_fields: [user_id, occupant_id]
+      seed_case: gdpr_mb_profile_places_seed
+      count_probe: gdpr_mb_profile_places_count
+      read_probe: gdpr_mb_profile_places_read
+      delete_action: privacy_user_all
+      verify_case: gdpr_mb_profile_places_verify
+      policy_flags: []
+
+    - id: reminder_item
+      backend: postgres_or_memory
+      adapter_key: reminder
+      adapter: agents.reminder.src.store:ReminderStore
+      storage_variants: [reminder_item, ReminderStore._mem]
+      lifecycle: deletable
+      enforced_from: M-B
+      owner_fields: [user_id, occupant_id]
+      seed_case: gdpr_mb_reminder_item_seed
+      count_probe: gdpr_mb_reminder_item_count
+      read_probe: gdpr_mb_reminder_item_read
+      delete_action: privacy_user_all
+      verify_case: gdpr_mb_reminder_item_verify
+      policy_flags: []
+
+    - id: reminder_shared_state
+      backend: profile_shared_state_kv
+      adapter_key: reminder
+      adapter: agents.reminder.src.store:ReminderStore
+      storage_variants: [reminders_active, reminder_pending]
+      lifecycle: deletable
+      enforced_from: M-B
+      owner_fields: [user_id, occupant_id]
+      seed_case: gdpr_mb_reminder_state_seed
+      count_probe: gdpr_mb_reminder_state_count
+      read_probe: gdpr_mb_reminder_state_read
+      delete_action: privacy_user_all
+      verify_case: gdpr_mb_reminder_state_verify
+      policy_flags: []
+
+    - id: scene_item
+      backend: postgres_or_memory
+      adapter_key: scene
+      adapter: agents.scene_orchestrator.src.store:SceneStore
+      storage_variants: [scene_item, SceneStore._mem]
+      lifecycle: deletable
+      enforced_from: M-B
+      owner_fields: [user_id, occupant_id]
+      seed_case: gdpr_mb_scene_item_seed
+      count_probe: gdpr_mb_scene_item_count
+      read_probe: gdpr_mb_scene_item_read
+      delete_action: privacy_user_all
+      verify_case: gdpr_mb_scene_item_verify
+      policy_flags: []
+
+    - id: observability_raw_content
+      backend: sqlite
+      adapter_key: observability
+      adapter: observability.collector.db:ObsDB
+      storage_variants: [turns, spans, llm_calls, logs]
+      lifecycle: retained_audit
+      enforced_from: M-B
+      owner_fields: [user_id, occupant_id]
+      seed_case: gdpr_mb_observability_seed
+      count_probe: gdpr_mb_observability_count
+      read_probe: gdpr_mb_observability_read
+      retention_reason: diagnostic_metrics_without_raw_owner_content
+      retain_or_redact_action: observability_redact_owner
+      verify_case: gdpr_mb_observability_verify
+      policy_flags:
+        - owner_columns_required
+        - ownerless_redact_before_insert
+        - legacy_ownerless_redact
+        - probe_all_storage_variants
+        - badcase_not_exempt_from_owner_redaction
+
+    - id: task_ledger
+      backend: postgres
+      adapter_key: ledger
+      adapter: agents._sdk.ledger:TaskLedger
+      storage_variants: [task_ledger]
+      lifecycle: deletable
+      enforced_from: M-C
+      owner_fields: [user_id, occupant_id]
+      seed_case: gdpr_mc_task_ledger_seed
+      count_probe: gdpr_mc_task_ledger_count
+      read_probe: gdpr_mc_task_ledger_read
+      delete_action: privacy_user_all
+      verify_case: gdpr_mc_task_ledger_verify
+      policy_flags: []
+
+    - id: proactive_process_queue
+      backend: process_memory
+      adapter_key: proactive
+      adapter: proactive.governor:Governor
+      storage_variants: [Governor._pending, Governor._deferred]
+      lifecycle: deletable
+      enforced_from: M-C
+      owner_fields: [user_id, occupant_id]
+      seed_case: gdpr_mc_proactive_queue_seed
+      count_probe: gdpr_mc_proactive_queue_count
+      read_probe: gdpr_mc_proactive_queue_read
+      delete_action: privacy_user_all
+      verify_case: gdpr_mc_proactive_queue_verify
+      policy_flags: []
+
+    - id: proactive_delivery
+      backend: postgres
+      adapter_key: proactive
+      adapter: proactive.governor:Governor
+      storage_variants: [proactive_delivery, DeliveryStore._mem]
+      lifecycle: deletable
+      enforced_from: M-C
+      owner_fields: [user_id, occupant_id]
+      seed_case: gdpr_mc_proactive_delivery_seed
+      count_probe: gdpr_mc_proactive_delivery_count
+      read_probe: gdpr_mc_proactive_delivery_read
+      delete_action: privacy_user_all
+      verify_case: gdpr_mc_proactive_delivery_verify
+      policy_flags: []
+
+    - id: payment_order
+      backend: redis_or_memory
+      adapter_key: payment
+      adapter: payment-gateway/store.py:PaymentStore
+      storage_variants: ["payment:order:*", "payment:idem:*", PaymentStore._mem, PaymentStore._idem]
+      lifecycle: retained_audit
+      enforced_from: M-D
+      owner_fields: [user_id, occupant_id]
+      seed_case: gdpr_md_payment_order_seed
+      count_probe: gdpr_md_payment_order_count
+      read_probe: gdpr_md_payment_order_read
+      retention_reason: financial_audit_and_chargeback_window
+      retain_or_redact_action: payment_redact_owner
+      verify_case: gdpr_md_payment_order_verify
+      policy_flags: []
+
+    - id: planner_pending_session
+      backend: redis_or_memory
+      adapter_key: cloud_session
+      adapter: orchestrator.cloud.session:SessionStore
+      storage_variants: ["planner:sess:*", "planner:sess-owner:*", "planner:sess-owner-fence:*", "planner:focus:*"]
+      lifecycle: deletable
+      enforced_from: M-D
+      owner_fields: [user_id, occupant_id]
+      seed_case: gdpr_md_planner_pending_seed
+      count_probe: gdpr_md_planner_pending_count
+      read_probe: gdpr_md_planner_pending_read
+      delete_action: privacy_user_all
+      verify_case: gdpr_md_planner_pending_verify
+      policy_flags: []
+
+    - id: merchant_draft
+      backend: redis
+      adapter_key: mcp
+      adapter: agents.mcp_bridge.src.agent:McpBridgeAgent
+      storage_variants: ["mcp:merchant:draft:*", "mcp:merchant:current:*", "mcp:merchant:owner:*"]
+      lifecycle: deletable
+      enforced_from: M-D
+      owner_fields: [user_id, occupant_id]
+      seed_case: gdpr_md_merchant_draft_seed
+      count_probe: gdpr_md_merchant_draft_count
+      read_probe: gdpr_md_merchant_draft_read
+      delete_action: privacy_user_all
+      verify_case: gdpr_md_merchant_draft_verify
+      policy_flags: []
+
+    - id: mcp_demo_order
+      backend: external_process_memory
+      adapter_key: mcp
+      adapter: agents.mcp_bridge.src.agent:McpBridgeAgent
+      storage_variants: [demo_coffee._ORDERS, demo_coffee._BY_IDEM]
+      lifecycle: external_reference
+      enforced_from: M-D
+      owner_fields: [user_id, occupant_id]
+      seed_case: gdpr_md_mcp_external_seed
+      count_probe: gdpr_md_mcp_external_count
+      read_probe: gdpr_md_mcp_external_read
+      retention_reason: external_merchant_is_system_of_record
+      retain_or_redact_action: mcp_external_unlink
+      verify_case: gdpr_md_mcp_external_verify
+      policy_flags: []
+cases:
+  - id: e2e_protocol_smoke
+    path: test/e2e_protocol_smoke.py
+    command: [python, test/e2e_protocol_smoke.py]
+    group: default
+    lanes: [ci, nightly, milestone]
+    timeout_s: 30
+    profile: root
+    skip_reasons: [forbid]
+    signed_identity: false
+    persistent_data: false
+    memory_sessions: 0
+    remote_safe: true
+    remote_mutating: false
+    nightly: {all: true}
+
+  - id: e2e_remote_safe
+    path: test/e2e_remote_safe.py
+    command: [python, test/e2e_remote_safe.py]
+    group: default
+    lanes: [milestone]
+    timeout_s: 180
+    profile: root
+    skip_reasons: [forbid]
+    signed_identity: false
+    persistent_data: true
+    memory_sessions: 0
+    remote_safe: true
+    remote_mutating: false
+
+  - id: e2e_auth
+    path: test/e2e_auth.py
+    command: [python, test/e2e_auth.py]
+    group: security
+    lanes: [milestone]
+    timeout_s: 300
+    profile: auth
+    skip_reasons: [forbid]
+    signed_identity: false
+    persistent_data: true
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+
+  - id: e2e_central_hub_assertions
+    path: test/e2e_central_hub_assertions.py
+    command: [python, test/e2e_central_hub_assertions.py]
+    group: default
+    lanes: [nightly, milestone]
+    timeout_s: 300
+    profile: root
+    skip_reasons: [forbid]
+    signed_identity: true
+    persistent_data: true
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+    nightly:
+      args:
+        - --case
+        - t0_hvac_local
+        - --case
+        - safety_window_speed_gate
+        - --case
+        - cloud_chitchat_streaming
+
+  - id: e2e_context
+    path: test/e2e_context.py
+    command: [python, test/e2e_context.py]
+    group: default
+    lanes: [nightly, milestone]
+    timeout_s: 300
+    profile: root
+    skip_reasons: [forbid]
+    signed_identity: true
+    persistent_data: true
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+    nightly:
+      # 只留**不经过模型判断**的两例：注入拦截走确定性检测、裸确认走挂起态短路。
+      # `ctx_trip_plan_fallback` / `ctx_trip_modify_fallback` 于 2026-08-01 移出 nightly
+      # ——它们断言 `step.agent:trip-planner`，而 mock 全栈下规划只会落 chitchat；
+      # 此前靠 trip 那四条 route_hints 撑着，hint 已按数据退役（见 e2e_trip 条目的判据）。
+      # 两例在 milestone 车道（真 provider）仍全量跑。
+      args:
+        - --case
+        - ctx_injection_blocked
+        - --case
+        - ctx_bare_confirm_no_pending
+
+  - id: e2e_degrade
+    path: test/e2e_degrade.py
+    command: [python, test/e2e_degrade.py]
+    group: default
+    lanes: [nightly, milestone]
+    timeout_s: 600
+    profile: root
+    skip_reasons: [forbid]
+    signed_identity: true
+    persistent_data: true
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+    nightly: {all: true}
+
+  - id: e2e_geofence
+    path: test/e2e_geofence.py
+    command: [python, test/e2e_geofence.py]
+    group: default
+    lanes: [milestone]
+    timeout_s: 600
+    profile: root
+    skip_reasons: [forbid]
+    signed_identity: true
+    persistent_data: true
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+
+  # 2026-08-01 移出 nightly：mock 车道原有两条旅程（A4-2 提醒触达 / B4-2 场景激活），
+  # **它们的「mock-safe」判据白纸黑字写的就是「route_hints 确定性路由」**
+  # （见 regression_a.yaml A4-2 原注释）。那些 hint 已按跨 provider 数据退役，判据随之落空
+  # ——A4-2 的「我有哪些提醒」（reminder.list）与 B4-2 的「开启午休模式」（scene.activate）
+  # 在 mock 下都只能落 chitchat。两条已改判 `lane: live`，mock 车道随之为空，
+  # 故整个脚本退出 nightly（**空选集不算绿**：`e2e_journeys.py` 已加门禁，
+  # `--lane mock` 选不出旅程会直接失败而不是报 0/0 通过）。
+  # 覆盖去向：milestone 车道（真 provider）跑全量旅程，与此前一致。
+  - id: e2e_journeys
+    path: test/e2e_journeys.py
+    command: [python, test/e2e_journeys.py]
+    group: default
+    lanes: [milestone]
+    timeout_s: 1800
+    profile: root
+    skip_reasons: [forbid]
+    signed_identity: true
+    persistent_data: true
+    memory_sessions: 2
+    remote_safe: false
+    remote_mutating: false
+
+  - id: e2e_ledger
+    path: test/e2e_ledger.py
+    command: [python, test/e2e_ledger.py]
+    group: default
+    lanes: [milestone]
+    timeout_s: 600
+    profile: root
+    skip_reasons: [forbid]
+    signed_identity: true
+    persistent_data: true
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+
+  - id: e2e_mcp
+    path: test/e2e_mcp.py
+    command: [python, test/e2e_mcp.py]
+    group: default
+    lanes: [milestone]
+    timeout_s: 900
+    profile: root
+    skip_reasons: [forbid]
+    signed_identity: true
+    persistent_data: true
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+
+  # 真实麦当劳/瑞幸人工车道。默认零动作；写模式还需脚本内三重显式开关与
+  # ≤3 笔预算，永不被 CI/nightly/milestone 自动选中。
+  - id: e2e_merchant_mcp
+    path: test/e2e_merchant_mcp.py
+    command: [python, test/e2e_merchant_mcp.py]
+    group: manual_inspection
+    lanes: []
+    timeout_s: 1800
+    profile: root
+    skip_reasons: [manual_review_required]
+    signed_identity: false
+    persistent_data: true
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+
+  - id: e2e_memory
+    path: test/e2e_memory.py
+    command: [python, test/e2e_memory.py]
+    group: default
+    lanes: [nightly, milestone]
+    timeout_s: 900
+    profile: root
+    skip_reasons: [forbid]
+    signed_identity: true
+    persistent_data: true
+    memory_sessions: 1
+    remote_safe: false
+    remote_mutating: false
+    nightly:
+      args: [--case, privacy_targeting, --case, compliance]
+      memory_sessions: 0
+
+  - id: e2e_memory_graph
+    path: test/e2e_memory_graph.py
+    command: [python, test/e2e_memory_graph.py]
+    group: default
+    lanes: [milestone]
+    timeout_s: 900
+    profile: root
+    skip_reasons: [forbid]
+    signed_identity: true
+    persistent_data: true
+    memory_sessions: 2
+    remote_safe: false
+    remote_mutating: false
+
+  - id: e2e_mtls
+    path: test/e2e_mtls.py
+    command: [python, test/e2e_mtls.py]
+    group: security
+    lanes: [milestone]
+    timeout_s: 600
+    profile: mtls
+    skip_reasons: [forbid]
+    signed_identity: true
+    persistent_data: true
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+
+  - id: e2e_obs
+    path: test/e2e_obs.py
+    command: [python, test/e2e_obs.py]
+    group: default
+    lanes: [milestone]
+    timeout_s: 300
+    profile: root
+    skip_reasons: [forbid]
+    signed_identity: true
+    persistent_data: true
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+
+  - id: e2e_observability
+    path: test/e2e_observability.py
+    command: [python, test/e2e_observability.py]
+    group: manual_inspection
+    lanes: []
+    timeout_s: 900
+    profile: root
+    skip_reasons: [manual_review_required]
+    signed_identity: true
+    persistent_data: true
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+
+  # 支付真栈闭环（§9.17 批 2）：确认亮码 → mock 渠道自动支付 → 幂等防双付。
+  # milestone 车道（「交停车费」落域依赖真 LLM planner；mock 栈会落 chitchat）。
+  - id: e2e_payment
+    path: test/e2e_payment.py
+    command: [python, test/e2e_payment.py]
+    group: default
+    lanes: [milestone]
+    timeout_s: 300
+    profile: root
+    skip_reasons: [forbid]
+    signed_identity: true
+    persistent_data: true
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+
+  - id: e2e_planner_toolcall
+    path: test/e2e_planner_toolcall.py
+    command: [python, test/e2e_planner_toolcall.py]
+    group: provider_probe
+    lanes: [milestone]
+    timeout_s: 600
+    profile: real
+    skip_reasons: [credential_unavailable, provider_unavailable]
+    signed_identity: false
+    persistent_data: false
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+
+  - id: e2e_proactive
+    path: test/e2e_proactive.py
+    command: [python, test/e2e_proactive.py]
+    group: default
+    lanes: [milestone]
+    timeout_s: 600
+    profile: root
+    skip_reasons: [forbid]
+    signed_identity: true
+    persistent_data: true
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+
+  - id: e2e_process_region
+    path: test/e2e_process_region.py
+    command: [python, test/e2e_process_region.py]
+    group: default
+    lanes: [milestone]
+    timeout_s: 300
+    profile: root
+    skip_reasons: [forbid]
+    signed_identity: true
+    persistent_data: true
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+
+  - id: e2e_real_providers
+    path: test/e2e_real_providers.py
+    command: [python, test/e2e_real_providers.py]
+    group: provider_probe
+    lanes: [milestone]
+    timeout_s: 1200
+    profile: real
+    skip_reasons: [credential_unavailable, provider_unavailable]
+    signed_identity: false
+    persistent_data: false
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+
+  - id: e2e_rejection
+    path: test/e2e_rejection.py
+    command: [python, test/e2e_rejection.py]
+    group: provider_probe
+    lanes: [milestone]
+    timeout_s: 600
+    profile: real
+    skip_reasons: [credential_unavailable, provider_unavailable]
+    signed_identity: true
+    persistent_data: true
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+
+  - id: e2e_reminder
+    path: test/e2e_reminder.py
+    command: [python, test/e2e_reminder.py]
+    group: default
+    lanes: [milestone]
+    timeout_s: 600
+    profile: root
+    skip_reasons: [forbid]
+    signed_identity: true
+    persistent_data: true
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+
+  - id: e2e_research
+    path: test/e2e_research.py
+    command: [python, test/e2e_research.py]
+    group: default
+    lanes: [nightly, milestone]
+    timeout_s: 600
+    profile: root
+    skip_reasons: [forbid]
+    signed_identity: true
+    persistent_data: true
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+    nightly: {all: true}
+
+  - id: e2e_research_async
+    path: test/e2e_research_async.py
+    command: [python, test/e2e_research_async.py]
+    group: default
+    lanes: [nightly, milestone]
+    timeout_s: 900
+    profile: root
+    skip_reasons: [forbid]
+    signed_identity: true
+    persistent_data: true
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+    nightly: {all: true}
+
+  - id: e2e_resilience
+    path: test/e2e_resilience.py
+    command: [python, test/e2e_resilience.py]
+    group: default
+    lanes: [nightly, milestone]
+    timeout_s: 900
+    profile: root
+    skip_reasons: [forbid]
+    signed_identity: true
+    persistent_data: true
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+    nightly: {all: true}
+
+  - id: e2e_s2s
+    path: test/e2e_s2s.py
+    command: [python, test/e2e_s2s.py]
+    group: provider_probe
+    lanes: [milestone]
+    timeout_s: 1200
+    profile: real
+    skip_reasons: [credential_unavailable, provider_unavailable]
+    signed_identity: true
+    persistent_data: true
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+
+  - id: e2e_s2s_probe
+    path: test/e2e_s2s_probe.py
+    command: [python, test/e2e_s2s_probe.py]
+    group: provider_probe
+    lanes: [milestone]
+    timeout_s: 900
+    profile: real
+    skip_reasons:
+      [credential_unavailable, provider_unavailable, profile_unavailable, data_unavailable]
+    signed_identity: false
+    persistent_data: false
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+
+  - id: e2e_s2s_resilience
+    path: test/e2e_s2s_resilience.py
+    command: [python, test/e2e_s2s_resilience.py]
+    group: provider_probe
+    lanes: [milestone]
+    timeout_s: 1200
+    profile: real
+    skip_reasons: [credential_unavailable, provider_unavailable]
+    signed_identity: true
+    persistent_data: false
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+
+  - id: e2e_scene
+    path: test/e2e_scene.py
+    command: [python, test/e2e_scene.py]
+    group: default
+    lanes: [milestone]
+    timeout_s: 900
+    profile: root
+    skip_reasons: [forbid]
+    signed_identity: true
+    persistent_data: true
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+
+  - id: e2e_strict_stack
+    path: test/e2e_strict_stack.py
+    command: [python, test/e2e_strict_stack.py]
+    group: provider_probe
+    lanes: [milestone]
+    timeout_s: 900
+    profile: real
+    skip_reasons: [credential_unavailable, provider_unavailable]
+    signed_identity: true
+    persistent_data: true
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+
+  # 2026-08-01 移出 nightly：本脚本每一轮都要求规划落到 trip-planner，而 nightly 是
+  # **mock 全栈**——MockProvider 只回显原话，规划必然走 `_fallback` 而 `_fallback` 优先
+  # 兜底到 chitchat。它此前之所以能过，全靠 `trip.plan/.navigate/.status/.modify` 四条
+  # route_hints 在 LLM 之后 replace 整条计划；那四条已于 2026-07-29 按跨 provider 双臂
+  # 证据退役（M5 P2）。**也就是说这个脚本在 mock 车道里测的一直是正则，不是系统。**
+  # 判据（随本次收窄入册）：**mock-safe 的条件是「这条路径不经过模型判断」**
+  # ——端侧快路径 / 兜底 Agent / 确定性时间解析 / 协议层——**不是「有没有 hint」**。
+  # 覆盖去向：milestone 车道（真 provider）仍跑全量；不恢复 hint（那是把规则工厂请回来）。
+  # 2026-09-14：AR05 F09（规划技术失败终态）落地后 nightly 连续五夜红（run 73–77）——
+  # mock 下规划必走 `_fallback`，F09 把它报成技术失败，整条云侧链路只剩一句失败话术。
+  # 裁决是 planner 认网关自报的 provider 身份（`Clients.llm_served_by_mock`）：MockProvider
+  # 服务时兜底 Agent 是设计路径、不标技术失败（F09 例外①，方案 §5.2）。**这一行只在
+  # 「兜底 Agent」这一格生效**，上面那条 mock-safe 判据一个字不变。
+  - id: e2e_trip
+    path: test/e2e_trip.py
+    command: [python, test/e2e_trip.py]
+    group: default
+    lanes: [milestone]
+    timeout_s: 600
+    profile: root
+    skip_reasons: [forbid]
+    signed_identity: true
+    persistent_data: true
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+
+  - id: e2e_tts_stream
+    path: test/e2e_tts_stream.py
+    command: [python, test/e2e_tts_stream.py]
+    group: provider_probe
+    lanes: [milestone]
+    timeout_s: 600
+    profile: real
+    skip_reasons: [credential_unavailable, provider_unavailable]
+    signed_identity: false
+    persistent_data: false
+    memory_sessions: 0
+    remote_safe: true
+    remote_mutating: false
+
+  - id: e2e_verify
+    path: test/e2e_verify.py
+    command: [python, test/e2e_verify.py]
+    group: default
+    lanes: [milestone]
+    timeout_s: 600
+    profile: root
+    skip_reasons: [forbid]
+    signed_identity: true
+    persistent_data: true
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+
+  - id: e2e_vision
+    path: test/e2e_vision.py
+    command: [python, test/e2e_vision.py]
+    group: provider_probe
+    lanes: [milestone]
+    timeout_s: 900
+    profile: real
+    skip_reasons: [credential_unavailable, provider_unavailable]
+    signed_identity: true
+    persistent_data: true
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+
+  - id: e2e_voice_loop
+    path: test/e2e_voice_loop.py
+    command: [python, test/e2e_voice_loop.py]
+    group: provider_probe
+    lanes: [milestone]
+    timeout_s: 900
+    profile: real
+    skip_reasons: [credential_unavailable, provider_unavailable, profile_unavailable]
+    signed_identity: false
+    persistent_data: false
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+
+  - id: e2e_voiceprint
+    path: test/e2e_voiceprint.py
+    command: [python, test/e2e_voiceprint.py]
+    group: default
+    lanes: [milestone]
+    timeout_s: 900
+    profile: root
+    skip_reasons: [forbid]
+    signed_identity: true
+    persistent_data: true
+    memory_sessions: 4
+    remote_safe: false
+    remote_mutating: false
+    fixture_pre_step: voiceprint
+
+  - id: e2e_voiceprint_probe
+    path: test/e2e_voiceprint_probe.py
+    command: [python, test/e2e_voiceprint_probe.py]
+    group: acoustic_probe
+    lanes: []
+    timeout_s: 1800
+    profile: acoustic
+    skip_reasons:
+      [hardware_unavailable, provider_unavailable, data_unavailable]
+    signed_identity: false
+    persistent_data: false
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+
+  - id: e2e_ws
+    path: test/e2e_ws.py
+    command: [python, test/e2e_ws.py]
+    group: default
+    lanes: [nightly, milestone]
+    timeout_s: 300
+    profile: root
+    skip_reasons: [forbid]
+    signed_identity: true
+    persistent_data: true
+    memory_sessions: 0
+    remote_safe: false
+    remote_mutating: false
+    nightly: {all: true}

@@ -1,0 +1,496 @@
+"""抽取与巩固单测（P1）：四分类治理 + 黑名单 + consolidate 去重/冲突 supersede。
+
+纯 Python，注入 mock complete_fn（不连真实 LLM）。
+"""
+import asyncio
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from extract import extract, _has_coords, _parse  # noqa: E402
+from store import MemoryStore  # noqa: E402
+
+
+def _mock(payload_json: str):
+    async def fn(messages):
+        return payload_json
+    return fn
+
+
+# ── 抽取治理 ─────────────────────────────────────────────
+def test_extract_governs_four_classes_and_blacklist():
+    cands = json.dumps([
+        {"category": "explicit_preference", "kind": "semantic", "predicate": "route.avoid_highway",
+         "text": "以后导航别走高速", "scope": "profile.route", "confidence": 0.9},
+        {"category": "temporary_preference", "kind": "semantic", "predicate": "route.today",
+         "text": "今天别走高速", "scope": "profile.route", "confidence": 0.8},
+        {"category": "inferred_preference", "kind": "semantic", "predicate": "hvac.temp",
+         "text": "用户常把空调调到23度", "scope": "profile.comfort", "confidence": 0.9},
+        # ↑ hvac.temp 是 climate.temperature 的已知别名 → 写入前归一（B3-3 M2）
+        {"category": "sensitive_fact", "kind": "semantic", "predicate": "place.home",
+         "text": "家在某小区", "scope": "profile.places", "confidence": 0.95},
+        {"category": "explicit_preference", "kind": "semantic", "predicate": "loc",
+         "text": "我家坐标31.2304,121.4737", "confidence": 0.9},
+    ])
+    out = asyncio.run(extract([{"role": "user", "text": "x"}], user_id="u1",
+                              complete_fn=_mock(cands)))
+    preds = {o["predicate"]: o for o in out}
+    assert "place.home" not in preds       # sensitive_fact 默认不自动写
+    assert "loc" not in preds              # 黑名单：精确坐标丢弃
+    assert preds["route.avoid_highway"]["provenance"] == "user_stated"
+    assert preds["route.avoid_highway"]["confidence"] >= 0.7
+    assert preds["route.today"]["expires_at"] > 0                 # temporary 带过期
+    assert "hvac.temp" not in preds                              # 别名已归一
+    assert preds["climate.temperature"]["provenance"] == "agent_inferred"
+    assert preds["climate.temperature"]["confidence"] <= 0.5     # inferred 低置信
+    assert all(o["review_status"] == "auto_extracted" for o in out)
+
+
+def test_extract_personal_fact_stored_and_pii_dropped():
+    """用户主动告知的个人实体（宠物名）→ 存 profile.person/sensitive；电话等 PII → 丢。"""
+    cands = json.dumps([
+        {"category": "personal_fact", "kind": "semantic", "predicate": "person.pet",
+         "text": "用户的宠物叫旺财", "scope": "profile.person", "confidence": 0.9},
+        {"category": "personal_fact", "kind": "semantic", "predicate": "person.phone",
+         "text": "用户电话13800001111", "confidence": 0.9},  # 11 位数字 → PII 丢弃
+    ])
+    out = asyncio.run(extract([{"role": "user", "text": "x"}], user_id="u1",
+                              complete_fn=_mock(cands)))
+    preds = {o["predicate"]: o for o in out}
+    assert "person.pet" in preds and "person.phone" not in preds
+    pet = preds["person.pet"]
+    assert pet["scope"] == "profile.person"
+    assert pet["privacy_level"] == "sensitive" and pet["provenance"] == "user_stated"
+
+
+def test_extract_empty_on_llm_error():
+    async def boom(messages):
+        raise RuntimeError("llm down")
+    assert asyncio.run(extract([{"role": "user", "text": "x"}], user_id="u1",
+                               complete_fn=boom)) == []
+
+
+def test_extract_parses_fenced_json():
+    fenced = ('```json\n[{"category":"explicit_preference","kind":"semantic",'
+              '"predicate":"taste.spicy","text":"不吃辣","scope":"profile.taste",'
+              '"confidence":0.9}]\n```')
+    out = asyncio.run(extract([{"role": "user", "text": "x"}], user_id="u1",
+                              complete_fn=_mock(fenced)))
+    assert len(out) == 1 and out[0]["predicate"] == "taste.spicy"
+
+
+def test_extract_no_turns_or_no_user():
+    assert asyncio.run(extract([], user_id="u1", complete_fn=_mock("[]"))) == []
+    assert asyncio.run(extract([{"role": "user", "text": "x"}], user_id="",
+                               complete_fn=_mock("[]"))) == []
+
+
+def test_has_coords_and_parse():
+    assert _has_coords("31.2304,121.4737") and _has_coords("经度121")
+    assert not _has_coords("用户不吃辣")
+    assert _parse("garbage no json") == []
+
+
+# ── 场景配置参数黑名单（B3-3 M1）──────────────────────────
+_SCENE_TURNS = [
+    {"role": "user", "text": "创建一个钓鱼模式：空调22度，氛围灯蓝色"},
+    {"role": "assistant", "text": "将创建「钓鱼模式」：空调22度、氛围灯蓝色。确认保存吗？"},
+    {"role": "user", "text": "确认"},
+]
+
+
+def test_scene_config_params_not_extracted_as_preference():
+    """「创建钓鱼模式：空调22度」的 22 度是场景配置——即使 LLM 抽成偏好也被治理丢弃。"""
+    cands = json.dumps([
+        {"category": "explicit_preference", "kind": "semantic",
+         "predicate": "climate.temperature", "text": "用户最喜欢的空调温度是22度",
+         "scope": "profile.comfort", "confidence": 0.9},
+        {"category": "inferred_preference", "kind": "semantic",
+         "predicate": "light.ambient_color", "text": "用户喜欢蓝色氛围灯",
+         "scope": "profile.comfort", "confidence": 0.8},
+        {"category": "episodic", "kind": "episodic", "predicate": "",
+         "text": "用户创建了钓鱼模式", "scope": "episodic.general", "confidence": 0.8},
+    ])
+    out = asyncio.run(extract(list(_SCENE_TURNS), user_id="u1",
+                              complete_fn=_mock(cands)))
+    texts = [o["text"] for o in out]
+    assert "用户最喜欢的空调温度是22度" not in texts   # 场景参数 → 丢
+    assert "用户喜欢蓝色氛围灯" not in texts           # 场景颜色 → 丢
+    assert "用户创建了钓鱼模式" in texts               # 情景事件本身照常保留
+
+
+def test_scene_activation_param_dropped_but_stated_preference_kept():
+    """「开启午休模式，温度26」的 26 是一次性覆盖 → 丢；显式「记住我最喜欢26度」→ 留。"""
+    activation = [{"role": "user", "text": "开启午休模式，温度26"}]
+    stated = [{"role": "user", "text": "记住，我最喜欢的空调温度是26度"}]
+    cand = json.dumps([
+        {"category": "explicit_preference", "kind": "semantic",
+         "predicate": "climate.temperature", "text": "用户最喜欢的空调温度是26度",
+         "scope": "profile.comfort", "confidence": 0.9},
+    ])
+    dropped = asyncio.run(extract(activation, user_id="u1", complete_fn=_mock(cand)))
+    kept = asyncio.run(extract(stated, user_id="u1", complete_fn=_mock(cand)))
+    assert dropped == []
+    assert len(kept) == 1 and kept[0]["predicate"] == "climate.temperature"
+
+
+def test_preference_stated_inside_scene_sentence_kept():
+    """场景句里带偏好口吻（「记住我喜欢…」）不算纯场景配置——不误伤。"""
+    turns = [{"role": "user", "text": "睡觉模式的时候记住我喜欢24度"}]
+    cand = json.dumps([
+        {"category": "explicit_preference", "kind": "semantic",
+         "predicate": "climate.temperature", "text": "用户喜欢24度",
+         "scope": "profile.comfort", "confidence": 0.9},
+    ])
+    out = asyncio.run(extract(turns, user_id="u1", complete_fn=_mock(cand)))
+    assert len(out) == 1
+
+
+# ── consolidate ──────────────────────────────────────────
+def _store() -> MemoryStore:
+    s = MemoryStore()
+    s.url = ""              # Redis 内存兜底
+    s._vstore._dsn = ""     # 向量存储内存兜底
+    return s
+
+
+def test_consolidate_insert_then_conflict_supersede():
+    store = _store()
+
+    async def go():
+        await store.append_turn("s1", "user", "我不吃辣")
+        j1 = _mock(json.dumps([{"category": "explicit_preference", "kind": "semantic",
+                                "predicate": "taste.spicy", "text": "用户不吃辣",
+                                "scope": "profile.taste", "confidence": 0.9}]))
+        ids1 = await store.consolidate("s1", "u1", complete_fn=j1)
+        j2 = _mock(json.dumps([{"category": "explicit_preference", "kind": "semantic",
+                                "predicate": "taste.spicy", "text": "用户现在能吃辣了",
+                                "scope": "profile.taste", "confidence": 0.9}]))
+        ids2 = await store.consolidate("s1", "u1", complete_fn=j2)
+        current = await store.recall(user_id="u1", query="", scopes=["profile.taste"])
+        return ids1, ids2, current
+
+    ids1, ids2, current = asyncio.run(go())
+    assert len(ids1) == 1 and len(ids2) == 1
+    assert len(current) == 1 and current[0][0]["text"] == "用户现在能吃辣了"  # 只取现行
+
+
+def test_consolidate_supersedes_across_predicate_aliases():
+    """B3-3 M2：历史条目带 LLM 自由造的别名谓词（hvac.temperature），新显式偏好
+    （climate.temperature）也要 supersede 它——否则新旧并存、召回二义（22 vs 26）。"""
+    store = _store()
+
+    async def go():
+        vs = await store._vec()
+        await vs.remember([{  # 模拟修复前入库的旧偏好（别名谓词）
+            "user_id": "u1", "occupant_id": "primary", "kind": "semantic",
+            "predicate": "hvac.temperature", "text": "用户最喜欢的空调温度是22度",
+            "scope": "profile.comfort", "provenance": "user_stated",
+            "confidence": 0.9, "review_status": "auto_extracted"}])
+        await store.append_turn("s1", "user", "记住，我最喜欢的空调温度是26度")
+        j = _mock(json.dumps([{"category": "explicit_preference", "kind": "semantic",
+                               "predicate": "climate.temperature",
+                               "text": "用户最喜欢的空调温度是26度",
+                               "scope": "profile.comfort", "confidence": 0.9}]))
+        ids = await store.consolidate("s1", "u1", complete_fn=j)
+        current = await store.recall(user_id="u1", query="空调温度")
+        return ids, current
+
+    ids, current = asyncio.run(go())
+    assert len(ids) == 1
+    assert len(current) == 1                              # 旧 22 已被时序覆盖
+    assert "26度" in current[0][0]["text"]
+    assert current[0][0]["predicate"] == "climate.temperature"
+
+
+def test_consolidate_equivalent_skips():
+    store = _store()
+
+    async def go():
+        await store.append_turn("s1", "user", "我不吃辣")
+        j = _mock(json.dumps([{"category": "explicit_preference", "kind": "semantic",
+                               "predicate": "taste.spicy", "text": "用户不吃辣",
+                               "scope": "profile.taste", "confidence": 0.9}]))
+        await store.consolidate("s1", "u1", complete_fn=j)
+        ids2 = await store.consolidate("s1", "u1", complete_fn=j)  # 等价
+        exported = await store.export_user("u1")
+        return ids2, exported
+
+    ids2, exported = asyncio.run(go())
+    assert ids2 == []                              # 等价跳过，不重复写
+    assert len(exported["memories"]) == 1
+
+
+# ── 观测归属（2026-07-13 消耗排查）────────────────────────
+def test_default_complete_request_carries_caller_service():
+    """抽取的 Complete 必须带 caller_service（obs.llm 归属；此前 caller 为空=盲区）。
+    刻意不设 "caller"——那是网关限流桶键（惯例同 planner/SDK）。"""
+    from extract import _build_complete_request
+    req = _build_complete_request([{"role": "user", "content": "hi"}])
+    assert req.meta["caller_service"] == "memory-extract"
+    assert "caller" not in req.meta
+    assert req.messages[0].content == "hi"
+
+
+# ── owner 归属（M-B）──────────────────────────────────────
+def test_consolidate_window_excludes_the_other_occupant():
+    """巩固窗口在进 extractor **之前**就按 OwnerKey 切好。
+
+    此前是取整段混合历史、再用触发本次巩固的 occupant 给全部候选盖章——
+    「A 说不吃辣、B 触发巩固」会把不吃辣记到 B 头上，而且是持久脏数据。
+    归属判定不能交给 LLM：它看到的只是一段文本。
+    """
+    store = _store()
+    seen: dict = {}
+
+    def _spy(payload):
+        async def fn(messages):
+            seen["convo"] = messages[-1]["content"]
+            return payload
+        return fn
+
+    async def go():
+        await store.append_turn("s1", "user", "我不吃辣", user_id="u1",
+                                occupant_id="primary", turn_id="e1:user",
+                                exchange_id="e1")
+        await store.append_turn("s1", "user", "我要大杯冰美式", user_id="u1",
+                                occupant_id="occ-2", turn_id="e2:user",
+                                exchange_id="e2")
+        j = json.dumps([{"category": "explicit_preference", "kind": "semantic",
+                         "predicate": "drink.temp", "text": "用户喜欢冰饮",
+                         "scope": "profile.taste", "confidence": 0.9}])
+        ids = await store.consolidate("s1", "u1", "occ-2", complete_fn=_spy(j))
+        items = await store.recall(user_id="u1", occupant_id="occ-2", query="")
+        return ids, items
+
+    ids, items = asyncio.run(go())
+    assert "我不吃辣" not in seen["convo"], "另一位乘员的原话不得进入本 owner 的抽取输入"
+    assert "我要大杯冰美式" in seen["convo"]
+    assert len(ids) == 1
+    assert items and items[0][0]["occupant_id"] == "occ-2"
+
+
+def test_consolidate_records_real_turn_ids_as_evidence():
+    """`source_turn_ids` 存真实 turn id，不再拿 session_id 顶替。
+
+    它是 `weighting.evidence_count` 的输入——填 session_id 时永远数出 1，
+    「说过一次」和「每周三次」的区分从来没生效过。
+    """
+    store = _store()
+
+    async def go():
+        await store.append_turn("s1", "user", "我不吃辣", user_id="u1",
+                                occupant_id="primary", turn_id="e1:user",
+                                exchange_id="e1")
+        await store.append_turn("s1", "assistant", "记住了", user_id="u1",
+                                occupant_id="primary", turn_id="e1:assistant:0",
+                                exchange_id="e1")
+        j = _mock(json.dumps([{"category": "explicit_preference", "kind": "semantic",
+                               "predicate": "taste.spicy", "text": "用户不吃辣",
+                               "scope": "profile.taste", "confidence": 0.9}]))
+        await store.consolidate("s1", "u1", complete_fn=j)
+        return await store.recall(user_id="u1", query="")
+
+    items = asyncio.run(go())
+    assert items
+    evidence = items[0][0]["source_turn_ids"]
+    assert "e1:user" in evidence and "e1:assistant:0" in evidence
+    assert "s1" not in evidence.split(",")
+
+
+# ── EVA 二轮 G6/G7：关于谁 / 偏好极性 / 未来事件时刻 ──────────────────────
+def test_extract_subject_polarity_and_event_time():
+    """subject 亲属归一（爸→爸爸、我→空）、polarity 闭集（非法值丢）、
+    event_time 确定性校验（未来 90 天内才入 value_json，过去时间丢字段）。"""
+    from datetime import datetime, timedelta, timezone
+    tz = timezone(timedelta(hours=8))
+    future = (datetime.now(tz) + timedelta(days=3)).strftime("%Y-%m-%dT15:00:00")
+    cands = json.dumps([
+        {"category": "explicit_preference", "kind": "semantic",
+         "predicate": "climate.temperature", "text": "爸爸不喜欢空调太冷",
+         "subject": "爸", "polarity": "dislike", "confidence": 0.9},
+        {"category": "explicit_preference", "kind": "semantic",
+         "predicate": "taste.cuisine", "text": "用户喜欢粤菜",
+         "subject": "我", "polarity": "LOVE", "confidence": 0.9},
+        {"category": "episodic", "kind": "episodic",
+         "text": "女儿周六下午三点钢琴比赛", "subject": "女儿",
+         "event_time": future, "confidence": 0.8},
+        {"category": "episodic", "kind": "episodic",
+         "text": "上周去了西湖", "event_time": "2020-01-01T10:00:00",
+         "confidence": 0.8},
+    ])
+    out = asyncio.run(extract([{"role": "user", "text": "x"}], user_id="u1",
+                              complete_fn=_mock(cands)))
+    by_text = {o["text"]: o for o in out}
+    dad = by_text["爸爸不喜欢空调太冷"]
+    assert dad["subject"] == "爸爸" and dad["polarity"] == "dislike"
+    me = by_text["用户喜欢粤菜"]
+    assert me.get("subject", "") == "" and me.get("polarity", "") == ""
+    piano = by_text["女儿周六下午三点钢琴比赛"]
+    assert piano["subject"] == "女儿"
+    assert json.loads(piano["value_json"])["event_time"] > 0
+    assert "value_json" not in by_text["上周去了西湖"]
+
+
+def test_extract_prompt_carries_date_anchor():
+    """抽取 prompt 必须带日期锚（G7 真栈补验实锤）：event_time 要求 LLM 把
+    「下周五/下个月15号」换算成 ISO 绝对时间，无锚它只能借助手轮的复述或按训练
+    先验猜年——「相对时间词必须有权威基准可换算」（planning.py 日期锚同款判据）。"""
+    from datetime import datetime, timedelta, timezone
+    seen = {}
+
+    async def capture(messages):
+        seen["messages"] = messages
+        return "[]"
+
+    asyncio.run(extract([{"role": "user", "text": "我们下周五要去提车"}],
+                        user_id="u1", complete_fn=capture))
+    user_content = seen["messages"][-1]["content"]
+    now = datetime.now(timezone(timedelta(hours=8)))
+    assert "当前日期：" in user_content
+    assert f"{now.year}年{now.month}月{now.day}日" in user_content
+
+
+def test_consolidate_subject_scopes_conflict_domain():
+    """G6：爸爸的空调偏好不得 supersede 本人的同谓词偏好——冲突域按 subject 收窄。"""
+    store = _store()
+
+    async def go():
+        await store.append_turn("s1", "user", "我最喜欢24度")
+        j1 = _mock(json.dumps([{"category": "explicit_preference", "kind": "semantic",
+                                "predicate": "climate.temperature",
+                                "text": "用户最喜欢的空调温度是24度",
+                                "scope": "profile.comfort", "confidence": 0.9}]))
+        await store.consolidate("s1", "u1", complete_fn=j1)
+        await store.append_turn("s1", "user", "我爸不喜欢空调太冷")
+        j2 = _mock(json.dumps([{"category": "explicit_preference", "kind": "semantic",
+                                "predicate": "climate.temperature",
+                                "text": "爸爸不喜欢空调太冷", "subject": "爸爸",
+                                "polarity": "dislike",
+                                "scope": "profile.comfort", "confidence": 0.9}]))
+        await store.consolidate("s1", "u1", complete_fn=j2)
+        return await store.recall(user_id="u1", query="", scopes=["profile.comfort"])
+
+    current = asyncio.run(go())
+    texts = sorted(it["text"] for it, _ in current)
+    # 两条并存：本人的 24 度没有被爸爸那条 supersede
+    assert texts == ["爸爸不喜欢空调太冷", "用户最喜欢的空调温度是24度"]
+    subj = {it["text"]: it.get("subject", "") for it, _ in current}
+    assert subj["爸爸不喜欢空调太冷"] == "爸爸"
+    assert subj["用户最喜欢的空调温度是24度"] == ""
+
+
+# ── P4（EVA 遗留卡）：散句 relation 确定性抽取 ──
+
+def _llm_noop(messages):
+    async def _inner():
+        return "[]"
+    return _inner()
+
+
+def test_deterministic_place_relation_without_name():
+    """「我老婆平时在深圳湾万象城上班」→ family(老婆→老婆) + works_at(老婆→万象城)。
+    LLM 抽成 semantic 偏好的方差不再是唯一通道（2026-08-15 真栈实测该形态）。"""
+    out = asyncio.run(extract(
+        [{"role": "user", "text": "我老婆平时在深圳湾万象城上班"}],
+        user_id="u1", complete_fn=lambda m: _llm_noop(m)))
+    edges = [o["_relation"] for o in out if "_relation" in o]
+    triples = {(e["subject"], e["rel"], e["object"]) for e in edges}
+    assert ("老婆", "family", "老婆") in triples
+    assert ("老婆", "works_at", "深圳湾万象城") in triples
+
+
+def test_deterministic_named_family_and_school():
+    """「我女儿叫小雨」+「我女儿在南山实验小学上学」→ 具名 family 边 + place_of 边。"""
+    out = asyncio.run(extract(
+        [{"role": "user", "text": "我女儿叫小雨"},
+         {"role": "user", "text": "我女儿在南山实验小学上学"}],
+        user_id="u1", complete_fn=lambda m: _llm_noop(m)))
+    edges = [o["_relation"] for o in out if "_relation" in o]
+    triples = {(e["subject"], e["rel"], e["object"]) for e in edges}
+    assert ("小雨", "family", "女儿") in triples
+    assert ("女儿", "place_of", "南山实验小学") in triples
+
+
+def test_deterministic_relations_survive_llm_failure():
+    """LLM 挂了确定性候选照常返回（旧行为是整体 []）。"""
+    async def boom(messages):
+        raise RuntimeError("llm down")
+    out = asyncio.run(extract(
+        [{"role": "user", "text": "我儿子在市第二实验学校读书"}],
+        user_id="u1", complete_fn=boom))
+    edges = [o["_relation"] for o in out if "_relation" in o]
+    assert any(e["rel"] == "place_of" and e["object"] == "市第二实验学校"
+               for e in edges)
+
+
+def test_assistant_turns_not_sniffed():
+    """只抽用户轮：助手复述「我老婆在X上班」不产边（归属判定不交给转述）。"""
+    out = asyncio.run(extract(
+        [{"role": "assistant", "text": "好的，我老婆平时在深圳湾万象城上班"}],
+        user_id="u1", complete_fn=lambda m: _llm_noop(m)))
+    assert [o for o in out if "_relation" in o] == []
+
+
+def test_llm_duplicate_relation_deduped():
+    """LLM 撞车同一条边 → 只留确定性那份（置信更高）。"""
+    async def llm(messages):
+        return json.dumps([{"category": "relation", "subject": "老婆",
+                            "rel": "works_at", "object": "深圳湾万象城"}])
+    out = asyncio.run(extract(
+        [{"role": "user", "text": "我老婆在深圳湾万象城上班"}],
+        user_id="u1", complete_fn=llm))
+    edges = [o["_relation"] for o in out if "_relation" in o]
+    works = [e for e in edges if e["rel"] == "works_at"]
+    assert len(works) == 1 and works[0]["confidence"] >= 0.9
+
+
+# ── E5（EVA 余项⑤）口味谓词别名归一 ────────────────────────────
+def test_taste_alias_family_normalizes_to_canonical():
+    """真栈实测的散置谓词全部归一到 taste.* —— 这些别名不是想象的，是 u1 库里的行。"""
+    from extract import normalize_predicate
+    for alias in ("beverage.coffee", "coffee.order", "consume.coffee",
+                  "drink.coffee", "food.coffee", "taste.beverage",
+                  "taste.americano_iced"):
+        assert normalize_predicate(alias) == "taste.coffee", alias
+    assert normalize_predicate("food.cuisine") == "taste.cuisine"
+    assert normalize_predicate("cuisine.spicy") == "taste.spicy"
+    for alias in ("order.pickup_method", "purchase.pickup", "food.coffee_pickup"):
+        assert normalize_predicate(alias) == "order.pickup", alias
+
+
+def test_negative_taste_predicates_gain_taste_prefix():
+    """`place.avoid`/`poi.dislike`/`restaurant.no_queue` 的 scope 本就是 profile.taste，
+    但谓词没有 taste. 前缀 → nearby 的 predicate_prefix 召回永远够不着（消费方误伤已兑现）。"""
+    from extract import normalize_predicate
+    assert normalize_predicate("place.avoid") == "taste.dislike_place"
+    assert normalize_predicate("poi.dislike") == "taste.dislike_place"
+    assert normalize_predicate("restaurant.no_queue") == "taste.no_queue"
+
+
+def test_brand_and_taste_are_not_merged_into_one_class():
+    """品牌偏好与口味偏好是两个维度：压成一条会让新口味 supersede 掉品牌偏好。"""
+    from extract import normalize_predicate, predicate_class
+    assert normalize_predicate("coffee.brand") == "taste.coffee_brand"
+    assert "coffee.brand" not in predicate_class("taste.coffee")
+    assert "beverage.coffee" not in predicate_class("taste.coffee_brand")
+
+
+def test_extract_prompt_pins_taste_predicate_namespace():
+    """源头收敛：抽取 prompt 明写口味族一律 taste. 前缀（归一表只治已知别名）。"""
+    from extract import _SYSTEM
+    assert "taste. 开头" in _SYSTEM
+    assert "taste.dislike_place" in _SYSTEM and "taste.no_queue" in _SYSTEM
+
+
+def test_alias_written_by_llm_is_normalized_before_storage():
+    """端到端：LLM 造 `place.avoid` 也落 taste.dislike_place（写入侧归一）。"""
+    cands = json.dumps([
+        {"category": "explicit_preference", "kind": "semantic",
+         "predicate": "place.avoid", "polarity": "dislike",
+         "text": "用户不喜欢三立方(南山创维店)，咖啡太酸",
+         "scope": "profile.taste", "confidence": 0.9}])
+    out = asyncio.run(extract([{"role": "user", "text": "这家咖啡太酸了"}],
+                              user_id="u1", complete_fn=_mock(cands)))
+    assert [o["predicate"] for o in out if o.get("predicate")] == ["taste.dislike_place"]

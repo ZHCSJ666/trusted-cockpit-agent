@@ -1,0 +1,452 @@
+{
+  "status": "answered",
+  "message": "新闻：1. 大众汽车首席执行官：在欧洲开展制造生产的企业必须享受到实实在在的利好。 - 手机新浪网；2. 四部门发文，禁止“速成车”把车主当“小白鼠”！新增51项技术参数，3万公里验证成“硬门槛”，还首次写入维修经济性 - 新浪财经；3. 四部门征求意见！汽车禁止配备全隐藏式门把手 不得采用折叠显示屏 - 东方财富；4. 中汽协发声：严守安全底线，规范创新设计 - 观察者网；5. 大众汽车首席执行官：欧洲需要降低对高价能源进口的依赖。 - 手机新浪网；6. 一边要保护，一边热卖：欧洲经销商为何拥抱中国汽车？ - 观察者网",
+  "before": {
+    "speed": 0,
+    "gear": "P",
+    "windows": {
+      "front_left": 0,
+      "front_right": 0,
+      "rear_left": 0,
+      "rear_right": 0
+    },
+    "temperature": 24,
+    "doors": {
+      "front_left": false,
+      "front_right": false,
+      "rear_left": false,
+      "rear_right": false
+    },
+    "trunk_open": false,
+    "massage": false,
+    "profile": "standard",
+    "source": "simulated",
+    "revision": 0,
+    "navigation_destination": null,
+    "state_age_ms": 0,
+    "sunroof_percent": 0,
+    "lights": {
+      "headlight": false,
+      "ambient": false,
+      "warning": false
+    },
+    "wiper_level": 0,
+    "seats": {
+      "front_left": {
+        "heating": 0,
+        "ventilation": 0,
+        "recline": 90
+      },
+      "front_right": {
+        "heating": 0,
+        "ventilation": 0,
+        "recline": 90
+      }
+    }
+  },
+  "vehicle": {
+    "speed": 0,
+    "gear": "P",
+    "windows": {
+      "front_left": 0,
+      "front_right": 0,
+      "rear_left": 0,
+      "rear_right": 0
+    },
+    "temperature": 24,
+    "doors": {
+      "front_left": false,
+      "front_right": false,
+      "rear_left": false,
+      "rear_right": false
+    },
+    "trunk_open": false,
+    "massage": false,
+    "profile": "standard",
+    "source": "simulated",
+    "revision": 0,
+    "navigation_destination": null,
+    "state_age_ms": 5056,
+    "sunroof_percent": 0,
+    "lights": {
+      "headlight": false,
+      "ambient": false,
+      "warning": false
+    },
+    "wiper_level": 0,
+    "seats": {
+      "front_left": {
+        "heating": 0,
+        "ventilation": 0,
+        "recline": 90
+      },
+      "front_right": {
+        "heating": 0,
+        "ventilation": 0,
+        "recline": 90
+      }
+    }
+  },
+  "calls": [
+    {
+      "tool": "get_news",
+      "args": {
+        "limit": 6,
+        "topic": "汽车"
+      },
+      "status": "answered",
+      "source": "workspace_service"
+    }
+  ],
+  "trace": [
+    {
+      "stage": "input",
+      "status": "ok",
+      "detail": {
+        "text": "最新汽车新闻",
+        "source": "user",
+        "vehicle_source": "simulated"
+      }
+    },
+    {
+      "stage": "planner",
+      "status": "ok",
+      "detail": {
+        "round": 1,
+        "tier": "T1",
+        "model": "moonshotai/Kimi-K3",
+        "usage": {
+          "prompt_tokens": 3342,
+          "completion_tokens": 116,
+          "total_tokens": 3458
+        },
+        "latency_ms": 1960.8
+      }
+    },
+    {
+      "stage": "schema",
+      "status": "ok",
+      "detail": {
+        "tool": "get_news",
+        "step": "s1"
+      }
+    },
+    {
+      "stage": "tool_result",
+      "status": "answered",
+      "detail": {
+        "step": "s1",
+        "tool": "get_news",
+        "message": "新闻：1. 大众汽车首席执行官：在欧洲开展制造生产的企业必须享受到实实在在的利好。 - 手机新浪网；2. 四部门发文，禁止“速成车”把车主当“小白鼠”！新增51项技术参数，3万公里验证成“硬门槛”，还首次写入维修经济性 - 新浪财经；3. 四部门征求意见！汽车禁止配备全隐藏式门把手 不得采用折叠显示屏 - 东方财富；4. 中汽协发声：严守安全底线，规范创新设计 - 观察者网；5. 大众汽车首席执行官：欧洲需要降低对高价能源进口的依赖。 - 手机新浪网；6. 一边要保护，一边热卖：欧洲经销商为何拥抱中国汽车？ - 观察者网"
+      }
+    },
+    {
+      "stage": "planner",
+      "status": "ok",
+      "detail": {
+        "round": 2,
+        "tier": "T2",
+        "model": "moonshotai/Kimi-K3",
+        "usage": {
+          "prompt_tokens": 5764,
+          "completion_tokens": 288,
+          "total_tokens": 6052
+        },
+        "latency_ms": 2306.4
+      }
+    },
+    {
+      "stage": "schema",
+      "status": "ok",
+      "detail": {
+        "tool": "finish",
+        "step": "s2"
+      }
+    },
+    {
+      "stage": "tool_result",
+      "status": "answered",
+      "detail": {
+        "step": "s2",
+        "tool": "finish",
+        "message": ""
+      }
+    },
+    {
+      "stage": "workflow",
+      "status": "stopped",
+      "detail": "需要补槽、确认或出现硬性拒绝时停止后续执行，不自动绕过。"
+    }
+  ],
+  "evidence": [
+    {
+      "title": "大众汽车首席执行官：在欧洲开展制造生产的企业必须享受到实实在在的利好。 - 手机新浪网",
+      "url": "https://news.google.com/rss/articles/CBMiS0FVX3lxTE9ueFBlQUMxY0hveHp0RUFmdUZsUG84RzBqYXBoM2pGd1c3UDhnbk5PSzQ4Z180dTY1bk9yaGh5SHdWNU1NUUpkN1N0Zw?oc=5",
+      "published_at": "Sun, 11 Oct 2026 14:01:52 GMT",
+      "type": "news"
+    },
+    {
+      "title": "四部门发文，禁止“速成车”把车主当“小白鼠”！新增51项技术参数，3万公里验证成“硬门槛”，还首次写入维修经济性 - 新浪财经",
+      "url": "https://news.google.com/rss/articles/CBMieEFVX3lxTE0xSWh3SVhWdVlvbGpMaG5CbHhtTUdyeHhjSVJaaWt5anU2ZGRWSjRnM3BucXQxZThoRkYzYXY1VzExbEJZcE9zaGZrOWJxNDJCOXBFcTZ5dFM5Q3gtVjVYc1pBYnZ4VUhjTVZCVUxqN3ItcHhyMnozbw?oc=5",
+      "published_at": "Sun, 11 Oct 2026 14:13:00 GMT",
+      "type": "news"
+    },
+    {
+      "title": "四部门征求意见！汽车禁止配备全隐藏式门把手 不得采用折叠显示屏 - 东方财富",
+      "url": "https://news.google.com/rss/articles/CBMiYEFVX3lxTE1TU2FUVWNyY0pQbnJuNmFHcGlhMzdTZVFWV1gyYmZuMzluR2VCUk5VZXpQRUdfU3kyTEZfU1hjSmlMZlhXSm1rZDNtaE9XUHRYWkduU0F6RVNHMUcwNTBZTA?oc=5",
+      "published_at": "Sat, 10 Oct 2026 23:28:21 GMT",
+      "type": "news"
+    },
+    {
+      "title": "中汽协发声：严守安全底线，规范创新设计 - 观察者网",
+      "url": "https://news.google.com/rss/articles/CBMiZkFVX3lxTFBjV3ZfaXhUUmtZaFk0Y2kxQ05KTXBZdkQwR1ZBZ1doQUlVZTBoczRhd0hURXROd2RUM0pSRk9BdG9BdF82eVFpSG5BNWd5OXNIN1ZjT0trZVBrV1NKWDVjUFByamhXZw?oc=5",
+      "published_at": "Sun, 11 Oct 2026 05:24:00 GMT",
+      "type": "news"
+    },
+    {
+      "title": "大众汽车首席执行官：欧洲需要降低对高价能源进口的依赖。 - 手机新浪网",
+      "url": "https://news.google.com/rss/articles/CBMiS0FVX3lxTE9ZSEFnMTdXWGI4S3EwamN2a2M2M2ppYjFONllxU3lJc0ZYelotOGVJMEtMa2tSNmZzT1ZZZjIzd3FtNkVhQVpFc1BNOA?oc=5",
+      "published_at": "Sun, 11 Oct 2026 14:02:35 GMT",
+      "type": "news"
+    },
+    {
+      "title": "一边要保护，一边热卖：欧洲经销商为何拥抱中国汽车？ - 观察者网",
+      "url": "https://news.google.com/rss/articles/CBMic0FVX3lxTE44d0o2UzdMVXZ4UGdjNEY4ZWFnNU94Y0FheHR2V3FGd2VrVkp5QzVCcU1abFF4bWpTT1h5MTV6R195VzNpaE42ZTJ4NHlPVkxOSUdDcUx0djQ3aVBCUkNiNDNGeFBmeVpKYjNnVHdWUG5WeTA?oc=5",
+      "published_at": "Sun, 11 Oct 2026 05:35:00 GMT",
+      "type": "news"
+    }
+  ],
+  "steps": [
+    {
+      "id": "s1",
+      "tool": "get_news",
+      "args": {
+        "limit": 6,
+        "topic": "汽车"
+      },
+      "depends_on": [],
+      "status": "answered",
+      "message": "新闻：1. 大众汽车首席执行官：在欧洲开展制造生产的企业必须享受到实实在在的利好。 - 手机新浪网；2. 四部门发文，禁止“速成车”把车主当“小白鼠”！新增51项技术参数，3万公里验证成“硬门槛”，还首次写入维修经济性 - 新浪财经；3. 四部门征求意见！汽车禁止配备全隐藏式门把手 不得采用折叠显示屏 - 东方财富；4. 中汽协发声：严守安全底线，规范创新设计 - 观察者网；5. 大众汽车首席执行官：欧洲需要降低对高价能源进口的依赖。 - 手机新浪网；6. 一边要保护，一边热卖：欧洲经销商为何拥抱中国汽车？ - 观察者网",
+      "data": {
+        "items": [
+          {
+            "title": "大众汽车首席执行官：在欧洲开展制造生产的企业必须享受到实实在在的利好。 - 手机新浪网",
+            "url": "https://news.google.com/rss/articles/CBMiS0FVX3lxTE9ueFBlQUMxY0hveHp0RUFmdUZsUG84RzBqYXBoM2pGd1c3UDhnbk5PSzQ4Z180dTY1bk9yaGh5SHdWNU1NUUpkN1N0Zw?oc=5",
+            "snippet": "大众汽车首席执行官：在欧洲开展制造生产的企业必须享受到实实在在的利好。    手机新浪网",
+            "published_at": "Sun, 11 Oct 2026 14:01:52 GMT",
+            "source": "手机新浪网"
+          },
+          {
+            "title": "四部门发文，禁止“速成车”把车主当“小白鼠”！新增51项技术参数，3万公里验证成“硬门槛”，还首次写入维修经济性 - 新浪财经",
+            "url": "https://news.google.com/rss/articles/CBMieEFVX3lxTE0xSWh3SVhWdVlvbGpMaG5CbHhtTUdyeHhjSVJaaWt5anU2ZGRWSjRnM3BucXQxZThoRkYzYXY1VzExbEJZcE9zaGZrOWJxNDJCOXBFcTZ5dFM5Q3gtVjVYc1pBYnZ4VUhjTVZCVUxqN3ItcHhyMnozbw?oc=5",
+            "snippet": "四部门发文，禁止“速成车”把车主当“小白鼠”！新增51项技术参数，3万公里验证成“硬门槛”，还首次写入维修经济性    新浪财经",
+            "published_at": "Sun, 11 Oct 2026 14:13:00 GMT",
+            "source": "新浪财经"
+          },
+          {
+            "title": "四部门征求意见！汽车禁止配备全隐藏式门把手 不得采用折叠显示屏 - 东方财富",
+            "url": "https://news.google.com/rss/articles/CBMiYEFVX3lxTE1TU2FUVWNyY0pQbnJuNmFHcGlhMzdTZVFWV1gyYmZuMzluR2VCUk5VZXpQRUdfU3kyTEZfU1hjSmlMZlhXSm1rZDNtaE9XUHRYWkduU0F6RVNHMUcwNTBZTA?oc=5",
+            "snippet": "四部门征求意见！汽车禁止配备全隐藏式门把手 不得采用折叠显示屏    东方财富",
+            "published_at": "Sat, 10 Oct 2026 23:28:21 GMT",
+            "source": "东方财富"
+          },
+          {
+            "title": "中汽协发声：严守安全底线，规范创新设计 - 观察者网",
+            "url": "https://news.google.com/rss/articles/CBMiZkFVX3lxTFBjV3ZfaXhUUmtZaFk0Y2kxQ05KTXBZdkQwR1ZBZ1doQUlVZTBoczRhd0hURXROd2RUM0pSRk9BdG9BdF82eVFpSG5BNWd5OXNIN1ZjT0trZVBrV1NKWDVjUFByamhXZw?oc=5",
+            "snippet": "中汽协发声：严守安全底线，规范创新设计    观察者网",
+            "published_at": "Sun, 11 Oct 2026 05:24:00 GMT",
+            "source": "观察者网"
+          },
+          {
+            "title": "大众汽车首席执行官：欧洲需要降低对高价能源进口的依赖。 - 手机新浪网",
+            "url": "https://news.google.com/rss/articles/CBMiS0FVX3lxTE9ZSEFnMTdXWGI4S3EwamN2a2M2M2ppYjFONllxU3lJc0ZYelotOGVJMEtMa2tSNmZzT1ZZZjIzd3FtNkVhQVpFc1BNOA?oc=5",
+            "snippet": "大众汽车首席执行官：欧洲需要降低对高价能源进口的依赖。    手机新浪网",
+            "published_at": "Sun, 11 Oct 2026 14:02:35 GMT",
+            "source": "手机新浪网"
+          },
+          {
+            "title": "一边要保护，一边热卖：欧洲经销商为何拥抱中国汽车？ - 观察者网",
+            "url": "https://news.google.com/rss/articles/CBMic0FVX3lxTE44d0o2UzdMVXZ4UGdjNEY4ZWFnNU94Y0FheHR2V3FGd2VrVkp5QzVCcU1abFF4bWpTT1h5MTV6R195VzNpaE42ZTJ4NHlPVkxOSUdDcUx0djQ3aVBCUkNiNDNGeFBmeVpKYjNnVHdWUG5WeTA?oc=5",
+            "snippet": "一边要保护，一边热卖：欧洲经销商为何拥抱中国汽车？    观察者网",
+            "published_at": "Sun, 11 Oct 2026 05:35:00 GMT",
+            "source": "观察者网"
+          }
+        ],
+        "provider": "Google News RSS",
+        "fetched_at": "2026-10-11T15:51:58.612452+00:00",
+        "content_trust": "external_untrusted"
+      }
+    },
+    {
+      "id": "s2",
+      "tool": "finish",
+      "args": {
+        "message": "以下是最新汽车新闻（来源：Google News RSS，抓取于 2026-10-11）：\n\n1. 四部门发文，禁止\"速成车\"把车主当\"小白鼠\"！新增51项技术参数，3万公里验证成\"硬门槛\"，还首次写入维修经济性 — 新浪财经（10-11 14:13）\n2. 四部门征求意见！汽车禁止配备全隐藏式门把手，不得采用折叠显示屏 — 东方财富（10-10 23:28）\n3. 中汽协发声：严守安全底线，规范创新设计 — 观察者网（10-11 05:24）\n4. 大众汽车首席执行官：在欧洲开展制造生产的企业必须享受到实实在在的利好 — 手机新浪网（10-11 14:01）\n5. 大众汽车首席执行官：欧洲需要降低对高价能源进口的依赖 — 手机新浪网（10-11 14:02）\n6. 一边要保护，一边热卖：欧洲经销商为何拥抱中国汽车？ — 观察者网（10-11 05:35）\n\n需要我展开某条新闻的详情，或换个话题（如新能源、某品牌）再查吗？"
+      },
+      "depends_on": [
+        "s1"
+      ],
+      "status": "answered",
+      "message": "",
+      "data": {}
+    }
+  ],
+  "plan": {
+    "kind": "workflow",
+    "steps": [
+      {
+        "id": "s1",
+        "tool": "get_news",
+        "args": {
+          "limit": 6,
+          "topic": "汽车"
+        },
+        "depends_on": []
+      },
+      {
+        "id": "s2",
+        "tool": "finish",
+        "args": {
+          "message": "以下是最新汽车新闻（来源：Google News RSS，抓取于 2026-10-11）：\n\n1. 四部门发文，禁止\"速成车\"把车主当\"小白鼠\"！新增51项技术参数，3万公里验证成\"硬门槛\"，还首次写入维修经济性 — 新浪财经（10-11 14:13）\n2. 四部门征求意见！汽车禁止配备全隐藏式门把手，不得采用折叠显示屏 — 东方财富（10-10 23:28）\n3. 中汽协发声：严守安全底线，规范创新设计 — 观察者网（10-11 05:24）\n4. 大众汽车首席执行官：在欧洲开展制造生产的企业必须享受到实实在在的利好 — 手机新浪网（10-11 14:01）\n5. 大众汽车首席执行官：欧洲需要降低对高价能源进口的依赖 — 手机新浪网（10-11 14:02）\n6. 一边要保护，一边热卖：欧洲经销商为何拥抱中国汽车？ — 观察者网（10-11 05:35）\n\n需要我展开某条新闻的详情，或换个话题（如新能源、某品牌）再查吗？"
+        },
+        "depends_on": [
+          "s1"
+        ]
+      }
+    ]
+  },
+  "workspace": {
+    "location": {
+      "name": "杭州（演示起点，非设备定位）",
+      "lat": 30.2741,
+      "lon": 120.1551,
+      "simulated": true
+    },
+    "places": [],
+    "candidate_sets": [],
+    "candidates": [],
+    "route": null,
+    "last_route": null,
+    "preferences": [],
+    "reminders": [],
+    "documents": [
+      {
+        "id": "c436eb074c87967eea31",
+        "filename": "Volvo_EC40_2026_UK_en.pdf",
+        "vehicle": "Volvo EC40 2026 UK",
+        "title": "EC40 2026 (25w46) User Manual",
+        "pages": 433,
+        "chunks": 904,
+        "sha256": "1fcca03a413beb0242dd5282a5f645b2b1b5a313610e620e46ec6c28ac4a0939",
+        "source_url": "https://www.volvocars.com/static/support-content/pdfs/uk_en-GB_ec40_2026_UM_8bbd937f411a2582b90516ef58b938ae.pdf",
+        "imported_at": "2026-10-11T15:49:42.429279+00:00"
+      },
+      {
+        "id": "3b407e395d33a4854076",
+        "filename": "Volvo_EC40_2026_US_en.pdf",
+        "vehicle": "Volvo EC40 2026 US",
+        "title": "EC40 2026 (25w17) User Manual",
+        "pages": 421,
+        "chunks": 888,
+        "sha256": "15bb5257af9ff6c032b13a5ad0fc3539b038df60aaabb953bf7068faadffa0f4",
+        "source_url": "https://www.volvocars.com/static/support/pdf/us_en-US_ec40_2026_UM_d2f062b9377f3b650b74c5c6841da8fc.pdf",
+        "imported_at": "2026-10-11T15:49:43.189159+00:00"
+      },
+      {
+        "id": "7c2ddc00d72f4d09ded8",
+        "filename": "Tesla_Model3_2024plus_US_en.pdf",
+        "vehicle": "Tesla Model 3 2024+ US",
+        "title": "Model 3 2024+ Owner’s Manual",
+        "pages": 328,
+        "chunks": 1002,
+        "sha256": "0b211f472b0089fd0fc82e09fe64513bdbddb60649371d4ad9249145bf0d539d",
+        "source_url": "https://www.tesla.com/ownersmanual/model3/en_us/Owners_Manual.pdf",
+        "imported_at": "2026-10-11T15:49:43.827304+00:00"
+      }
+    ],
+    "last_weather": null,
+    "last_news": {
+      "items": [
+        {
+          "title": "大众汽车首席执行官：在欧洲开展制造生产的企业必须享受到实实在在的利好。 - 手机新浪网",
+          "url": "https://news.google.com/rss/articles/CBMiS0FVX3lxTE9ueFBlQUMxY0hveHp0RUFmdUZsUG84RzBqYXBoM2pGd1c3UDhnbk5PSzQ4Z180dTY1bk9yaGh5SHdWNU1NUUpkN1N0Zw?oc=5",
+          "snippet": "大众汽车首席执行官：在欧洲开展制造生产的企业必须享受到实实在在的利好。    手机新浪网",
+          "published_at": "Sun, 11 Oct 2026 14:01:52 GMT",
+          "source": "手机新浪网"
+        },
+        {
+          "title": "四部门发文，禁止“速成车”把车主当“小白鼠”！新增51项技术参数，3万公里验证成“硬门槛”，还首次写入维修经济性 - 新浪财经",
+          "url": "https://news.google.com/rss/articles/CBMieEFVX3lxTE0xSWh3SVhWdVlvbGpMaG5CbHhtTUdyeHhjSVJaaWt5anU2ZGRWSjRnM3BucXQxZThoRkYzYXY1VzExbEJZcE9zaGZrOWJxNDJCOXBFcTZ5dFM5Q3gtVjVYc1pBYnZ4VUhjTVZCVUxqN3ItcHhyMnozbw?oc=5",
+          "snippet": "四部门发文，禁止“速成车”把车主当“小白鼠”！新增51项技术参数，3万公里验证成“硬门槛”，还首次写入维修经济性    新浪财经",
+          "published_at": "Sun, 11 Oct 2026 14:13:00 GMT",
+          "source": "新浪财经"
+        },
+        {
+          "title": "四部门征求意见！汽车禁止配备全隐藏式门把手 不得采用折叠显示屏 - 东方财富",
+          "url": "https://news.google.com/rss/articles/CBMiYEFVX3lxTE1TU2FUVWNyY0pQbnJuNmFHcGlhMzdTZVFWV1gyYmZuMzluR2VCUk5VZXpQRUdfU3kyTEZfU1hjSmlMZlhXSm1rZDNtaE9XUHRYWkduU0F6RVNHMUcwNTBZTA?oc=5",
+          "snippet": "四部门征求意见！汽车禁止配备全隐藏式门把手 不得采用折叠显示屏    东方财富",
+          "published_at": "Sat, 10 Oct 2026 23:28:21 GMT",
+          "source": "东方财富"
+        },
+        {
+          "title": "中汽协发声：严守安全底线，规范创新设计 - 观察者网",
+          "url": "https://news.google.com/rss/articles/CBMiZkFVX3lxTFBjV3ZfaXhUUmtZaFk0Y2kxQ05KTXBZdkQwR1ZBZ1doQUlVZTBoczRhd0hURXROd2RUM0pSRk9BdG9BdF82eVFpSG5BNWd5OXNIN1ZjT0trZVBrV1NKWDVjUFByamhXZw?oc=5",
+          "snippet": "中汽协发声：严守安全底线，规范创新设计    观察者网",
+          "published_at": "Sun, 11 Oct 2026 05:24:00 GMT",
+          "source": "观察者网"
+        },
+        {
+          "title": "大众汽车首席执行官：欧洲需要降低对高价能源进口的依赖。 - 手机新浪网",
+          "url": "https://news.google.com/rss/articles/CBMiS0FVX3lxTE9ZSEFnMTdXWGI4S3EwamN2a2M2M2ppYjFONllxU3lJc0ZYelotOGVJMEtMa2tSNmZzT1ZZZjIzd3FtNkVhQVpFc1BNOA?oc=5",
+          "snippet": "大众汽车首席执行官：欧洲需要降低对高价能源进口的依赖。    手机新浪网",
+          "published_at": "Sun, 11 Oct 2026 14:02:35 GMT",
+          "source": "手机新浪网"
+        },
+        {
+          "title": "一边要保护，一边热卖：欧洲经销商为何拥抱中国汽车？ - 观察者网",
+          "url": "https://news.google.com/rss/articles/CBMic0FVX3lxTE44d0o2UzdMVXZ4UGdjNEY4ZWFnNU94Y0FheHR2V3FGd2VrVkp5QzVCcU1abFF4bWpTT1h5MTV6R195VzNpaE42ZTJ4NHlPVkxOSUdDcUx0djQ3aVBCUkNiNDNGeFBmeVpKYjNnVHdWUG5WeTA?oc=5",
+          "snippet": "一边要保护，一边热卖：欧洲经销商为何拥抱中国汽车？    观察者网",
+          "published_at": "Sun, 11 Oct 2026 05:35:00 GMT",
+          "source": "观察者网"
+        }
+      ],
+      "provider": "Google News RSS",
+      "fetched_at": "2026-10-11T15:51:58.612452+00:00",
+      "content_trust": "external_untrusted"
+    },
+    "last_search": null,
+    "last_manual": null,
+    "providers": {
+      "places": "Photon / OpenStreetMap Overpass",
+      "routes": "OSRM / OpenStreetMap",
+      "weather": "Open-Meteo",
+      "news": "Google News RSS",
+      "search": "Bing RSS",
+      "memory": "local SQLite",
+      "manual": "local PDF + lexical retrieval"
+    }
+  },
+  "source": "simulated",
+  "provider": "kimi",
+  "mode": "guarded",
+  "elapsed_ms": 5055.9,
+  "orchestration": {
+    "tier": "T2",
+    "rounds": 2,
+    "tool_count": 2,
+    "max_tools": 8,
+    "max_rounds": 4,
+    "request_id": "workspace-1791733915864226880"
+  },
+  "model": {
+    "model": "moonshotai/Kimi-K3",
+    "usage": {
+      "prompt_tokens": 5764,
+      "completion_tokens": 288,
+      "total_tokens": 6052
+    },
+    "latency_ms": 2306.4
+  },
+  "session_id": "qa_news",
+  "channel": "workspace"
+}

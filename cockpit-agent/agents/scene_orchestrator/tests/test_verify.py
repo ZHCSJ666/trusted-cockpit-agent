@@ -1,0 +1,276 @@
+"""Verify-Repair 后台对账单测。
+
+要害是**代际护栏 + 单飞**（v2.1 修正③）：SCENE_ACTIVE 是单槽、Verify 是几秒后的异步任务，
+旧 task 醒来时场景可能已被新激活覆盖或已退出——直接读单槽会给新场景错账、对已退出的场景假警。
+"""
+import asyncio
+import os
+import sys
+
+import pytest
+
+_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+from agents.scene_orchestrator.src.verify import VerifyManager
+
+_IDS = ("s1", "u1", "v1")
+
+
+class FakeMirror:
+    def __init__(self, state=None):
+        self._state = state or {}
+
+    def snapshot(self, vehicle_id="v1"):
+        assert vehicle_id == "v1"
+        return dict(self._state)
+
+
+class Bus:
+    """收 proactive 消息 + 冒充 SCENE_ACTIVE 单槽。"""
+
+    def __init__(self, active=None):
+        self.sent: list[dict] = []
+        self.active = active or {}
+
+    async def publish(self, payload):
+        self.sent.append(payload)
+
+    async def load(self, ids):
+        return dict(self.active)
+
+    async def save(self, ids, v):
+        self.active = dict(v)
+
+
+def _mgr(mirror, bus, wait=0.01):
+    return VerifyManager(mirror, bus.publish, bus.load, bus.save, wait_s=wait)
+
+
+def _act(cmd, params=None, **kw):
+    a = {"type": "vehicle.control", "command": cmd, "params": params or {}}
+    a.update(kw)
+    return a
+
+
+async def _settle():
+    for _ in range(20):
+        await asyncio.sleep(0.01)
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+def test_cancelling_one_car_does_not_cancel_same_users_other_car():
+    async def go():
+        class ScopedMirror:
+            def snapshot(self, vehicle_id):
+                assert vehicle_id=="v2"
+                return {"hvac_temp":24}
+        bus=Bus({"activation_id":"g1"})
+        manager=_mgr(ScopedMirror(),bus)
+        for vehicle in ("v1","v2"):
+            manager.schedule(("session","u1",vehicle),"场景","g1",[_act("hvac.set",{"temperature":"22"})])
+        manager.cancel("u1","v1")
+        await _settle()
+        assert len(bus.sent)==1 and bus.sent[0]["vehicle_id"]=="v2"
+    _run(go())
+
+
+# ── 对账 ────────────────────────────────────────────────────────────────────
+
+def test_all_satisfied_stays_silent():
+    """全达成 → 不打扰（HMI 已有执行反馈）。"""
+    async def go():
+        bus = Bus({"activation_id": "g1"})
+        m = _mgr(FakeMirror({"hvac_temp": 22}), bus)
+        m.schedule(_IDS, "钓鱼模式", "g1", [_act("hvac.set", {"temperature": "22"})])
+        await _settle()
+        return bus.sent
+    assert _run(go()) == []
+
+
+def test_unmet_action_reported_honestly():
+    """被 VAL 安全门控拒掉的动作必须诚实汇报——这正是「失败对用户静默」的对症解。"""
+    async def go():
+        bus = Bus({"activation_id": "g1"})
+        m = _mgr(FakeMirror({"seat_recline": 90, "hvac_temp": 22}), bus)
+        m.schedule(_IDS, "午休模式", "g1",
+                   [_act("seat.recline", {"angle": "160"}),
+                    _act("hvac.set", {"temperature": "22"})])
+        await _settle()
+        return bus.sent
+    sent = _run(go())
+    assert len(sent) == 1
+    assert sent[0]["type"] == "scene_verify"
+    assert "座椅" in sent[0]["speech"] and "没有生效" in sent[0]["speech"]
+    assert "行车" not in sent[0]["speech"], "别猜原因——可能是低电量/儿童锁"
+    assert sent[0]["card"]["type"] == "scene_card"
+    assert sent[0]["priority"] == "user_contract"
+    assert sent[0]["dedup_key"] == "scene.verify|u1|g1"
+
+
+def test_each_activation_has_an_owner_scoped_dedup_key():
+    """去重粒度是激活实例，不是全局消息类型。
+
+    缺省键 ``scene-orchestrator|scene_verify`` 会让任一用户一次对账把随后 10 分钟内所有
+    用户的新激活汇报静默吞掉；canonical 连跑同样会被上次运行的 governor 状态污染。
+    """
+    async def go(ids, activation_id):
+        bus = Bus({"activation_id": activation_id})
+        m = _mgr(FakeMirror({"seat_recline": 90}), bus)
+        m.schedule(ids, "午休模式", activation_id,
+                   [_act("seat.recline", {"angle": "160"})])
+        await _settle()
+        return bus.sent[0]
+
+    first = _run(go(("s1", "u1", "v1"), "g1"))
+    second = _run(go(("s2", "u2", "v1"), "g2"))
+
+    assert first["dedup_key"] != second["dedup_key"]
+    assert first["dedup_key"] == "scene.verify|u1|g1"
+    assert second["dedup_key"] == "scene.verify|u2|g2"
+
+
+def test_report_is_merged_not_spammed():
+    """每次激活至多一条汇报，不逐条轰炸。"""
+    async def go():
+        bus = Bus({"activation_id": "g1"})
+        m = _mgr(FakeMirror({"seat_recline": 90, "hvac_temp": 30, "volume": 50}), bus)
+        m.schedule(_IDS, "午休模式", "g1",
+                   [_act("seat.recline", {"angle": "160"}),
+                    _act("hvac.set", {"temperature": "22"}),
+                    _act("volume.set", {"level": "0"})])
+        await _settle()
+        return bus.sent
+    sent = _run(go())
+    assert len(sent) == 1 and len(sent[0]["card"]["actions_preview"]) == 3
+
+
+def test_empty_mirror_is_silent():
+    """镜像没数据 = 无法验证（≠ 失败）→ 静默。fail-open 铁律，绝不假警。"""
+    async def go():
+        bus = Bus({"activation_id": "g1"})
+        m = _mgr(FakeMirror({}), bus)
+        m.schedule(_IDS, "午休模式", "g1", [_act("seat.recline", {"angle": "160"})])
+        await _settle()
+        return bus.sent
+    assert _run(go()) == []
+
+
+def test_no_checkable_action_no_task():
+    """一条可对账的动作都没有 → 干脆不起 task。"""
+    async def go():
+        bus = Bus({"activation_id": "g1"})
+        m = _mgr(FakeMirror({"x": 1}), bus)
+        m.schedule(_IDS, "空场景", "g1", [{"type": "navigate", "payload": {"destination": "家"}}])
+        assert not m._tasks
+        await _settle()
+        return bus.sent
+    assert _run(go()) == []
+
+
+# ── 代际护栏 + 单飞（v2.1 修正③）───────────────────────────────────────────
+
+def test_stale_generation_is_dropped():
+    """旧 task 醒来发现单槽已是新场景 → 静默放弃（否则会拿旧清单给新场景错账）。"""
+    async def go():
+        bus = Bus({"activation_id": "g2"})            # 单槽已被新激活覆盖
+        m = _mgr(FakeMirror({"seat_recline": 90}), bus)
+        m.schedule(_IDS, "午休模式", "g1", [_act("seat.recline", {"angle": "160"})])
+        await _settle()
+        return bus.sent
+    assert _run(go()) == [], "代际不匹配必须静默放弃"
+
+
+def test_deactivate_cancels_inflight_verify():
+    """退出场景 → 掐掉在飞对账，不给已退出的场景发假警。"""
+    async def go():
+        bus = Bus({"activation_id": "g1"})
+        m = _mgr(FakeMirror({"seat_recline": 90}), bus, wait=0.05)
+        m.schedule(_IDS, "午休模式", "g1", [_act("seat.recline", {"angle": "160"})])
+        m.cancel("u1")
+        await _settle()
+        return bus.sent
+    assert _run(go()) == []
+
+
+def test_new_activation_cancels_old_task():
+    """同 user 新激活先 cancel 旧 task（单飞，与代际校验双保险）。"""
+    async def go():
+        bus = Bus({"activation_id": "g2"})
+        m = _mgr(FakeMirror({"seat_recline": 90, "volume": 50}), bus, wait=0.05)
+        m.schedule(_IDS, "午休模式", "g1", [_act("seat.recline", {"angle": "160"})])
+        m.schedule(_IDS, "钓鱼模式", "g2", [_act("volume.set", {"level": "0"})])
+        await _settle()
+        return bus.sent
+    sent = _run(go())
+    assert len(sent) == 1 and "钓鱼模式" in sent[0]["speech"]
+
+
+# ── on_fail 三路处置 ────────────────────────────────────────────────────────
+
+def test_retry_suggest_offers_button():
+    async def go():
+        bus = Bus({"activation_id": "g1"})
+        m = _mgr(FakeMirror({"seat_recline": 90}), bus)
+        m.schedule(_IDS, "午休模式", "g1",
+                   [_act("seat.recline", {"angle": "160"}, on_fail="retry_suggest")])
+        await _settle()
+        return bus.sent
+    sent = _run(go())
+    btns = sent[0]["card"]["buttons"]
+    assert btns and btns[0]["send_text"] == "开启午休模式"      # 回发原话走正常语音链路
+    assert "再试一次" in sent[0]["speech"]
+
+
+def test_defer_p_writes_deferred_queue():
+    """defer_p → 挂驻车补做队列（P3 消费）；写前再校验代际。"""
+    async def go():
+        bus = Bus({"activation_id": "g1", "deferred": []})
+        m = _mgr(FakeMirror({"seat_recline": 90}), bus)
+        m.schedule(_IDS, "午休模式", "g1",
+                   [_act("seat.recline", {"angle": "160"}, on_fail="defer_p")])
+        await _settle()
+        return bus
+    bus = _run(go())
+    assert len(bus.active["deferred"]) == 1
+    assert bus.active["deferred"][0]["command"] == "seat.recline"
+    assert "停好车" in bus.sent[0]["speech"]
+
+
+def test_defer_p_not_written_on_stale_generation():
+    """等待期间用户退出/换了场景 → deferred 不能写进去（脏数据）。"""
+    async def go():
+        bus = Bus({"activation_id": "g1", "deferred": []})
+        m = _mgr(FakeMirror({"seat_recline": 90}), bus)
+        m.schedule(_IDS, "午休模式", "g1",
+                   [_act("seat.recline", {"angle": "160"}, on_fail="defer_p")])
+        await asyncio.sleep(0.005)
+        bus.active = {"activation_id": "g9", "deferred": []}     # 代际变了
+        await _settle()
+        return bus
+    bus = _run(go())
+    assert bus.active["deferred"] == []
+    assert bus.sent == [], "代际不匹配连汇报都不该发"
+
+
+def test_composite_assert_report_does_not_crash():
+    """复合断言（derive_assert 对 ambient_light 返回条件数组）的未达成汇报不许炸——
+    2026-07-14 评审修复：排查明细日志对 list 调 .get 会 AttributeError，虽然 proactive
+    已先发出，但整段 info 明细（排查靠它）被吞成一条 warning。"""
+    async def go():
+        bus = Bus({"activation_id": "g1"})
+        # 灯关着（ambient_light=False）→ 复合断言 [灯开, 亮度10] 确凿未达成
+        m = _mgr(FakeMirror({"ambient_light": False, "ambient_light_brightness": 10}), bus)
+        m.schedule(_IDS, "钓鱼模式", "g1",
+                   [_act("ambient_light.set", {"brightness": "10"})])
+        await _settle()
+        return bus.sent
+    sent = _run(go())
+    assert len(sent) == 1 and sent[0]["type"] == "scene_verify"
+    assert "没有生效" in sent[0]["speech"]
+    assert "安全限制" not in sent[0]["speech"], \
+        "不猜原因——未达成也可能是 VAL 接受了但状态没落地（氛围灯亮度那类静默失败）"

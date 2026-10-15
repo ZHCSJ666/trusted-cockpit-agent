@@ -1,0 +1,210 @@
+"""eval_common.py 自身回归测试（T3.4）——合成数据，不跑真实 fast_intent/route_hints。
+
+保护 build_report/diff_against_baseline 这层报告基础设施未来被重构时不悄悄改坏 diff 逻辑。
+"""
+import sys
+from pathlib import Path
+
+# test/ 无 __init__.py，CI 用 --import-mode=importlib 不会自动把本文件所在目录加入
+# sys.path；同目录兄弟模块导入需显式插入（同 e2e_degrade.py 等既有惯例）。
+sys.path.insert(0, str(Path(__file__).parent))
+from eval_common import (  # noqa: E402
+    CaseResult, build_report, diff_against_baseline, load_baseline,
+    print_ci_annotations,
+)
+
+
+def _case(id_, bucket, passed, actual="x", expected="x"):
+    return CaseResult(id=id_, bucket=bucket, text=id_, expected=expected, actual=actual, passed=passed)
+
+
+def test_build_report_aggregates_buckets_and_overall():
+    cases = [
+        _case("a::1", "a", True),
+        _case("a::2", "a", False, actual="y"),
+        _case("b::1", "b", True),
+    ]
+    report = build_report("demo", [{"path": "x.yaml", "count": 3}], cases)
+    assert report["buckets"]["a"]["total"] == 2
+    assert report["buckets"]["a"]["passed"] == 1
+    assert report["buckets"]["a"]["pass_rate"] == 0.5
+    assert report["buckets"]["b"]["pass_rate"] == 1.0
+    assert report["overall"]["total"] == 3
+    assert report["overall"]["passed"] == 2
+    assert set(report["cases"]) == {"a::1", "a::2", "b::1"}
+
+
+def test_build_report_empty_cases_no_division_by_zero():
+    report = build_report("demo", [], [])
+    assert report["overall"]["total"] == 0
+    assert report["overall"]["pass_rate"] == 0.0
+
+
+def test_diff_against_baseline_detects_regression():
+    baseline = build_report("demo", [], [_case("a::1", "a", True)])
+    current = build_report("demo", [], [_case("a::1", "a", False, actual="broken")])
+    diff = diff_against_baseline(current, baseline)
+    assert diff.has_regressions is True
+    assert diff.regressions[0][0] == "a::1"
+    assert diff.regressions[0][2]["actual"] == "broken"
+
+
+def test_diff_against_baseline_detects_improvement_not_regression():
+    baseline = build_report("demo", [], [_case("a::1", "a", False)])
+    current = build_report("demo", [], [_case("a::1", "a", True)])
+    diff = diff_against_baseline(current, baseline)
+    assert diff.has_regressions is False
+    assert diff.improvements[0][0] == "a::1"
+
+
+def test_diff_against_baseline_stable_pass_is_neither():
+    baseline = build_report("demo", [], [_case("a::1", "a", True)])
+    current = build_report("demo", [], [_case("a::1", "a", True)])
+    diff = diff_against_baseline(current, baseline)
+    assert diff.has_regressions is False
+    assert diff.regressions == []
+    assert diff.improvements == []
+
+
+def test_diff_against_baseline_tracks_new_and_removed_cases():
+    baseline = build_report("demo", [], [_case("a::1", "a", True)])
+    current = build_report("demo", [], [_case("a::2", "a", True)])
+    diff = diff_against_baseline(current, baseline)
+    assert diff.new_cases == ["a::2"]
+    assert diff.removed_cases == ["a::1"]
+    assert diff.has_regressions is False  # 新增/移除用例不算回归
+
+
+def test_removed_cases_are_announced_so_deleting_a_red_case_leaves_a_trace(capsys):
+    """删掉一条红用例和把它修绿，在 CI 输出里必须长得不一样。
+
+    `removed_cases` 一直算着但从来不打，于是「警告没了」既可能是修好了、也可能是
+    用例被删了 —— 账就这样消失。删除同样只警告不阻塞：合法退役与偷偷删红都要被看见。
+    """
+    baseline = build_report("demo", [], [_case("a::1", "a", False), _case("a::2", "a", True)])
+    current = build_report("demo", [], [_case("a::2", "a", True)])
+    diff = diff_against_baseline(current, baseline)
+    print_ci_annotations("demo", diff, Path("baseline.json"))
+    out = capsys.readouterr().out
+    assert "1 case(s) removed vs baseline" in out and "'a::1'" in out
+    assert "无回归" in out          # 删除不冒充回归
+    assert diff.has_regressions is False   # 也不改 exit code
+
+
+def test_no_removal_no_noise(capsys):
+    """没有删除时一个字都不多打——给无事发生的跑批添噪声会让警告贬值。"""
+    baseline = build_report("demo", [], [_case("a::1", "a", True)])
+    current = build_report("demo", [], [_case("a::1", "a", True)])
+    print_ci_annotations("demo", diff_against_baseline(current, baseline), Path("b.json"))
+    assert "removed vs baseline" not in capsys.readouterr().out
+
+
+def test_load_baseline_missing_file_returns_none(tmp_path: Path):
+    assert load_baseline(tmp_path / "does_not_exist.json") is None
+
+
+# ── ProviderLock（多模型运行时硬化 D8）──────────────────────────────────────
+
+from eval_common import ProviderLock  # noqa: E402
+
+
+def test_provider_lock_pin_explicit_success():
+    lock = ProviderLock("http://x", want="mimo")
+    seq = [{"active": {"provider": "deepseek", "model": "deep-model"}},  # GET 原 active
+           {"active": {"provider": "mimo", "model": "m1"}},              # POST 返回
+           {"active": {"provider": "mimo", "model": "m1"}}]              # GET 复核
+    lock._http = lambda m, p, payload=None: seq.pop(0)
+    assert lock.pin() == "mimo:m1"
+    assert lock.locked and lock.available
+    assert lock.original == "deepseek:deep-model"
+
+
+def test_provider_lock_refuses_to_pin_when_the_original_is_unreadable():
+    lock = ProviderLock("http://x", want="mimo")
+    lock._http = lambda m, p, payload=None: (
+        None if m == "GET" else {"active": {"provider": "mimo", "model": "m1"}})
+    try:
+        lock.pin()
+        raise AssertionError("读不到原 active 时必须拒绝 pin")
+    except RuntimeError:
+        pass
+
+
+def test_provider_lock_restores_original_provider_and_model(monkeypatch):
+    active = {"provider": "deepseek", "model": "deep-model"}
+    lock = ProviderLock("http://llm", want="mimo", model="mimo-model")
+
+    def fake_http(method, _path, payload=None):
+        if method == "POST":
+            active.update(payload or {})
+        return {"active": dict(active)}
+
+    monkeypatch.setattr(lock, "_http", fake_http)
+    assert lock.pin() == "mimo:mimo-model"
+    assert lock.restore() == "deepseek:deep-model"
+    assert active == {"provider": "deepseek", "model": "deep-model"}
+    assert lock.restore() == "deepseek:deep-model"      # 幂等
+
+
+def test_provider_restore_does_not_clobber_external_change(monkeypatch):
+    active = {"provider": "deepseek", "model": "deep-model"}
+    posts = []
+    lock = ProviderLock("http://llm", want="mimo", model="mimo-model")
+
+    def fake_http(method, _path, payload=None):
+        if method == "POST":
+            posts.append(dict(payload or {}))
+            active.update(payload or {})
+        return {"active": dict(active)}
+
+    monkeypatch.setattr(lock, "_http", fake_http)
+    lock.pin()
+    active.update(provider="minimax", model="user-model")
+    assert lock.restore() == "minimax:user-model"
+    assert posts == [{"provider": "mimo", "model": "mimo-model"}]
+    assert lock.summary()["restore"] == "skipped_external_change"
+
+
+def test_provider_lock_without_explicit_want_never_posts_on_restore():
+    lock = ProviderLock("http://x")
+    lock._http = lambda m, p, payload=None: {
+        "active": {"provider": "mimo", "model": "a"}}
+    lock.pin()
+    assert lock.restore() == "mimo:a"
+    assert lock.summary()["restore"] == "noop"
+
+
+def test_provider_lock_pin_explicit_gateway_down_raises():
+    lock = ProviderLock("http://x", want="mimo")
+    lock._http = lambda m, p, payload=None: None
+    try:
+        lock.pin()
+        raise AssertionError("显式 pin 网关不可达应当抛 RuntimeError")
+    except RuntimeError:
+        pass
+
+
+def test_provider_lock_baseline_mode_gateway_down_degrades():
+    lock = ProviderLock("http://x")
+    lock._http = lambda m, p, payload=None: None
+    assert lock.pin() == "unknown"
+    assert lock.available is False
+    lock.check("case-1")   # no-op，不炸
+    s = lock.summary()
+    assert s["drift_detected"] is False and s["locked"] is False
+
+
+def test_provider_lock_detects_drift_and_continues():
+    lock = ProviderLock("http://x")
+    seq = [{"active": {"provider": "mimo", "model": "a"}},      # pin 基线
+           {"active": {"provider": "mimo", "model": "a"}},      # check j1 无漂移
+           {"active": {"provider": "minimax", "model": "b"}},   # check j2 漂移
+           {"active": {"provider": "minimax", "model": "b"}}]   # check j3 以新基线续测
+    lock._http = lambda m, p, payload=None: seq.pop(0)
+    lock.pin()
+    lock.check("j1")
+    lock.check("j2")
+    lock.check("j3")
+    s = lock.summary()
+    assert s["drift_detected"] is True
+    assert s["drifts"] == [{"at": "j2", "from": "mimo:a", "to": "minimax:b"}]

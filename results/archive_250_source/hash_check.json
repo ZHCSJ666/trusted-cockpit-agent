@@ -1,0 +1,9 @@
+{
+  "cockpit-agent/interview/engine.py": true,
+  "cockpit-agent/interview/service.py": true,
+  "cockpit-agent/interview/rag.py": true,
+  "cockpit-agent/interview/llm.py": true,
+  "cockpit-agent/interview/data/manual.json": true,
+  "tests/cases.json": true,
+  "evaluate.py": true
+}
